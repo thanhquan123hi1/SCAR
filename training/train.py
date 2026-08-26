@@ -184,6 +184,8 @@ def main() -> None:
         device=device,
         run_dir=run_dir,
         config=config,
+        num_classes=num_classes,
+        view=view,
     )
 
     logger.info("Starting training run '%s' for %d epochs...", args.run_id, epochs)

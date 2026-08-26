@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
 from torch.optim import Optimizer
@@ -57,7 +58,7 @@ class EarlyStopping:
         return self.early_stop
 
 
-class LgeTrainer:
+class Trainer:
     """Multi-view LGE Segmentation Trainer."""
 
     def __init__(
@@ -68,19 +69,52 @@ class LgeTrainer:
         loss_fn: nn.Module,
         scheduler: _LRScheduler | None = None,
         device: torch.device,
-        num_classes: int,
-        checkpoint_dir: Path,
-        view: str = "SAX",
+        num_classes: int | None = None,
+        checkpoint_dir: Path | str | None = None,
+        run_dir: Path | str | None = None,
+        config: dict | None = None,
+        view: str | None = None,
     ) -> None:
         self.model = model
         self.optimizer = optimizer
         self.loss_fn = loss_fn
         self.scheduler = scheduler
         self.device = device
-        self.num_classes = num_classes
-        self.checkpoint_dir = Path(checkpoint_dir)
+        self.config = config or {}
+
+        # Resolve num_classes
+        if num_classes is not None:
+            self.num_classes = int(num_classes)
+        elif "num_classes" in self.config:
+            self.num_classes = int(self.config["num_classes"])
+        else:
+            self.num_classes = 5
+
+        # Resolve view
+        if view is not None:
+            self.view = str(view).upper()
+        elif "view" in self.config:
+            self.view = str(self.config["view"]).upper()
+        else:
+            self.view = "SAX"
+
+        # Resolve run_dir & checkpoint_dir & logs_dir
+        if run_dir is not None:
+            self.run_dir = Path(run_dir)
+        elif checkpoint_dir is not None:
+            self.run_dir = Path(checkpoint_dir).parent
+        else:
+            self.run_dir = Path("outputs/runs")
+
+        if checkpoint_dir is not None:
+            self.checkpoint_dir = Path(checkpoint_dir)
+        else:
+            self.checkpoint_dir = self.run_dir / "checkpoints"
+
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
-        self.view = view
+        self.logs_dir = self.run_dir / "logs"
+        self.logs_dir.mkdir(parents=True, exist_ok=True)
+
         self.history: list[dict[str, Any]] = []
 
     def _train_epoch(self, dataloader: DataLoader) -> float:
@@ -154,6 +188,25 @@ class LgeTrainer:
             },
             path,
         )
+
+    def _save_history(self) -> None:
+        """Save history to JSON and CSV in both run_dir and run_dir/logs."""
+        try:
+            # 1. Save to run_dir / logs / training_history.json
+            log_json = self.logs_dir / "training_history.json"
+            log_json.write_text(json.dumps(self.history, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
+
+            # 2. Save to run_dir / training_history.json
+            root_json = self.run_dir / "training_history.json"
+            root_json.write_text(json.dumps(self.history, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
+
+            # 3. Save CSV version
+            if self.history:
+                df = pd.DataFrame(self.history)
+                df.to_csv(self.logs_dir / "training_history.csv", index=False)
+                df.to_csv(self.run_dir / "training_history.csv", index=False)
+        except Exception as e:
+            logger.warning("Could not save training history: %s", e)
 
     def fit(
         self,
@@ -234,10 +287,22 @@ class LgeTrainer:
             if not (self.checkpoint_dir / "best.pt").exists():
                 self.save_checkpoint("best", epoch, val_loss, val_metrics)
 
+            # 6. If view has scar, ensure best_scar_dice.pt is initialized
+            if self.view in ("SAX", "2CH", "4CH") and not (self.checkpoint_dir / "best_scar_dice.pt").exists():
+                self.save_checkpoint("best_scar_dice", epoch, val_loss, val_metrics)
+
+            # Save training history per epoch
+            self._save_history()
+
             if stopper is not None:
                 eval_val = val_loss if monitor_metric == "val_loss" else val_metrics.get(monitor_metric, float("nan"))
                 if stopper.step(eval_val):
                     logger.info("Early stopping triggered at epoch %d.", epoch)
                     break
 
+        self._save_history()
         return self.history
+
+
+# Alias for backwards compatibility
+LgeTrainer = Trainer
