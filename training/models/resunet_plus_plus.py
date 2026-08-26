@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from training.models.modules import (
     ASPP,
@@ -85,18 +86,25 @@ class ResUNetPlusPlusDecoder(nn.Module):
         # Decoder Stage 1: bridge(x5) upsampled + attended skip(x3)
         d1 = self.upsample1(x5)                    # (B, F4, H/4, W/4)
         attn_x3 = self.attn1(x3, d1)               # gate * x3, filtered skip
+        # Spatial guard (fixes M3): ensure upsampled feature matches attended skip spatial dims
+        if d1.shape[2:] != attn_x3.shape[2:]:
+            d1 = F.interpolate(d1, size=attn_x3.shape[2:], mode="bilinear", align_corners=False)
         d1 = torch.cat([d1, attn_x3], dim=1)        # (B, F4+F2, H/4, W/4)
         d1 = self.up_res_conv1(d1)
 
         # Decoder Stage 2: d1 upsampled + attended skip(x2)
         d2 = self.upsample2(d1)                     # (B, F3, H/2, W/2)
         attn_x2 = self.attn2(x2, d2)               # gate * x2, filtered skip
+        if d2.shape[2:] != attn_x2.shape[2:]:
+            d2 = F.interpolate(d2, size=attn_x2.shape[2:], mode="bilinear", align_corners=False)
         d2 = torch.cat([d2, attn_x2], dim=1)        # (B, F3+F1, H/2, W/2)
         d2 = self.up_res_conv2(d2)
 
         # Decoder Stage 3: d2 upsampled + attended skip(x1)
         d3 = self.upsample3(d2)                     # (B, F2, H, W)
         attn_x1 = self.attn3(x1, d3)               # gate * x1, filtered skip
+        if d3.shape[2:] != attn_x1.shape[2:]:
+            d3 = F.interpolate(d3, size=attn_x1.shape[2:], mode="bilinear", align_corners=False)
         d3 = torch.cat([d3, attn_x1], dim=1)        # (B, F2+F0, H, W)
         d3 = self.up_res_conv3(d3)
 

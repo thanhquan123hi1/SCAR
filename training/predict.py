@@ -24,7 +24,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from training.models import build_model
-from preprocessing.preprocessing import preprocess_spatial, invert_spatial_mask
+from preprocessing.preprocessing import (
+    extract_tissue_foreground,
+    invert_spatial_mask,
+    preprocess_spatial,
+)
 from training.postprocess import decode_with_rules, enforce_anatomical_constraints
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)s  %(message)s")
@@ -80,7 +84,15 @@ def main() -> None:
         # --- CASE 1: 3D SAX ---
         if view == "SAX" and len(target_shape) == 3:
             if raw_image.ndim == 4:
-                raw_image = raw_image[..., 0] if raw_image.shape[-1] == 1 else raw_image[:, :, :, 0]
+                if raw_image.shape[-1] == 1:
+                    raw_image = raw_image[..., 0]
+                    zooms = zooms[:3]
+                elif raw_image.shape[0] == 1:
+                    raw_image = raw_image[0, ...]
+                    zooms = zooms[1:4]
+                else:
+                    raw_image = raw_image[:, :, :, 0]
+                    zooms = zooms[:3]
 
             spacing = tuple(float(v) for v in zooms[:3])
             processed, transform = preprocess_spatial(
@@ -108,15 +120,37 @@ def main() -> None:
 
         # --- CASE 2: 2D LAX (2CH, 4CH, RAS) ---
         else:
+            if raw_image.ndim == 4:
+                if raw_image.shape[-1] == 1:
+                    raw_image = raw_image[..., 0]
+                    zooms = zooms[:3]
+                elif raw_image.shape[0] == 1:
+                    raw_image = raw_image[0, ...]
+                    zooms = zooms[1:4]
+                else:
+                    raw_image = raw_image[:, :, :, 0]
+                    zooms = zooms[:3]
+
             spacing = tuple(float(v) for v in zooms[:2])
             d_count = raw_image.shape[2] if raw_image.ndim >= 3 else 1
             restored_slices = []
 
+            # Global foreground intensity bounds across full volume (fixes C1)
+            precomputed_bounds = None
+            if percentiles is not None:
+                full_vol = np.asarray(raw_image, dtype=np.float32)
+                fg = extract_tissue_foreground(full_vol)
+                p_low, p_high = np.percentile(fg, percentiles)
+                if np.isfinite(p_low) and np.isfinite(p_high) and p_high > p_low:
+                    precomputed_bounds = (float(p_low), float(p_high))
+
             for s in range(d_count):
                 if in_channels == 3 and raw_image.ndim >= 3:
-                    prev_idx = max(0, s - 1)
-                    next_idx = min(d_count - 1, s + 1)
-                    slices_data = [raw_image[:, :, prev_idx], raw_image[:, :, s], raw_image[:, :, next_idx]]
+                    # Reflection padding on boundaries (fixes W3)
+                    prev_idx = 1 if (s == 0 and d_count > 1) else max(0, s - 1)
+                    curr_idx = s
+                    next_idx = d_count - 2 if (s == d_count - 1 and d_count > 1) else min(d_count - 1, s + 1)
+                    slices_data = [raw_image[:, :, prev_idx], raw_image[:, :, curr_idx], raw_image[:, :, next_idx]]
                     processed_channels = []
                     trans_s = None
                     for s_data in slices_data:
@@ -126,7 +160,8 @@ def main() -> None:
                             target_spacing=target_spacing,
                             target_shape=target_shape,
                             interpolation_order=1,
-                            intensity_percentiles=percentiles,
+                            intensity_percentiles=None if precomputed_bounds is not None else percentiles,
+                            precomputed_intensity_bounds=precomputed_bounds,
                         )
                         processed_channels.append(p_img)
                         if trans_s is None:
@@ -141,7 +176,8 @@ def main() -> None:
                         target_spacing=target_spacing,
                         target_shape=target_shape,
                         interpolation_order=1,
-                        intensity_percentiles=percentiles,
+                        intensity_percentiles=None if precomputed_bounds is not None else percentiles,
+                        precomputed_intensity_bounds=precomputed_bounds,
                     )
                     stacked = p_sl[None, ...]
                     if in_channels == 3:
@@ -162,14 +198,18 @@ def main() -> None:
 
             restored_pred = np.stack(restored_slices, axis=-1) if raw_image.ndim >= 3 else restored_slices[0]
 
-        # Apply anatomical constraints
+        # Apply anatomical constraints (spacing & physical volume aware)
         if post_cfg.get("anatomical_constraint", True):
+            full_spacing = tuple(float(v) for v in zooms[:restored_pred.ndim])
             restored_pred = enforce_anatomical_constraints(
                 restored_pred,
                 scar_class=3,
                 myo_class=2,
                 dilation_voxels=int(post_cfg.get("dilation_voxels", 1)),
+                tolerance_mm=float(post_cfg.get("tolerance_mm", 2.5)),
+                spacing=full_spacing,
                 min_scar_voxels=int(post_cfg.get("min_scar_voxels", 5)),
+                min_scar_volume_mm3=float(post_cfg.get("min_scar_volume_mm3", 15.0)),
             )
 
         # Save restored NIfTI prediction

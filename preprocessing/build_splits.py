@@ -106,6 +106,7 @@ def main() -> None:
     parser.add_argument("--data-root", default="data/LGE_MULTI", help="Path to LGE_MULTI data directory")
     parser.add_argument("--output", default="data/processed/splits", help="Output directory for CSV files")
     parser.add_argument("--view", default=None, help="Filter by view: SAX, 2CH, 4CH, RAS")
+    parser.add_argument("--strict", action="store_true", default=True, help="Raise RuntimeError on patient-level data leakage (default: True)")
     args = parser.parse_args()
 
     data_root = Path(args.data_root).resolve()
@@ -140,7 +141,8 @@ def main() -> None:
     logger.info("Splits CSVs saved to %s", out_dir)
     logger.info("Total: %d records across %d views.", len(df), df["view"].nunique())
 
-    # ---- Patient-level data leakage check ----
+    # ---- Patient-level data leakage check (fixes W6: hard assert in strict mode) ----
+    leakage_found = False
     for view in df["view"].unique():
         view_df = df[df["view"] == view]
         splits_present = view_df["split"].unique()
@@ -154,12 +156,19 @@ def main() -> None:
                 ids_s2 = set(view_df[view_df["split"] == s2]["subject_id"])
                 overlap = ids_s1 & ids_s2
                 if overlap:
-                    logger.warning(
-                        "⚠️ DATA LEAKAGE: View '%s' has %d overlapping patients between '%s' and '%s': %s",
-                        view, len(overlap), s1, s2, overlap,
+                    leakage_found = True
+                    msg = (
+                        f"CRITICAL DATA LEAKAGE: View '{view}' has {len(overlap)} overlapping "
+                        f"patients between '{s1}' and '{s2}': {overlap}"
                     )
+                    if args.strict:
+                        raise RuntimeError(msg)
+                    logger.error("⚠️ %s", msg)
                 else:
                     logger.info("  ✓ View '%s': '%s' ∩ '%s' = ∅ (no leakage)", view, s1, s2)
+
+    if not leakage_found:
+        logger.info("✓ Patient-level data partition verified: ZERO leakage across all splits!")
 
 
 if __name__ == "__main__":

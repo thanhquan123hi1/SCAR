@@ -141,6 +141,13 @@ class Trainer:
         return float(np.mean(losses)) if losses else math.nan
 
     def _validate_epoch(self, dataloader: DataLoader) -> tuple[float, dict[str, float]]:
+        """Validate model on the validation DataLoader in preprocessed batch space.
+        
+        Note (M4): Training-time validation Dice is computed in preprocessed resolution
+        (e.g., 192x192x16 or 256x256) for fast iteration and early stopping.
+        Official challenge/benchmark metrics in original NIfTI physical space are computed
+        via `training/evaluate.py` using `invert_spatial_mask()`.
+        """
         self.model.eval()
         losses = []
         all_dices: list[dict[int, float]] = []
@@ -178,7 +185,9 @@ class Trainer:
                             scar_class=3,
                             myo_class=2,
                             dilation_voxels=int(post_cfg.get("dilation_voxels", 1)),
+                            tolerance_mm=float(post_cfg.get("tolerance_mm", 2.5)),
                             min_scar_voxels=int(post_cfg.get("min_scar_voxels", 5)),
+                            min_scar_volume_mm3=float(post_cfg.get("min_scar_volume_mm3", 15.0)),
                         )
                         cleaned_preds.append(cleaned)
                     preds = np.stack(cleaned_preds, axis=0)

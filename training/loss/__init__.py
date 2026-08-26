@@ -28,8 +28,8 @@ def masks_to_one_vs_rest(mask: torch.Tensor, num_classes: int) -> torch.Tensor:
     return torch.stack(targets, dim=1)
 
 
-class SoftDiceLoss(nn.Module):
-    """Multi-class Soft Dice Loss with Laplace smoothing (smooth=1.0)."""
+class MultiClassSoftDiceLoss(nn.Module):
+    """Multi-class Soft Dice Loss for mutually exclusive classes using Softmax probabilities."""
 
     def __init__(self, num_classes: int, smooth: float = 1.0, ignore_background: bool = True):
         super().__init__()
@@ -52,10 +52,18 @@ class SoftDiceLoss(nn.Module):
         return (1.0 - dice).mean()
 
 
+# Backward compatibility alias
+SoftDiceLoss = MultiClassSoftDiceLoss
+
+
 class OneVsRestCompoundLoss(nn.Module):
     """Compound loss for independent foreground binary heads (One-vs-Rest).
     
     Total = bce_weight * (BCE with pos_weight + Focal modulation) + dice_weight * BinarySoftDice
+    
+    Note on Dice formulations:
+    - MultiClassSoftDiceLoss uses Softmax over all classes for mutually exclusive segmentation.
+    - OneVsRestCompoundLoss uses Sigmoid per channel for independent One-vs-Rest binary heads.
     """
 
     def __init__(
@@ -63,7 +71,7 @@ class OneVsRestCompoundLoss(nn.Module):
         num_classes: int,
         bce_weight: float = 0.5,
         dice_weight: float = 0.5,
-        focal_weight: float = 0.4,
+        focal_weight: float = 1.0,
         focal_gamma: float = 2.0,
         pos_weight: list[float] | torch.Tensor | None = None,
         class_weights: list[float] | torch.Tensor | None = None,
@@ -135,7 +143,12 @@ class OneVsRestCompoundLoss(nn.Module):
             probs = torch.sigmoid(fg_logits)
             pt = torch.where(fg_target > 0.5, probs, 1.0 - probs)
             focal = (1.0 - pt).pow(self.focal_gamma)
-            loss_map = (1.0 - self.focal_weight) * loss_map + self.focal_weight * (focal * loss_map)
+            if self.focal_weight >= 1.0:
+                # Standard Focal Loss: loss = (1 - pt)^gamma * BCE (fixes M2)
+                loss_map = focal * loss_map
+            else:
+                # Convex blend when 0 < focal_weight < 1.0
+                loss_map = (1.0 - self.focal_weight) * loss_map + self.focal_weight * (focal * loss_map)
 
         if self.class_weights is not None:
             cw = self.class_weights.to(fg_logits.device)

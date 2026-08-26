@@ -187,16 +187,52 @@ def invert_center_crop_or_pad(
 # ---------------------------------------------------------------------------
 
 def extract_tissue_foreground(array: np.ndarray) -> np.ndarray:
-    """Extract tissue foreground voxels by filtering out low-intensity MRI air background noise."""
+    """Extract tissue foreground voxels by filtering out low-intensity MRI air background noise.
+    
+    Uses Otsu-based adaptive thresholding to separate low-intensity air background from
+    valid tissue, protecting dark nulled myocardium while cleanly cutting air noise (fixes W2).
+    """
     source = np.asarray(array, dtype=np.float32)
     if source.size == 0:
         return source
     s_min, s_max = float(np.min(source)), float(np.max(source))
     if s_max <= s_min + 1e-6:
         return source
-    # Estimate background noise floor using global mean thresholding
-    global_mean = float(np.mean(source))
-    noise_floor = max(s_min, global_mean * 0.25)
+
+    # Otsu thresholding over 256 bins
+    scaled = np.clip((source - s_min) / (s_max - s_min) * 255.0, 0, 255).astype(np.uint8)
+    hist = np.bincount(scaled.ravel(), minlength=256).astype(np.float64)
+    total = float(scaled.size)
+
+    sum_total = float(np.dot(np.arange(256), hist))
+    sum_b = 0.0
+    w_b = 0.0
+    between_vars = np.zeros(256, dtype=np.float64)
+
+    for t in range(256):
+        w_b += hist[t]
+        if w_b == 0:
+            continue
+        w_f = total - w_b
+        if w_f == 0:
+            break
+        sum_b += t * hist[t]
+        m_b = sum_b / w_b
+        m_f = (sum_total - sum_b) / w_f
+        between_vars[t] = w_b * w_f * ((m_b - m_f) ** 2)
+
+    max_val = float(np.max(between_vars))
+    if max_val > 0:
+        # If there is a flat plateau between clusters, select the midpoint
+        plateau = np.where(np.isclose(between_vars, max_val, rtol=1e-3))[0]
+        threshold = int(np.mean(plateau))
+    else:
+        threshold = 32
+
+    # Convert threshold back to original scale (with conservative 0.5 factor to preserve dark myocardium)
+    otsu_val = s_min + (threshold / 255.0) * (s_max - s_min)
+    noise_floor = max(s_min, s_min + (otsu_val - s_min) * 0.5)
+
     fg = source[source > noise_floor]
     return fg if fg.size > 100 else source
 
@@ -349,22 +385,37 @@ def preprocess_mask(
     )
     resized = resize_to_shape(raw_mask, resized_shape, order=0)
 
-    # Protection against vanishing tiny rare classes (e.g. Scar) due to nearest-neighbor decimation
+    # Protection against vanishing tiny rare classes (e.g. Scar) due to nearest-neighbor decimation (fixes C1)
     resized_classes = set(np.unique(resized)) - {0}
     missing_classes = original_classes - resized_classes
     if missing_classes:
         # Scale factors to map original coordinates to resized coordinates
         scale_factors = [r / o for r, o in zip(resized_shape, raw_mask.shape, strict=True)]
-        for cls_id in missing_classes:
-            coords = np.argwhere(raw_mask == cls_id)
-            if coords.size > 0:
-                # Map center of mass of missing class to resized space
-                centroid = np.mean(coords, axis=0)
-                mapped_idx = tuple(
-                    min(int(round(c * s)), r_dim - 1)
-                    for c, s, r_dim in zip(centroid, scale_factors, resized_shape, strict=True)
-                )
-                resized[mapped_idx] = cls_id
+        
+        # Priority sort: standard cardiac classes [1 (LV), 4 (RV), 2 (MYO), 3 (SCAR)]
+        # Higher priority (Scar) is processed last to properly paint over surrounding myocardium
+        priority_map = {1: 1, 4: 2, 2: 3, 3: 4}
+        sorted_missing = sorted(missing_classes, key=lambda c: priority_map.get(c, c))
+
+        for cls_id in sorted_missing:
+            # 1. Continuous binary resampling (order=1) with thresholding to preserve morphology
+            bin_mask = (raw_mask == cls_id).astype(np.float32)
+            bin_resized = resize_to_shape(bin_mask, resized_shape, order=1)
+            bin_thresholded = bin_resized >= 0.30
+
+            if np.any(bin_thresholded):
+                resized[bin_thresholded] = cls_id
+            else:
+                # 2. Fallback for ultra-tiny micro-structures (< a few voxels):
+                # Project ALL original voxels of the lesion to preserve the local cluster footprint
+                coords = np.argwhere(raw_mask == cls_id)
+                if coords.size > 0:
+                    for pt in coords:
+                        mapped_idx = tuple(
+                            min(int(round(c * s)), r_dim - 1)
+                            for c, s, r_dim in zip(pt, scale_factors, resized_shape, strict=True)
+                        )
+                        resized[mapped_idx] = cls_id
 
     transformed, _ = center_crop_or_pad(resized, target_shape, value=0)
     return np.rint(transformed).astype(np.int64, copy=False)

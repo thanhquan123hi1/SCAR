@@ -11,6 +11,7 @@ model:
   num_classes: 5
   features: [32, 64, 128, 256]
   dropout: 0.1
+  norm_type: group
 
 preprocessing:
   target_shape: [192, 192, 16]
@@ -21,7 +22,7 @@ loss:
   name: one_vs_rest_compound
   bce_weight: 0.5
   dice_weight: 0.5
-  focal_weight: 0.4
+  focal_weight: 1.0
   focal_gamma: 2.0
   pos_weight: [1.5, 2.0, 3.0, 1.5]      # 4 foreground classes: [lv, myo, scar, rv]
   class_weights: [1.0, 1.2, 1.6, 1.0]

@@ -25,10 +25,14 @@ class ScarMetrics:
 
 def _surface(mask: np.ndarray) -> np.ndarray:
     structure = generate_binary_structure(mask.ndim, 1)
-    return np.logical_xor(
+    surf = np.logical_xor(
         mask,
         binary_erosion(mask, structure=structure, border_value=0),
     )
+    # Robust guard (M6): if erosion eliminated small structure, treat entire mask as surface
+    if not np.any(surf) and np.any(mask):
+        return mask.copy()
+    return surf
 
 
 def hd95_binary(
@@ -54,10 +58,15 @@ def hd95_binary(
     pred_surf = _surface(pred)
     truth_surf = _surface(truth)
 
+    if not pred_surf.any() or not truth_surf.any():
+        return float(penalty_distance)
+
     truth_dist = distance_transform_edt(~truth_surf, sampling=sampling)
     pred_dist = distance_transform_edt(~pred_surf, sampling=sampling)
 
     distances = np.concatenate([truth_dist[pred_surf], pred_dist[truth_surf]])
+    if distances.size == 0:
+        return float(penalty_distance)
     return float(np.percentile(distances, 95))
 
 

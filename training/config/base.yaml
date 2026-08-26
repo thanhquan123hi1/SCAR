@@ -19,8 +19,8 @@ training:
   sampler:
     enabled: true             # Kích hoạt Weighted Sampler cho lớp sẹo
     rare_classes: [3, 2]      # Class 3: Sẹo, Class 2: Cơ tim
-    rare_boost: 2.5           # Tăng tần suất lấy mẫu hợp lý tránh lệch phân phối tiên nghiệm
-    foreground_boost: 1.5
+    rare_boost: 2.0           # Tần suất lấy mẫu cân bằng (fixes M5: tránh over-segmentation)
+    foreground_boost: 1.3
   early_stopping:
     enabled: true
     monitor: dice_scar        # dice_scar | mean_dice | val_loss
@@ -39,18 +39,20 @@ loss:
   name: one_vs_rest_compound  # one_vs_rest_compound | focal_tversky | ce_dice
   bce_weight: 0.5
   dice_weight: 0.5
-  focal_weight: 0.4
+  focal_weight: 1.0
   focal_gamma: 2.0
-  # Trọng số phạt dương tính theo từng lớp foreground: [lv, myo, scar] cho 2CH
-  pos_weight: [1.5, 2.0, 3.0]
-  class_weights: [1.0, 1.2, 1.8]
+  # Trọng số phạt dương tính theo từng lớp foreground: [lv, myo, scar] (fixes M1: calibrated weights)
+  pos_weight: [1.0, 1.5, 2.0]
+  class_weights: [1.0, 1.0, 1.3]
 
 postprocess:
   enabled: true
   use_rules: true             # Giải mã xác suất theo luật ưu tiên
   anatomical_constraint: true # Ràng buộc giải phẫu: Scar bắt buộc nằm trong Myocardium
   dilation_voxels: 1
-  min_scar_voxels: 5
+  tolerance_mm: 2.5           # Hiệu chuẩn dung sai theo milimet
+  min_scar_voxels: 5          # Fallback số voxel khi không có spacing
+  min_scar_volume_mm3: 15.0   # Ngưỡng thể tích sẹo vật lý (fixes W5: spacing-aware ~0.015 mL)
 
 evaluation:
   metrics: [dice, iou, hd95_mm, scar_mass_g, scar_volume_ml]

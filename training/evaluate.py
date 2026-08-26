@@ -32,7 +32,12 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from preprocessing.preprocessing import invert_spatial_mask, preprocess_mask, preprocess_spatial
+from preprocessing.preprocessing import (
+    extract_tissue_foreground,
+    invert_spatial_mask,
+    preprocess_mask,
+    preprocess_spatial,
+)
 from training.metrics import calculate_scar_metrics, dice_score, hd95_binary, iou_score
 from training.models import build_model
 from training.postprocess import decode_with_rules, enforce_anatomical_constraints
@@ -100,9 +105,17 @@ def evaluate_split(
         # -------------------------------------------------------------
         if view == "SAX" and len(target_shape) == 3:
             if raw_img.ndim == 4:
-                raw_img = raw_img[..., 0] if raw_img.shape[-1] == 1 else raw_img[:, :, :, 0]
+                if raw_img.shape[-1] == 1:
+                    raw_img = raw_img[..., 0]
+                    zooms = zooms[:3]
+                elif raw_img.shape[0] == 1:
+                    raw_img = raw_img[0, ...]
+                    zooms = zooms[1:4]
+                else:
+                    raw_img = raw_img[:, :, :, 0]
+                    zooms = zooms[:3]
             if raw_label is not None and raw_label.ndim == 4:
-                raw_label = raw_label[..., 0] if raw_label.shape[-1] == 1 else raw_label[:, :, :, 0]
+                raw_label = raw_label[..., 0] if raw_label.shape[-1] == 1 else (raw_label[0, ...] if raw_label.shape[0] == 1 else raw_label[:, :, :, 0])
 
             orig_spacing = tuple(float(v) for v in zooms[:3])
             proc_img, transform = preprocess_spatial(
@@ -132,15 +145,38 @@ def evaluate_split(
         # CASE 2: 2D LAX (2CH, 4CH, RAS) & 2D SAX slices
         # -------------------------------------------------------------
         else:
+            if raw_img.ndim == 4:
+                if raw_img.shape[-1] == 1:
+                    raw_img = raw_img[..., 0]
+                    zooms = zooms[:3]
+                elif raw_img.shape[0] == 1:
+                    raw_img = raw_img[0, ...]
+                    zooms = zooms[1:4]
+                else:
+                    raw_img = raw_img[:, :, :, 0]
+                    zooms = zooms[:3]
+            if raw_label is not None and raw_label.ndim == 4:
+                raw_label = raw_label[..., 0] if raw_label.shape[-1] == 1 else (raw_label[0, ...] if raw_label.shape[0] == 1 else raw_label[:, :, :, 0])
+
             orig_spacing = tuple(float(v) for v in zooms[:2])
             d_count = raw_img.shape[2] if raw_img.ndim >= 3 else 1
             restored_slices = []
 
+            # Global foreground intensity bounds across full volume (fixes C1)
+            precomputed_bounds = None
+            if percentiles is not None:
+                full_vol = np.asarray(raw_img, dtype=np.float32)
+                fg = extract_tissue_foreground(full_vol)
+                p_low, p_high = np.percentile(fg, percentiles)
+                if np.isfinite(p_low) and np.isfinite(p_high) and p_high > p_low:
+                    precomputed_bounds = (float(p_low), float(p_high))
+
             for s in range(d_count):
                 if in_channels == 3 and raw_img.ndim >= 3:
-                    prev_idx = max(0, s - 1)
+                    # Reflection padding on boundaries (fixes W3)
+                    prev_idx = 1 if (s == 0 and d_count > 1) else max(0, s - 1)
                     curr_idx = s
-                    next_idx = min(d_count - 1, s + 1)
+                    next_idx = d_count - 2 if (s == d_count - 1 and d_count > 1) else min(d_count - 1, s + 1)
                     slices_data = [raw_img[:, :, prev_idx], raw_img[:, :, curr_idx], raw_img[:, :, next_idx]]
                     processed_channels = []
                     trans_s = None
@@ -151,7 +187,8 @@ def evaluate_split(
                             target_spacing=target_spacing,
                             target_shape=target_shape,
                             interpolation_order=1,
-                            intensity_percentiles=percentiles,
+                            intensity_percentiles=None if precomputed_bounds is not None else percentiles,
+                            precomputed_intensity_bounds=precomputed_bounds,
                         )
                         processed_channels.append(p_img)
                         if trans_s is None:
@@ -166,7 +203,8 @@ def evaluate_split(
                         target_spacing=target_spacing,
                         target_shape=target_shape,
                         interpolation_order=1,
-                        intensity_percentiles=percentiles,
+                        intensity_percentiles=None if precomputed_bounds is not None else percentiles,
+                        precomputed_intensity_bounds=precomputed_bounds,
                     )
                     stacked = p_sl[None, ...]
                     if in_channels == 3:
@@ -187,14 +225,18 @@ def evaluate_split(
 
             restored_pred = np.stack(restored_slices, axis=-1) if raw_img.ndim >= 3 else restored_slices[0]
 
-        # Apply anatomical constraints
+        # Apply anatomical constraints (spacing & physical volume aware)
         if post_cfg.get("anatomical_constraint", True):
+            full_spacing = tuple(float(v) for v in zooms[:restored_pred.ndim])
             restored_pred = enforce_anatomical_constraints(
                 restored_pred,
                 scar_class=3,
                 myo_class=2,
                 dilation_voxels=int(post_cfg.get("dilation_voxels", 1)),
+                tolerance_mm=float(post_cfg.get("tolerance_mm", 2.5)),
+                spacing=full_spacing,
                 min_scar_voxels=int(post_cfg.get("min_scar_voxels", 5)),
+                min_scar_volume_mm3=float(post_cfg.get("min_scar_volume_mm3", 15.0)),
             )
 
         # Save restored NIfTI prediction

@@ -192,7 +192,20 @@ def main() -> None:
     epochs = int(config["training"]["epochs"])
     sched_cfg = config.get("training", {}).get("scheduler", {})
     min_lr = float(sched_cfg.get("min_lr", 1e-6))
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=min_lr)
+    warmup_epochs = int(sched_cfg.get("warmup_epochs", 0))
+
+    if warmup_epochs > 0 and epochs > warmup_epochs:
+        warmup_sched = torch.optim.lr_scheduler.LinearLR(
+            optimizer, start_factor=0.01, end_factor=1.0, total_iters=warmup_epochs
+        )
+        main_sched = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=epochs - warmup_epochs, eta_min=min_lr
+        )
+        scheduler = torch.optim.lr_scheduler.SequentialLR(
+            optimizer, schedulers=[warmup_sched, main_sched], milestones=[warmup_epochs]
+        )
+    else:
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=min_lr)
 
     # Loss
     loss_cfg = config.get("loss", {})
@@ -202,7 +215,7 @@ def main() -> None:
         "ce_weight": float(loss_cfg.get("ce_weight", 1.0)),
         "dice_weight": float(loss_cfg.get("dice_weight", 1.0)),
         "bce_weight": float(loss_cfg.get("bce_weight", 0.5)),
-        "focal_weight": float(loss_cfg.get("focal_weight", 0.4)),
+        "focal_weight": float(loss_cfg.get("focal_weight", 1.0)),
         "focal_gamma": float(loss_cfg.get("focal_gamma", 2.0)),
         "pos_weight": loss_cfg.get("pos_weight", None),
         "class_weights": loss_cfg.get("class_weights", None),

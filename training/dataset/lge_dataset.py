@@ -22,7 +22,11 @@ import sys
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from preprocessing.preprocessing import preprocess_mask, preprocess_spatial
+from preprocessing.preprocessing import (
+    extract_tissue_foreground,
+    preprocess_mask,
+    preprocess_spatial,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -75,16 +79,23 @@ class MedicalAugmentation2D:
             if label is not None:
                 label = rotate(label, angle, reshape=False, order=0, mode="nearest")
 
-        # 3. Random Gamma transform (simulates varying LGE tissue contrast)
+        # 3. Random Gamma transform (fixes W2: robust to arbitrary intensity ranges / z-score)
         if self.gamma_range:
-            gamma = np.random.uniform(self.gamma_range[0], self.gamma_range[1])
-            image = np.clip(np.maximum(image, 0.0) ** gamma, 0.0, 1.0)
+            gamma = float(np.random.uniform(self.gamma_range[0], self.gamma_range[1]))
+            img_min, img_max = float(np.min(image)), float(np.max(image))
+            if img_max > img_min + 1e-6:
+                norm_img = np.clip((image - img_min) / (img_max - img_min), 0.0, 1.0)
+                gamma_img = np.power(norm_img, gamma)
+                image = img_min + gamma_img * (img_max - img_min)
 
         # 4. Intensity scale and shift
         if self.intensity_scale > 0:
             scale = 1.0 + np.random.uniform(-self.intensity_scale, self.intensity_scale)
             shift = np.random.uniform(-self.intensity_scale, self.intensity_scale)
-            image = np.clip(image * scale + shift, 0.0, 1.0)
+            if np.min(image) >= -1e-4 and np.max(image) <= 1.0 + 1e-4:
+                image = np.clip(image * scale + shift, 0.0, 1.0)
+            else:
+                image = image * scale + shift
 
         image_out = np.ascontiguousarray(image, dtype=np.float32)
         label_out = np.ascontiguousarray(label) if label is not None else None
@@ -128,16 +139,23 @@ class MedicalAugmentation3D:
             if label is not None:
                 label = rotate(label, angle, axes=(0, 1), reshape=False, order=0, mode="nearest")
 
-        # Gamma contrast variation
+        # Gamma contrast variation (fixes W2: robust to arbitrary intensity ranges / z-score)
         if self.gamma_range:
-            gamma = np.random.uniform(self.gamma_range[0], self.gamma_range[1])
-            image = np.clip(np.maximum(image, 0.0) ** gamma, 0.0, 1.0)
+            gamma = float(np.random.uniform(self.gamma_range[0], self.gamma_range[1]))
+            img_min, img_max = float(np.min(image)), float(np.max(image))
+            if img_max > img_min + 1e-6:
+                norm_img = np.clip((image - img_min) / (img_max - img_min), 0.0, 1.0)
+                gamma_img = np.power(norm_img, gamma)
+                image = img_min + gamma_img * (img_max - img_min)
 
         # Intensity scale & shift
         if self.intensity_scale > 0:
             scale = 1.0 + np.random.uniform(-self.intensity_scale, self.intensity_scale)
             shift = np.random.uniform(-self.intensity_scale, self.intensity_scale)
-            image = np.clip(image * scale + shift, 0.0, 1.0)
+            if np.min(image) >= -1e-4 and np.max(image) <= 1.0 + 1e-4:
+                image = np.clip(image * scale + shift, 0.0, 1.0)
+            else:
+                image = image * scale + shift
 
         return np.ascontiguousarray(image, dtype=np.float32), (np.ascontiguousarray(label) if label is not None else None)
 
@@ -307,9 +325,9 @@ class LgeLaxDataset(Dataset):
                         all_labels = np.transpose(all_labels, (2, 0, 1))
 
                 if self.in_channels == 3 and all_images.ndim >= 3:
-                    prev_idx = max(0, slice_idx - 1)
+                    prev_idx = 1 if (slice_idx == 0 and total_slices > 1) else max(0, slice_idx - 1)
                     curr_idx = slice_idx
-                    next_idx = min(total_slices - 1, slice_idx + 1)
+                    next_idx = total_slices - 2 if (slice_idx == total_slices - 1 and total_slices > 1) else min(total_slices - 1, slice_idx + 1)
                     image = np.stack([all_images[prev_idx], all_images[curr_idx], all_images[next_idx]], axis=0)
                 elif all_images.ndim >= 3:
                     image = all_images[slice_idx][None, ...]  # (1, H, W)
@@ -326,10 +344,18 @@ class LgeLaxDataset(Dataset):
             raw_img = np.asanyarray(img_obj.dataobj)
             spacing = tuple(float(v) for v in img_obj.header.get_zooms()[:2])
 
+            precomputed_bounds = None
+            if self.intensity_percentiles is not None:
+                full_vol = np.asarray(raw_img, dtype=np.float32)
+                fg = extract_tissue_foreground(full_vol)
+                p_low, p_high = np.percentile(fg, self.intensity_percentiles)
+                if np.isfinite(p_low) and np.isfinite(p_high) and p_high > p_low:
+                    precomputed_bounds = (float(p_low), float(p_high))
+
             if self.in_channels == 3 and raw_img.ndim >= 3:
-                prev_idx = max(0, slice_idx - 1)
+                prev_idx = 1 if (slice_idx == 0 and total_slices > 1) else max(0, slice_idx - 1)
                 curr_idx = slice_idx
-                next_idx = min(total_slices - 1, slice_idx + 1)
+                next_idx = total_slices - 2 if (slice_idx == total_slices - 1 and total_slices > 1) else min(total_slices - 1, slice_idx + 1)
                 slices_data = [raw_img[:, :, prev_idx], raw_img[:, :, curr_idx], raw_img[:, :, next_idx]]
                 processed_channels = []
                 for s_data in slices_data:
@@ -339,7 +365,8 @@ class LgeLaxDataset(Dataset):
                         target_spacing=self.target_spacing,
                         target_shape=self.target_shape,
                         interpolation_order=1,
-                        intensity_percentiles=self.intensity_percentiles,
+                        intensity_percentiles=None if precomputed_bounds is not None else self.intensity_percentiles,
+                        precomputed_intensity_bounds=precomputed_bounds,
                     )
                     processed_channels.append(p_img)
                 image = np.stack(processed_channels, axis=0)  # (3, H, W)
@@ -351,7 +378,8 @@ class LgeLaxDataset(Dataset):
                     target_spacing=self.target_spacing,
                     target_shape=self.target_shape,
                     interpolation_order=1,
-                    intensity_percentiles=self.intensity_percentiles,
+                    intensity_percentiles=None if precomputed_bounds is not None else self.intensity_percentiles,
+                    precomputed_intensity_bounds=precomputed_bounds,
                 )
                 image = p_img[None, ...]
                 if self.in_channels == 3:
