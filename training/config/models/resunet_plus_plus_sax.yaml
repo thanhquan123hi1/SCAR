@@ -23,8 +23,8 @@ loss:
   dice_weight: 0.5
   focal_weight: 0.4
   focal_gamma: 2.0
-  pos_weight: [1.6, 2.0, 2.8, 3.0]
-  class_weights: [1.0, 1.2, 1.4, 1.6]
+  pos_weight: [1.5, 2.0, 3.0, 1.8]
+  class_weights: [1.0, 1.2, 1.6, 1.2]
 
 training:
   batch_size: 4
@@ -34,6 +34,6 @@ training:
   sampler:
     enabled: true
     rare_classes: [3, 4]
-    rare_boost: 3.5
+    rare_boost: 2.5
     foreground_boost: 1.5
 

@@ -98,7 +98,7 @@ def evaluate_split(
         # -------------------------------------------------------------
         # CASE 1: 3D SAX
         # -------------------------------------------------------------
-        if view == "SAX":
+        if view == "SAX" and len(target_shape) == 3:
             if raw_img.ndim == 4:
                 raw_img = raw_img[..., 0] if raw_img.shape[-1] == 1 else raw_img[:, :, :, 0]
             if raw_label is not None and raw_label.ndim == 4:
@@ -129,7 +129,7 @@ def evaluate_split(
             restored_pred = invert_spatial_mask(pred_processed, transform)
 
         # -------------------------------------------------------------
-        # CASE 2: 2D LAX (2CH, 4CH, RAS)
+        # CASE 2: 2D LAX (2CH, 4CH, RAS) & 2D SAX slices
         # -------------------------------------------------------------
         else:
             orig_spacing = tuple(float(v) for v in zooms[:2])
@@ -256,6 +256,7 @@ def evaluate_split(
             "mean": float(series_clean.mean()) if len(series_clean) else float("nan"),
             "std": float(series_clean.std()) if len(series_clean) else float("nan"),
             "median": float(series_clean.median()) if len(series_clean) else float("nan"),
+            "iqr": float(series_clean.quantile(0.75) - series_clean.quantile(0.25)) if len(series_clean) else float("nan"),
             "count": int(len(series_clean)),
         })
 

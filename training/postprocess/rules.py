@@ -75,20 +75,22 @@ def decode_with_rules(
     pred = torch.zeros(spatial_shape, dtype=torch.long, device=prob_maps.device)
 
     if not rules:
-        # Fallback to simple thresholding per channel
-        for k in range(prob_maps.shape[1]):
-            class_id = k + 1
-            pred = torch.where(prob_maps[:, k] > 0.5, torch.full_like(pred, class_id), pred)
+        # Fallback to competitive argmax above 0.5 threshold
+        max_prob, max_idx = torch.max(prob_maps, dim=1)
+        pred = torch.where(max_prob > 0.5, max_idx + 1, pred)
         return pred
 
-    ordered = sorted(rules, key=lambda x: int(x.get("priority", 999)))
-    for rule in ordered:
+    # Competitive decoding: Assign class with the highest confidence score exceeding threshold
+    best_score = torch.zeros(spatial_shape, dtype=prob_maps.dtype, device=prob_maps.device)
+    for rule in rules:
         class_id = int(rule["class_id"])
         threshold = float(rule["threshold"])
         terms = rule.get("terms", [])
         if not terms:
             continue
         score = _score_from_terms(prob_maps, terms)
-        pred = torch.where(score > threshold, torch.full_like(pred, class_id), pred)
+        valid = (score > threshold) & (score > best_score)
+        pred = torch.where(valid, torch.full_like(pred, class_id), pred)
+        best_score = torch.where(valid, score, best_score)
 
     return pred

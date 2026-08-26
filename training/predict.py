@@ -78,7 +78,7 @@ def main() -> None:
         zooms = nii_obj.header.get_zooms()
 
         # --- CASE 1: 3D SAX ---
-        if view == "SAX":
+        if view == "SAX" and len(target_shape) == 3:
             if raw_image.ndim == 4:
                 raw_image = raw_image[..., 0] if raw_image.shape[-1] == 1 else raw_image[:, :, :, 0]
 

@@ -117,10 +117,11 @@ def main() -> None:
     cache_dir = ROOT / config["data"].get("cache_dir", "data/processed/cache")
     raw_root = ROOT / config["data"]["raw_root"]
 
-    DatasetClass = LgeSaxDataset if view == "SAX" else LgeLaxDataset
+    is_3d_model = str(config.get("model_name", "")).lower() == "unet_3d" or len(target_shape) == 3
+    DatasetClass = LgeSaxDataset if is_3d_model else LgeLaxDataset
     in_channels = int(config.get("training", {}).get("in_channels", config.get("model", {}).get("in_channels", 1)))
     ds_kwargs = {}
-    if view != "SAX":
+    if not is_3d_model:
         ds_kwargs["in_channels"] = in_channels
 
     train_ds = DatasetClass(
@@ -152,8 +153,8 @@ def main() -> None:
         sampler = build_rare_class_sampler(
             train_ds,
             rare_classes=sampler_cfg.get("rare_classes", [3, 2]),
-            rare_boost=float(sampler_cfg.get("rare_boost", 5.0)),
-            foreground_boost=float(sampler_cfg.get("foreground_boost", 1.8)),
+            rare_boost=float(sampler_cfg.get("rare_boost", 2.5)),
+            foreground_boost=float(sampler_cfg.get("foreground_boost", 1.5)),
         )
 
     train_loader = torch.utils.data.DataLoader(
@@ -175,7 +176,7 @@ def main() -> None:
     num_classes = int(config.get("num_classes", 5))
     model_kwargs = dict(config.get("model", {}))
     model_kwargs["num_classes"] = num_classes
-    if "in_channels" not in model_kwargs and view != "SAX":
+    if "in_channels" not in model_kwargs and not is_3d_model:
         model_kwargs["in_channels"] = in_channels
 
     model = build_model(

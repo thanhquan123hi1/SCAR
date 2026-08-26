@@ -186,6 +186,21 @@ def invert_center_crop_or_pad(
 # Intensity normalization
 # ---------------------------------------------------------------------------
 
+def extract_tissue_foreground(array: np.ndarray) -> np.ndarray:
+    """Extract tissue foreground voxels by filtering out low-intensity MRI air background noise."""
+    source = np.asarray(array, dtype=np.float32)
+    if source.size == 0:
+        return source
+    s_min, s_max = float(np.min(source)), float(np.max(source))
+    if s_max <= s_min + 1e-6:
+        return source
+    # Estimate background noise floor using global mean thresholding
+    global_mean = float(np.mean(source))
+    noise_floor = max(s_min, global_mean * 0.25)
+    fg = source[source > noise_floor]
+    return fg if fg.size > 100 else source
+
+
 def percentile_minmax(
     array: np.ndarray,
     *,
@@ -195,12 +210,8 @@ def percentile_minmax(
     """Percentile clipping on tissue foreground followed by [0, 1] min-max scaling."""
 
     source = np.asarray(array, dtype=np.float32)
-    fg = source[source > 0]
-    if fg.size > 100:
-        low, high = np.percentile(fg, (lower, upper))
-        low = max(0.0, float(low))
-    else:
-        low, high = np.percentile(source, (lower, upper))
+    fg = extract_tissue_foreground(source)
+    low, high = np.percentile(fg, (lower, upper))
     if not np.isfinite(low) or not np.isfinite(high) or high <= low:
         return np.zeros_like(source, dtype=np.float32)
     clipped = np.clip(source, low, high)
@@ -218,26 +229,33 @@ def minmax(array: np.ndarray) -> np.ndarray:
     return ((source - low) / (high - low)).astype(np.float32, copy=False)
 
 
-# ---------------------------------------------------------------------------
-# Combined spatial preprocessing (main entry point)
-# ---------------------------------------------------------------------------
-
-def zscore(array: np.ndarray, *, clip_percentiles: tuple[float, float] | None = None) -> np.ndarray:
-    """Z-score normalization (zero mean, unit variance) with optional percentile clipping.
+def zscore(
+    array: np.ndarray,
+    *,
+    clip_percentiles: tuple[float, float] | None = (0.5, 99.5),
+) -> np.ndarray:
+    """Z-score normalization (zero mean, unit variance) on tissue foreground.
     
-    Recommended by nnUNet and SOTA medical image segmentation pipelines.
+    Standardized according to nnUNet protocol for non-CT medical modalities (CMR).
     """
     source = np.asarray(array, dtype=np.float32)
+    fg = extract_tissue_foreground(source)
     if clip_percentiles is not None:
-        low, high = np.percentile(source, clip_percentiles)
+        low, high = np.percentile(fg, clip_percentiles)
         if np.isfinite(low) and np.isfinite(high) and high > low:
             source = np.clip(source, low, high)
-    mean_val = float(np.mean(source))
-    std_val = float(np.std(source))
+            fg = np.clip(fg, low, high)
+
+    mean_val = float(np.mean(fg))
+    std_val = float(np.std(fg))
     if std_val < 1e-8:
         return np.zeros_like(source, dtype=np.float32)
     return ((source - mean_val) / std_val).astype(np.float32, copy=False)
 
+
+# ---------------------------------------------------------------------------
+# Combined spatial preprocessing (main entry point)
+# ---------------------------------------------------------------------------
 
 def preprocess_spatial(
     array: np.ndarray,
@@ -248,6 +266,7 @@ def preprocess_spatial(
     interpolation_order: int = 1,
     intensity_percentiles: tuple[float, float] | None = None,
     precomputed_intensity_bounds: tuple[float, float] | None = None,
+    mode: str = "percentile_minmax",
 ) -> tuple[np.ndarray, SpatialTransform]:
     """Normalize → resample → center crop/pad an image.
 
@@ -258,19 +277,19 @@ def preprocess_spatial(
         target_shape: Output spatial shape after crop/pad.
         interpolation_order: 1 for images (bilinear), 0 for masks (nearest).
         intensity_percentiles: If given, use percentile clipping; else plain minmax.
-            Pass None for masks (normalization is skipped when order=0).
         precomputed_intensity_bounds: If given as (low, high), use these values
             directly instead of computing percentiles on this array. Essential
             for per-slice processing to maintain consistent normalization.
+        mode: 'percentile_minmax' | 'zscore' | 'minmax'.
 
     Returns:
         (processed_array, SpatialTransform) — transform is needed to invert predictions.
     """
 
     original_shape = tuple(int(item) for item in np.asarray(array).shape)
-    
-    # Normalize BEFORE resample to avoid interpolation of outlier values
     source = np.asarray(array, dtype=np.float32)
+
+    # Normalize BEFORE resample to avoid interpolation of outlier values
     if precomputed_intensity_bounds is not None:
         low, high = precomputed_intensity_bounds
         if np.isfinite(low) and np.isfinite(high) and high > low:
@@ -278,6 +297,8 @@ def preprocess_spatial(
             normalized = ((clipped - low) / (high - low)).astype(np.float32, copy=False)
         else:
             normalized = np.zeros_like(source, dtype=np.float32)
+    elif mode == "zscore":
+        normalized = zscore(source, clip_percentiles=intensity_percentiles)
     elif intensity_percentiles is not None:
         normalized = percentile_minmax(
             source,
@@ -287,7 +308,7 @@ def preprocess_spatial(
     else:
         normalized = minmax(source)
 
-    # Resample AFTER normalization (Issue #8: correct order)
+    # Resample AFTER normalization
     resized_shape = shape_for_spacing(original_shape, source_spacing, target_spacing)
     resized = resize_to_shape(normalized, resized_shape, order=interpolation_order)
 
@@ -308,7 +329,7 @@ def preprocess_mask(
     target_spacing: tuple[float, ...],
     target_shape: tuple[int, ...],
 ) -> np.ndarray:
-    """Resample + crop/pad a discrete label mask (nearest-neighbor, no normalization).
+    """Resample + crop/pad a discrete label mask (nearest-neighbor, preserving rare classes).
 
     Args:
         mask: Integer label array.
@@ -320,10 +341,31 @@ def preprocess_mask(
         Integer mask as int64, same label values preserved.
     """
 
+    raw_mask = np.rint(mask).astype(np.int16)
+    original_classes = set(np.unique(raw_mask)) - {0}
+
     resized_shape = shape_for_spacing(
-        tuple(int(item) for item in mask.shape), source_spacing, target_spacing
+        tuple(int(item) for item in raw_mask.shape), source_spacing, target_spacing
     )
-    resized = resize_to_shape(np.rint(mask).astype(np.int16), resized_shape, order=0)
+    resized = resize_to_shape(raw_mask, resized_shape, order=0)
+
+    # Protection against vanishing tiny rare classes (e.g. Scar) due to nearest-neighbor decimation
+    resized_classes = set(np.unique(resized)) - {0}
+    missing_classes = original_classes - resized_classes
+    if missing_classes:
+        # Scale factors to map original coordinates to resized coordinates
+        scale_factors = [r / o for r, o in zip(resized_shape, raw_mask.shape, strict=True)]
+        for cls_id in missing_classes:
+            coords = np.argwhere(raw_mask == cls_id)
+            if coords.size > 0:
+                # Map center of mass of missing class to resized space
+                centroid = np.mean(coords, axis=0)
+                mapped_idx = tuple(
+                    min(int(round(c * s)), r_dim - 1)
+                    for c, s, r_dim in zip(centroid, scale_factors, resized_shape, strict=True)
+                )
+                resized[mapped_idx] = cls_id
+
     transformed, _ = center_crop_or_pad(resized, target_shape, value=0)
     return np.rint(transformed).astype(np.int64, copy=False)
 

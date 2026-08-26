@@ -28,14 +28,18 @@ logger = logging.getLogger(__name__)
 
 
 class MedicalAugmentation2D:
-    """Standard 2D medical data augmentation for LGE Cardiac MRI."""
+    """Standard 2D medical data augmentation for LGE Cardiac MRI.
+    
+    Flips are disabled by default (flip_prob=0.0) to strictly preserve
+    cardiac anatomical chirality (LV/RV orientation) and apex-base alignment.
+    """
 
     def __init__(
         self,
-        flip_prob: float = 0.5,
-        rotate_range_deg: float = 30.0,
-        gamma_range: tuple[float, float] = (0.7, 1.5),
-        intensity_scale: float = 0.1,
+        flip_prob: float = 0.0,
+        rotate_range_deg: float = 12.0,
+        gamma_range: tuple[float, float] = (0.8, 1.25),
+        intensity_scale: float = 0.08,
     ) -> None:
         self.flip_prob = flip_prob
         self.rotate_range_deg = rotate_range_deg
@@ -47,22 +51,21 @@ class MedicalAugmentation2D:
         image: np.ndarray,
         label: np.ndarray | None = None,
     ) -> tuple[np.ndarray, np.ndarray | None]:
-        # image: (C, H, W) or (H, W), label: (H, W)
         is_multi_channel = image.ndim == 3
         
-        # 1. Random Flips
-        if np.random.rand() < self.flip_prob:
+        # 1. Random Flips (Only executed if explicitly enabled > 0)
+        if self.flip_prob > 0 and np.random.rand() < self.flip_prob:
             axis = 1 if is_multi_channel else 0
             image = np.flip(image, axis=axis)
             if label is not None:
                 label = np.flip(label, axis=0)
-        if np.random.rand() < self.flip_prob:
+        if self.flip_prob > 0 and np.random.rand() < self.flip_prob:
             axis = 2 if is_multi_channel else 1
             image = np.flip(image, axis=axis)
             if label is not None:
                 label = np.flip(label, axis=1)
 
-        # 2. Random Rotation
+        # 2. Random In-Plane Rotation (Safe narrow angle for cardiac MRI)
         if self.rotate_range_deg > 0:
             angle = np.random.uniform(-self.rotate_range_deg, self.rotate_range_deg)
             if is_multi_channel:
@@ -72,7 +75,7 @@ class MedicalAugmentation2D:
             if label is not None:
                 label = rotate(label, angle, reshape=False, order=0, mode="nearest")
 
-        # 3. Random Gamma transform (simulates varying LGE contrast)
+        # 3. Random Gamma transform (simulates varying LGE tissue contrast)
         if self.gamma_range:
             gamma = np.random.uniform(self.gamma_range[0], self.gamma_range[1])
             image = np.clip(np.maximum(image, 0.0) ** gamma, 0.0, 1.0)
@@ -93,10 +96,10 @@ class MedicalAugmentation3D:
 
     def __init__(
         self,
-        flip_prob: float = 0.5,
-        rotate_range_deg: float = 20.0,
-        gamma_range: tuple[float, float] = (0.7, 1.4),
-        intensity_scale: float = 0.1,
+        flip_prob: float = 0.0,
+        rotate_range_deg: float = 12.0,
+        gamma_range: tuple[float, float] = (0.8, 1.25),
+        intensity_scale: float = 0.08,
     ) -> None:
         self.flip_prob = flip_prob
         self.rotate_range_deg = rotate_range_deg
@@ -109,11 +112,11 @@ class MedicalAugmentation3D:
         label: np.ndarray | None = None,
     ) -> tuple[np.ndarray, np.ndarray | None]:
         # image: (H, W, D), label: (H, W, D)
-        if np.random.rand() < self.flip_prob:
+        if self.flip_prob > 0 and np.random.rand() < self.flip_prob:
             image = np.flip(image, axis=0)
             if label is not None:
                 label = np.flip(label, axis=0)
-        if np.random.rand() < self.flip_prob:
+        if self.flip_prob > 0 and np.random.rand() < self.flip_prob:
             image = np.flip(image, axis=1)
             if label is not None:
                 label = np.flip(label, axis=1)
@@ -150,7 +153,7 @@ class LgeSaxDataset(Dataset):
         cache_dir: Path | str | None = None,
         target_shape: tuple[int, int, int] = (192, 192, 16),
         target_spacing: tuple[float, float, float] = (1.0, 1.0, 10.0),
-        intensity_percentiles: tuple[float, float] = (0.95, 99.5),
+        intensity_percentiles: tuple[float, float] = (0.5, 99.5),
         augment: bool = False,
     ) -> None:
         self.records = records.reset_index(drop=True)
@@ -240,7 +243,7 @@ class LgeLaxDataset(Dataset):
         cache_dir: Path | str | None = None,
         target_shape: tuple[int, int] = (256, 256),
         target_spacing: tuple[float, float] = (1.0, 1.0),
-        intensity_percentiles: tuple[float, float] | None = None,
+        intensity_percentiles: tuple[float, float] | None = (0.5, 99.5),
         in_channels: int = 1,
         augment: bool = False,
     ) -> None:
@@ -259,7 +262,15 @@ class LgeLaxDataset(Dataset):
             cache_file = self.cache_dir / f"{row.record_id}.npz" if self.cache_dir else None
             if cache_file and cache_file.exists():
                 with np.load(cache_file, allow_pickle=True) as data:
-                    d_slices = int(data["image"].shape[0]) if data["image"].ndim >= 3 else 1
+                    img_arr = data["image"]
+                    if img_arr.ndim >= 3:
+                        # If cached as (H, W, D), e.g. SAX (192, 192, 16)
+                        if img_arr.shape[0] > 32 and img_arr.shape[-1] <= 32:
+                            d_slices = int(img_arr.shape[-1])
+                        else:  # Cached as (D, H, W)
+                            d_slices = int(img_arr.shape[0])
+                    else:
+                        d_slices = 1
             else:
                 img_obj = nib.load(str(self.data_root / row.image_path))
                 d_slices = int(img_obj.shape[2]) if len(img_obj.shape) >= 3 else 1
@@ -286,9 +297,15 @@ class LgeLaxDataset(Dataset):
         # 1. Try loading from cache
         if self.cache_dir and (self.cache_dir / f"{parent_rec_id}.npz").exists():
             with np.load(self.cache_dir / f"{parent_rec_id}.npz", allow_pickle=True) as data:
-                all_images = data["image"]  # shape (D, H, W) or (H, W)
+                all_images = data["image"]
                 all_labels = data["label"] if "label" in data else None
                 
+                # Normalize layout to (D, H, W) if stored as (H, W, D)
+                if all_images.ndim == 3 and all_images.shape[0] > 32 and all_images.shape[-1] <= 32:
+                    all_images = np.transpose(all_images, (2, 0, 1))
+                    if all_labels is not None and all_labels.ndim == 3:
+                        all_labels = np.transpose(all_labels, (2, 0, 1))
+
                 if self.in_channels == 3 and all_images.ndim >= 3:
                     prev_idx = max(0, slice_idx - 1)
                     curr_idx = slice_idx

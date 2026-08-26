@@ -18,8 +18,8 @@ def build_rare_class_sampler(
     dataset: Dataset,
     *,
     rare_classes: Sequence[int] = (3, 2),
-    rare_boost: float = 5.0,
-    foreground_boost: float = 1.8,
+    rare_boost: float = 2.5,
+    foreground_boost: float = 1.5,
 ) -> WeightedRandomSampler:
     """Build a WeightedRandomSampler that oversamples slices/volumes containing rare classes.
     

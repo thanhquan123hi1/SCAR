@@ -29,7 +29,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from preprocessing.preprocessing import preprocess_mask, preprocess_spatial
+from preprocessing.preprocessing import extract_tissue_foreground, preprocess_mask, preprocess_spatial
 
 logging.basicConfig(
     level=logging.INFO,
@@ -136,12 +136,11 @@ def process_manifest(
             )
             orig_spacing_2d = tuple(float(v) for v in zooms[:2])
 
-            # BUG #1 FIX: Compute percentile bounds on the FULL 3D volume ONCE,
-            # then pass to each slice for consistent normalization.
             precomputed_bounds = None
             if percentiles is not None:
                 full_vol = np.asarray(image_data, dtype=np.float32)
-                p_low, p_high = np.percentile(full_vol, percentiles)
+                fg = extract_tissue_foreground(full_vol)
+                p_low, p_high = np.percentile(fg, percentiles)
                 if np.isfinite(p_low) and np.isfinite(p_high) and p_high > p_low:
                     precomputed_bounds = (float(p_low), float(p_high))
 

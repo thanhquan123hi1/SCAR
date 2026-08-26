@@ -36,8 +36,8 @@ class ResUNetPlusPlusEncoder(nn.Module):
         self.res_conv2 = ResidualConv(filters[1], filters[2], stride=2, padding=1, reduction=reduction)
         self.res_conv3 = ResidualConv(filters[2], filters[3], stride=2, padding=1, reduction=reduction)
 
-        # ASPP bridge at bottleneck with 4 branches [1, 6, 12, 18]
-        self.aspp_bridge = ASPP(filters[3], filters[4], rate=[1, 6, 12, 18])
+        # ASPP bridge at bottleneck with 4 branches [1, 2, 4, 8]
+        self.aspp_bridge = ASPP(filters[3], filters[4], rate=[1, 2, 4, 8])
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         x1 = self.stem(x)          # (B, F0, H, W)
@@ -71,8 +71,8 @@ class ResUNetPlusPlusDecoder(nn.Module):
         self.upsample3 = Upsample_(scale=2)
         self.up_res_conv3 = ResidualConv(filters[2] + filters[0], filters[1], stride=1, padding=1, reduction=reduction)
 
-        # Multi-scale ASPP Output with 4 branches [1, 6, 12, 18] + 1x1 Classification Head
-        self.aspp_out = ASPP(filters[1], filters[0], rate=[1, 6, 12, 18])
+        # Multi-scale ASPP Output with 4 branches [1, 2, 4, 8] + 1x1 Classification Head
+        self.aspp_out = ASPP(filters[1], filters[0], rate=[1, 2, 4, 8])
         self.output_layer = nn.Conv2d(filters[0], num_classes, kernel_size=1)
 
     def forward(

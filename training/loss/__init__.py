@@ -29,9 +29,9 @@ def masks_to_one_vs_rest(mask: torch.Tensor, num_classes: int) -> torch.Tensor:
 
 
 class SoftDiceLoss(nn.Module):
-    """Multi-class Soft Dice Loss."""
+    """Multi-class Soft Dice Loss with Laplace smoothing (smooth=1.0)."""
 
-    def __init__(self, num_classes: int, smooth: float = 1e-6, ignore_background: bool = True):
+    def __init__(self, num_classes: int, smooth: float = 1.0, ignore_background: bool = True):
         super().__init__()
         self.num_classes = num_classes
         self.smooth = smooth
@@ -47,7 +47,7 @@ class SoftDiceLoss(nn.Module):
         p = probs[:, start_cls:]
         t = one_hot[:, start_cls:]
         intersection = torch.sum(p * t, dim=dims)
-        denominator = torch.sum(p + t, dim=dims).clamp_min(self.smooth)
+        denominator = torch.sum(p + t, dim=dims).clamp_min(1e-6)
         dice = (2.0 * intersection + self.smooth) / (denominator + self.smooth)
         return (1.0 - dice).mean()
 
@@ -67,7 +67,7 @@ class OneVsRestCompoundLoss(nn.Module):
         focal_gamma: float = 2.0,
         pos_weight: list[float] | torch.Tensor | None = None,
         class_weights: list[float] | torch.Tensor | None = None,
-        smooth: float = 1e-6,
+        smooth: float = 1.0,
         **kwargs,
     ):
         super().__init__()
@@ -178,7 +178,7 @@ class FocalTverskyLoss(nn.Module):
         alpha: float = 0.3,
         beta: float = 0.7,
         gamma: float = 1.33,
-        smooth: float = 1e-6,
+        smooth: float = 1.0,
         **kwargs,
     ):
         super().__init__()

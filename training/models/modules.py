@@ -83,15 +83,15 @@ class ASPP(nn.Module):
     """Atrous Spatial Pyramid Pooling (DeepLab v3+ style).
     
     Contains:
-    - 1×1 convolution (replaces the incorrect rate=1 with kernel_size=3)
-    - 3 atrous convolutions with rates [6, 12, 18]
+    - 1×1 convolution (standard ASPP)
+    - 3 atrous convolutions with rates [2, 4, 8] (optimized for medical feature maps 24x24 to 64x64)
     - Image-level global average pooling for global context
     """
 
     def __init__(self, in_dims: int, out_dims: int, rate: list[int] | None = None):
         super().__init__()
         if rate is None:
-            rate = [1, 6, 12, 18]
+            rate = [1, 2, 4, 8]
 
         self.branches = nn.ModuleList()
         for r in rate:

@@ -144,6 +144,8 @@ class Trainer:
         self.model.eval()
         losses = []
         all_dices: list[dict[int, float]] = []
+        global_inter: dict[int, int] = {c: 0 for c in range(1, self.num_classes)}
+        global_denom: dict[int, int] = {c: 0 for c in range(1, self.num_classes)}
 
         with torch.no_grad():
             for batch in dataloader:
@@ -188,13 +190,21 @@ class Trainer:
                 for b in range(len(preds)):
                     d_dict = dice_score(preds[b], targets[b], num_classes=self.num_classes)
                     all_dices.append(d_dict)
+                    for c in range(1, self.num_classes):
+                        p_mask = preds[b] == c
+                        t_mask = targets[b] == c
+                        global_inter[c] += int((p_mask & t_mask).sum())
+                        global_denom[c] += int(p_mask.sum() + t_mask.sum())
 
         val_loss = float(np.mean(losses)) if losses else math.nan
         metrics_summary: dict[str, float] = {}
 
         for c in range(1, self.num_classes):
-            c_scores = [d[c] for d in all_dices if c in d and not np.isnan(d[c])]
-            metrics_summary[f"dice_class_{c}"] = float(np.mean(c_scores)) if c_scores else float("nan")
+            if global_denom[c] > 0:
+                metrics_summary[f"dice_class_{c}"] = float(2.0 * global_inter[c] / global_denom[c])
+            else:
+                c_scores = [d[c] for d in all_dices if c in d and not np.isnan(d[c])]
+                metrics_summary[f"dice_class_{c}"] = float(np.mean(c_scores)) if c_scores else float("nan")
 
         # Class 3 is SCAR in LGE SAX, 2CH, 4CH
         if "dice_class_3" in metrics_summary:
