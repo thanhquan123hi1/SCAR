@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from training.dataset.lge_dataset import LgeLaxDataset, LgeSaxDataset
+from training.dataset.sampler import build_rare_class_sampler
 from training.loss import build_loss
 from training.models import build_model
 from training.trainer.trainer import Trainer
@@ -117,6 +118,10 @@ def main() -> None:
     raw_root = ROOT / config["data"]["raw_root"]
 
     DatasetClass = LgeSaxDataset if view == "SAX" else LgeLaxDataset
+    in_channels = int(config.get("training", {}).get("in_channels", config.get("model", {}).get("in_channels", 1)))
+    ds_kwargs = {}
+    if view != "SAX":
+        ds_kwargs["in_channels"] = in_channels
 
     train_ds = DatasetClass(
         records=train_df,
@@ -126,6 +131,7 @@ def main() -> None:
         target_spacing=target_spacing,
         intensity_percentiles=percentiles,
         augment=bool(config.get("training", {}).get("augment", True)),
+        **ds_kwargs,
     )
     val_ds = DatasetClass(
         records=val_df,
@@ -135,12 +141,26 @@ def main() -> None:
         target_spacing=target_spacing,
         intensity_percentiles=percentiles,
         augment=False,
+        **ds_kwargs,
     )
+
+    # Sampler
+    sampler_cfg = config.get("training", {}).get("sampler", {})
+    use_sampler = bool(sampler_cfg.get("enabled", False))
+    sampler = None
+    if use_sampler:
+        sampler = build_rare_class_sampler(
+            train_ds,
+            rare_classes=sampler_cfg.get("rare_classes", [3, 2]),
+            rare_boost=float(sampler_cfg.get("rare_boost", 5.0)),
+            foreground_boost=float(sampler_cfg.get("foreground_boost", 1.8)),
+        )
 
     train_loader = torch.utils.data.DataLoader(
         train_ds,
         batch_size=int(config["training"]["batch_size"]),
-        shuffle=True,
+        shuffle=(sampler is None),
+        sampler=sampler,
         num_workers=int(config["data"].get("num_workers", 0)),
         pin_memory=bool(config["data"].get("pin_memory", False)),
     )
@@ -153,9 +173,14 @@ def main() -> None:
 
     # Model
     num_classes = int(config.get("num_classes", 5))
+    model_kwargs = dict(config.get("model", {}))
+    model_kwargs["num_classes"] = num_classes
+    if "in_channels" not in model_kwargs and view != "SAX":
+        model_kwargs["in_channels"] = in_channels
+
     model = build_model(
         config["model_name"],
-        **{**config.get("model", {}), "num_classes": num_classes},
+        **model_kwargs,
     ).to(device)
 
     # Optimizer & Scheduler
@@ -164,16 +189,27 @@ def main() -> None:
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=wd)
 
     epochs = int(config["training"]["epochs"])
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-6)
+    sched_cfg = config.get("training", {}).get("scheduler", {})
+    min_lr = float(sched_cfg.get("min_lr", 1e-6))
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=min_lr)
 
     # Loss
     loss_cfg = config.get("loss", {})
-    loss_fn = build_loss(
-        loss_cfg.get("name", "ce_dice"),
-        num_classes=num_classes,
-        ce_weight=float(loss_cfg.get("ce_weight", 1.0)),
-        dice_weight=float(loss_cfg.get("dice_weight", 1.0)),
-    )
+    loss_name = loss_cfg.get("name", "one_vs_rest_compound")
+    loss_kwargs = {
+        "num_classes": num_classes,
+        "ce_weight": float(loss_cfg.get("ce_weight", 1.0)),
+        "dice_weight": float(loss_cfg.get("dice_weight", 1.0)),
+        "bce_weight": float(loss_cfg.get("bce_weight", 0.5)),
+        "focal_weight": float(loss_cfg.get("focal_weight", 0.4)),
+        "focal_gamma": float(loss_cfg.get("focal_gamma", 2.0)),
+        "pos_weight": loss_cfg.get("pos_weight", None),
+        "class_weights": loss_cfg.get("class_weights", None),
+        "alpha": float(loss_cfg.get("alpha", 0.3)),
+        "beta": float(loss_cfg.get("beta", 0.7)),
+        "gamma": float(loss_cfg.get("gamma", 1.33)),
+    }
+    loss_fn = build_loss(loss_name, **loss_kwargs)
 
     # Trainer
     trainer = Trainer(

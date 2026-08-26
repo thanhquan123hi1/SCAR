@@ -140,6 +140,27 @@ def main() -> None:
     logger.info("Splits CSVs saved to %s", out_dir)
     logger.info("Total: %d records across %d views.", len(df), df["view"].nunique())
 
+    # ---- Patient-level data leakage check ----
+    for view in df["view"].unique():
+        view_df = df[df["view"] == view]
+        splits_present = view_df["split"].unique()
+        if len(splits_present) <= 1:
+            continue
+        for s1 in splits_present:
+            for s2 in splits_present:
+                if s1 >= s2:
+                    continue
+                ids_s1 = set(view_df[view_df["split"] == s1]["subject_id"])
+                ids_s2 = set(view_df[view_df["split"] == s2]["subject_id"])
+                overlap = ids_s1 & ids_s2
+                if overlap:
+                    logger.warning(
+                        "⚠️ DATA LEAKAGE: View '%s' has %d overlapping patients between '%s' and '%s': %s",
+                        view, len(overlap), s1, s2, overlap,
+                    )
+                else:
+                    logger.info("  ✓ View '%s': '%s' ∩ '%s' = ∅ (no leakage)", view, s1, s2)
+
 
 if __name__ == "__main__":
     main()

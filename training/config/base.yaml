@@ -1,21 +1,31 @@
 # training/config/base.yaml
-# Cấu hình Ultra-Fast Mode: epochs=25, train siêu tốc toàn bộ 4 models trong ~5 phút
+# Cấu hình chuẩn Benchmark cho bài toán phân đoạn sẹo LGE
 
 seed: 42
 device: auto                  # "auto" = dùng CUDA nếu có, ngược lại CPU
 
 training:
-  epochs: 25
+  epochs: 100                 # Chuẩn SOTA: 100-150 epochs
   batch_size: 4
   optimizer: adamw
   learning_rate: 1.0e-4
   weight_decay: 0.01
   augment: true
+  in_channels: 1              # 1 cho 2D thông thường / 3 cho 2.5D context
+  scheduler:
+    name: cosine              # cosine | step | none
+    warmup_epochs: 5
+    min_lr: 1.0e-6
+  sampler:
+    enabled: true             # Kích hoạt Weighted Sampler cho lớp sẹo
+    rare_classes: [3, 2]      # Class 3: Sẹo, Class 2: Cơ tim
+    rare_boost: 5.0           # Tăng tần suất lấy mẫu lát cắt có sẹo lên gấp 5 lần
+    foreground_boost: 1.8
   early_stopping:
     enabled: true
     monitor: dice_scar        # dice_scar | mean_dice | val_loss
     mode: max                 # max cho dice, min cho loss
-    patience: 10
+    patience: 25              # Tăng patience để tránh dừng sớm
     min_delta: 0.0001
 
 data:
@@ -26,9 +36,21 @@ data:
   pin_memory: true
 
 loss:
-  name: ce_dice               # ce | dice | ce_dice
-  ce_weight: 1.0
-  dice_weight: 1.0
+  name: one_vs_rest_compound  # one_vs_rest_compound | focal_tversky | ce_dice
+  bce_weight: 0.5
+  dice_weight: 0.5
+  focal_weight: 0.4
+  focal_gamma: 2.0
+  # Trọng số phạt dương tính theo từng lớp foreground: [lv, myo, scar] cho 2CH
+  pos_weight: [2.0, 3.5, 6.5]
+  class_weights: [1.0, 1.6, 2.4]
+
+postprocess:
+  enabled: true
+  use_rules: true             # Giải mã xác suất theo luật ưu tiên
+  anatomical_constraint: true # Ràng buộc giải phẫu: Scar bắt buộc nằm trong Myocardium
+  dilation_voxels: 1
+  min_scar_voxels: 5
 
 evaluation:
   metrics: [dice, iou, hd95_mm, scar_mass_g, scar_volume_ml]
@@ -37,3 +59,4 @@ evaluation:
 outputs:
   run_root: outputs/runs
   report_root: outputs/reports
+

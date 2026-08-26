@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from training.metrics import dice_score
+from training.postprocess import decode_with_rules, enforce_anatomical_constraints
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)s  %(message)s")
 logger = logging.getLogger(__name__)
@@ -153,7 +154,35 @@ class Trainer:
                 loss = self.loss_fn(logits, labels)
                 losses.append(float(loss.detach().cpu()))
 
-                preds = torch.argmax(logits, dim=1).cpu().numpy()
+                # Decode logits: One-vs-Rest or Softmax Argmax
+                post_cfg = self.config.get("postprocess", {})
+                use_rules = post_cfg.get("use_rules", True)
+
+                if logits.shape[1] == self.num_classes - 1:
+                    preds_tensor = decode_with_rules(logits, view=self.view)
+                elif use_rules and logits.shape[1] == self.num_classes:
+                    preds_tensor = decode_with_rules(logits[:, 1:], view=self.view)
+                else:
+                    preds_tensor = torch.argmax(logits, dim=1)
+
+                preds_np = preds_tensor.cpu().numpy()
+
+                # Apply anatomical constraints if enabled
+                if post_cfg.get("anatomical_constraint", True):
+                    cleaned_preds = []
+                    for b in range(preds_np.shape[0]):
+                        cleaned = enforce_anatomical_constraints(
+                            preds_np[b],
+                            scar_class=3,
+                            myo_class=2,
+                            dilation_voxels=int(post_cfg.get("dilation_voxels", 1)),
+                            min_scar_voxels=int(post_cfg.get("min_scar_voxels", 5)),
+                        )
+                        cleaned_preds.append(cleaned)
+                    preds = np.stack(cleaned_preds, axis=0)
+                else:
+                    preds = preds_np
+
                 targets = labels.cpu().numpy()
 
                 for b in range(len(preds)):

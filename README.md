@@ -1,6 +1,6 @@
 # SCAR — LGE Cardiac MRI Segmentation
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/thanhquan123hi1/SCAR/blob/main/3gay.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/thanhquan123hi1/SCAR/blob/main/scar_pipeline.ipynb)
 
 Repo NCKH phục vụ segmentation LGE (Late Gadolinium Enhancement) MRI tim đa góc nhìn (SAX 3D, 2CH, 4CH, RAS 2D).
 Mục tiêu: segmentation scar/fibrosis và các cấu trúc tim từ ảnh LGE NIfTI và định lượng sẹo cơ tim lâm sàng (Scar volume mL, Scar mass g).
@@ -38,28 +38,39 @@ SCAR/
 └── requirements.txt
 ```
 
-## Label maps (LGE SAX)
+## Label maps (LGE SAX, 2CH, 4CH)
 
-| Label | Cấu trúc |
-|-------|----------|
-| 0 | background |
-| 1 | lv_cavity |
-| 2 | lv_myo |
-| 3 | **scar** |
-| 4 | rv_cavity |
+| Label | Cấu trúc | Ghi chú |
+|---|---|---|
+| 0 | Background | Nền |
+| 1 | LV Cavity | Khoang thất trái |
+| 2 | LV Myo | Cơ tim thất trái |
+| 3 | **Scar** | Sẹo cơ tim (Mục tiêu chính) |
+| 4 | RV Cavity | Khoang thất phải (cho SAX, 4CH) |
+
+## Kỹ thuật SOTA tích hợp trong Standard Baseline
+
+1. **One-vs-Rest Compound Loss:** Kết hợp BCE (với `pos_weight=6.5` riêng cho sẹo), Focal Modulation (`gamma=2.0`) và Binary SoftDice Loss để triệt tiêu hiện tượng sụp đổ gradient của sẹo.
+2. **Weighted Rare-Class Sampler (`rare_boost=5.0`):** Ưu tiên lấy mẫu các lát cắt chứa sẹo gấp 5 lần, giải quyết triệt để mất cân bằng dữ liệu cực đoan (<1% sẹo).
+3. **2.5D Context / 3-Channel Input (`in_channels=3`):** Cung cấp ngữ cảnh 3 lát cắt $[s-1, s, s+1]$ cho chuỗi volume đa lát cắt (như SAX) hoặc biểu diễn 3-kênh đồng nhất cho các mặt cắt đơn 2D (2CH/4CH/RAS).
+4. **Kiến trúc SOTA ResUNet++:** Tích hợp Squeeze-and-Excitation (SE-Block), Attention Gate chuẩn (lọc nhiễu trên Skip Connection) và Atrous Spatial Pyramid Pooling (ASPP Bridge).
+5. **Hậu xử lý Ràng buộc Giải phẫu (`Anatomical Constraints`):** Ép sẹo chỉ được xuất hiện trong vùng cơ tim ($\text{Scar} \subseteq \text{Myocardium}$) và lọc bỏ nhiễu giả ngoài tim.
 
 ## Chạy 1-Click Toàn Diện (Khuyên Dùng)
 
 ```bash
-# Tự động thực hiện 4 bước: Sinh Splits CSV -> Caching .npz -> Train -> Đánh giá & Định lượng sẹo
-python run_all.py --config training/config/models/unet_3d.yaml --run-id unet3d_lge_sax_run01
+# Huấn luyện mô hình ResUNet++ 2.5D chuẩn SOTA trên góc nhìn 2CH:
+python run_all.py --config training/config/models/resunet_plus_plus_2d.yaml --run-id resunet_2ch_sota
+
+# Huấn luyện mô hình 3D U-Net trên góc nhìn SAX:
+python run_all.py --config training/config/models/unet_3d.yaml --run-id unet3d_sax_sota
 ```
 
 ## Chạy trên Google Colab
 
-1. Nhấp vào nút **Open in Colab** ở đầu trang hoặc mở file [`3gay.ipynb`](file:///d:/NCKH/SCAR/3gay.ipynb).
+1. Nhấp vào nút **Open in Colab** ở đầu trang hoặc mở file `scar_pipeline.ipynb`.
 2. Chọn Runtime GPU (**Runtime > Change runtime type > T4 GPU**).
-3. Chạy tuần tự các cell: Mount Google Drive -> Clone Repo -> Cài dependencies -> Chạy pipeline và xem đồ thị trực quan.
+3. Chạy tuần tự các cell: Mount Google Drive -> Clone/Pull Repo mới nhất -> Chạy pipeline và xem đồ thị `dice_scar`.
 
 ## Workflow Chi Tiết Từng Bước
 
@@ -67,30 +78,26 @@ python run_all.py --config training/config/models/unet_3d.yaml --run-id unet3d_l
 # 1. Cài dependencies
 pip install -r requirements.txt
 
-# 2. Đặt dữ liệu LGE vào:
-#    data/LGE_MULTI/SAX_TR/image/*.nii.gz
-#                          /anno/*.nii.gz
-
-# 3. Sinh CSV splits
+# 2. Sinh CSV splits
 python preprocessing/build_splits.py \
     --data-root data/LGE_MULTI \
     --output data/processed/splits
 
-# 4. Tiền xử lý & Caching siêu tốc
+# 3. Tiền xử lý & Caching siêu tốc
 python preprocessing/process_and_save.py \
     --data-root data/LGE_MULTI \
     --splits-dir data/processed/splits \
     --output-dir data/processed/cache
 
-# 5. Huấn luyện mô hình (3D SAX hoặc 2D LAX)
+# 4. Huấn luyện mô hình ResUNet++ 2.5D SOTA
 python training/train.py \
-    --config training/config/models/unet_3d.yaml \
-    --run-id unet3d_lge_sax_exp01
+    --config training/config/models/resunet_plus_plus_2d.yaml \
+    --run-id resunet_2ch_sota
 
-# 6. Đánh giá chi tiết & Định lượng sẹo
+# 5. Đánh giá chi tiết & Định lượng sẹo lâm sàng
 python training/evaluate.py \
-    --config outputs/runs/unet3d_lge_sax_exp01/config_snapshot.yaml \
-    --checkpoint outputs/runs/unet3d_lge_sax_exp01/checkpoints/best.pt \
+    --config outputs/runs/resunet_2ch_sota/config_snapshot.yaml \
+    --checkpoint outputs/runs/resunet_2ch_sota/checkpoints/best.pt \
     --split validation
 ```
 

@@ -56,10 +56,11 @@ class UpBlock2D(nn.Module):
 
     def __init__(self, in_channels: int, skip_channels: int, out_channels: int) -> None:
         super().__init__()
-        self.conv_trans = nn.ConvTranspose2d(in_channels, in_channels, kernel_size=2, stride=2, bias=False)
-        self.norm = nn.BatchNorm2d(in_channels)
+        # Reduce channels during upsample to avoid parameter bloat
+        self.conv_trans = nn.ConvTranspose2d(in_channels, out_channels, kernel_size=2, stride=2, bias=False)
+        self.norm = nn.BatchNorm2d(out_channels)
         self.act = nn.LeakyReLU(negative_slope=0.01, inplace=True)
-        self.conv = ConvBlock2D(in_channels + skip_channels, out_channels)
+        self.conv = ConvBlock2D(out_channels + skip_channels, out_channels)
 
     def forward(self, x: torch.Tensor, skip: torch.Tensor) -> torch.Tensor:
         x = self.act(self.norm(self.conv_trans(x)))
@@ -91,8 +92,7 @@ class UNet2D(nn.Module):
         self.down1 = DownBlock2D(features[0], features[1])
         self.down2 = DownBlock2D(features[1], features[2])
         self.down3 = DownBlock2D(features[2], features[3])
-
-        self.bottleneck = ConvBlock2D(features[3], features[3] * 2, dropout=dropout)
+        self.down4 = DownBlock2D(features[3], features[3] * 2)
 
         self.up3 = UpBlock2D(features[3] * 2, features[3], features[3])
         self.up2 = UpBlock2D(features[3], features[2], features[2])
@@ -106,8 +106,7 @@ class UNet2D(nn.Module):
         s1 = self.down1(s0)
         s2 = self.down2(s1)
         s3 = self.down3(s2)
-
-        b = self.bottleneck(s3)
+        b = self.down4(s3)
 
         d3 = self.up3(b, s3)
         d2 = self.up2(d3, s2)

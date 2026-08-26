@@ -1,5 +1,5 @@
 # training/config/models/unet_2d_4ch.yaml
-# Config cho 2D Residual U-Net trên LGE 4-Chamber (Ultra-Fast Mode: batch_size=32)
+# Config cho 2D Residual U-Net trên LGE 4-Chamber
 
 model_name: unet_2d
 view: 4CH
@@ -15,8 +15,23 @@ model:
 preprocessing:
   target_shape: [256, 256]
   target_spacing: [1.0, 1.0]
-  intensity_percentiles: null
+  intensity_percentiles: [0.5, 99.5]
+
+loss:
+  name: one_vs_rest_compound
+  bce_weight: 0.5
+  dice_weight: 0.5
+  focal_weight: 0.4
+  focal_gamma: 2.0
+  pos_weight: [1.8, 2.2, 5.0, 2.0]
+  class_weights: [1.0, 1.2, 2.0, 1.0]
 
 training:
-  batch_size: 32
+  batch_size: 8
   learning_rate: 1.0e-4
+  epochs: 100
+  early_stopping:
+    enabled: true
+    monitor: val_loss
+    mode: min
+    patience: 25

@@ -1,5 +1,5 @@
 # training/config/models/unet_3d.yaml
-# Config cho 3D U-Net trên LGE SAX Volume (Ultra-Fast Mode: batch_size=4)
+# Config cho 3D U-Net trên LGE SAX Volume
 
 model_name: unet_3d
 view: SAX
@@ -15,8 +15,23 @@ model:
 preprocessing:
   target_shape: [192, 192, 16]
   target_spacing: [1.0, 1.0, 10.0]
-  intensity_percentiles: [0.95, 99.5]
+  intensity_percentiles: [0.5, 99.5]
+
+loss:
+  name: one_vs_rest_compound
+  bce_weight: 0.5
+  dice_weight: 0.5
+  focal_weight: 0.4
+  focal_gamma: 2.0
+  pos_weight: [2.0, 2.5, 6.0, 2.0]      # 4 foreground classes: [lv, myo, scar, rv]
+  class_weights: [1.0, 1.2, 2.0, 1.0]
 
 training:
   batch_size: 4
   learning_rate: 1.0e-4
+  epochs: 100
+  early_stopping:
+    enabled: true
+    monitor: val_loss
+    mode: min
+    patience: 25

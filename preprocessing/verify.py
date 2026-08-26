@@ -47,7 +47,7 @@ def main() -> None:
         return
 
     for img_path in image_files:
-        nii = nib.load(str(img_path))
+        nii = nib.as_closest_canonical(nib.load(str(img_path)))
         image = np.asanyarray(nii.dataobj)
         spacing = tuple(float(v) for v in nii.header.get_zooms()[: len(target_shape)])
 
@@ -67,7 +67,7 @@ def main() -> None:
         # Check label if available
         label_path = img_path.parent.parent / "anno" / img_path.name
         if label_path.exists():
-            label_nii = nib.load(str(label_path))
+            label_nii = nib.as_closest_canonical(nib.load(str(label_path)))
             label = np.rint(np.asanyarray(label_nii.dataobj)).astype(np.int16)
             label_proc = preprocess_mask(
                 label,

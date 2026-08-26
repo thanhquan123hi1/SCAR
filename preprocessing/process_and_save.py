@@ -62,7 +62,8 @@ def process_manifest(
             logger.warning("Image file not found: %s", img_file)
             continue
 
-        nii_img = nib.load(str(img_file))
+        raw_nii_img = nib.load(str(img_file))
+        nii_img = nib.as_closest_canonical(raw_nii_img)
         image_data = np.asanyarray(nii_img.dataobj)
         affine = nii_img.affine
         zooms = nii_img.header.get_zooms()
@@ -72,7 +73,9 @@ def process_manifest(
         if has_label:
             lbl_file = data_root / row["label_path"]
             if lbl_file.exists():
-                lbl_data = np.rint(np.asanyarray(nib.load(str(lbl_file)).dataobj)).astype(np.int16)
+                raw_nii_lbl = nib.load(str(lbl_file))
+                nii_lbl = nib.as_closest_canonical(raw_nii_lbl)
+                lbl_data = np.rint(np.asanyarray(nii_lbl.dataobj)).astype(np.int16)
 
         save_dict: dict = {
             "affine": affine,
@@ -87,9 +90,9 @@ def process_manifest(
         # ---------------------------------------------------------------
         if view == "SAX":
             if image_data.ndim == 4:
-                image_data = np.squeeze(image_data)
+                image_data = image_data[..., 0] if image_data.shape[-1] == 1 else image_data[:, :, :, 0]
             if lbl_data is not None and lbl_data.ndim == 4:
-                lbl_data = np.squeeze(lbl_data)
+                lbl_data = lbl_data[..., 0] if lbl_data.shape[-1] == 1 else lbl_data[:, :, :, 0]
 
             target_shape = tuple(cfg_sax["target_shape"])       # (192, 192, 16)
             target_spacing = tuple(cfg_sax["target_spacing"])   # (1.0, 1.0, 10.0)
@@ -133,6 +136,15 @@ def process_manifest(
             )
             orig_spacing_2d = tuple(float(v) for v in zooms[:2])
 
+            # BUG #1 FIX: Compute percentile bounds on the FULL 3D volume ONCE,
+            # then pass to each slice for consistent normalization.
+            precomputed_bounds = None
+            if percentiles is not None:
+                full_vol = np.asarray(image_data, dtype=np.float32)
+                p_low, p_high = np.percentile(full_vol, percentiles)
+                if np.isfinite(p_low) and np.isfinite(p_high) and p_high > p_low:
+                    precomputed_bounds = (float(p_low), float(p_high))
+
             num_slices = image_data.shape[2] if image_data.ndim >= 3 else 1
             proc_slices = []
             proc_labels = []
@@ -146,7 +158,8 @@ def process_manifest(
                     target_spacing=target_spacing,
                     target_shape=target_shape,
                     interpolation_order=1,
-                    intensity_percentiles=percentiles,
+                    intensity_percentiles=percentiles if precomputed_bounds is None else None,
+                    precomputed_intensity_bounds=precomputed_bounds,
                 )
                 proc_slices.append(p_img)
                 transforms.append(trans.to_dict())

@@ -189,16 +189,18 @@ def invert_center_crop_or_pad(
 def percentile_minmax(
     array: np.ndarray,
     *,
-    lower: float,
-    upper: float,
+    lower: float = 0.5,
+    upper: float = 99.5,
 ) -> np.ndarray:
-    """Percentile clipping followed by [0, 1] min-max scaling.
-
-    Recommended for LGE SAX (lower=0.95, upper=99.5).
-    """
+    """Percentile clipping on tissue foreground followed by [0, 1] min-max scaling."""
 
     source = np.asarray(array, dtype=np.float32)
-    low, high = np.percentile(source, (lower, upper))
+    fg = source[source > 0]
+    if fg.size > 100:
+        low, high = np.percentile(fg, (lower, upper))
+        low = max(0.0, float(low))
+    else:
+        low, high = np.percentile(source, (lower, upper))
     if not np.isfinite(low) or not np.isfinite(high) or high <= low:
         return np.zeros_like(source, dtype=np.float32)
     clipped = np.clip(source, low, high)
@@ -220,6 +222,23 @@ def minmax(array: np.ndarray) -> np.ndarray:
 # Combined spatial preprocessing (main entry point)
 # ---------------------------------------------------------------------------
 
+def zscore(array: np.ndarray, *, clip_percentiles: tuple[float, float] | None = None) -> np.ndarray:
+    """Z-score normalization (zero mean, unit variance) with optional percentile clipping.
+    
+    Recommended by nnUNet and SOTA medical image segmentation pipelines.
+    """
+    source = np.asarray(array, dtype=np.float32)
+    if clip_percentiles is not None:
+        low, high = np.percentile(source, clip_percentiles)
+        if np.isfinite(low) and np.isfinite(high) and high > low:
+            source = np.clip(source, low, high)
+    mean_val = float(np.mean(source))
+    std_val = float(np.std(source))
+    if std_val < 1e-8:
+        return np.zeros_like(source, dtype=np.float32)
+    return ((source - mean_val) / std_val).astype(np.float32, copy=False)
+
+
 def preprocess_spatial(
     array: np.ndarray,
     *,
@@ -228,8 +247,9 @@ def preprocess_spatial(
     target_shape: tuple[int, ...],
     interpolation_order: int = 1,
     intensity_percentiles: tuple[float, float] | None = None,
+    precomputed_intensity_bounds: tuple[float, float] | None = None,
 ) -> tuple[np.ndarray, SpatialTransform]:
-    """Resample → normalize → center crop/pad an image.
+    """Normalize → resample → center crop/pad an image.
 
     Args:
         array: Input numpy array (image or mask).
@@ -239,25 +259,39 @@ def preprocess_spatial(
         interpolation_order: 1 for images (bilinear), 0 for masks (nearest).
         intensity_percentiles: If given, use percentile clipping; else plain minmax.
             Pass None for masks (normalization is skipped when order=0).
+        precomputed_intensity_bounds: If given as (low, high), use these values
+            directly instead of computing percentiles on this array. Essential
+            for per-slice processing to maintain consistent normalization.
 
     Returns:
         (processed_array, SpatialTransform) — transform is needed to invert predictions.
     """
 
     original_shape = tuple(int(item) for item in np.asarray(array).shape)
-    resized_shape = shape_for_spacing(original_shape, source_spacing, target_spacing)
-    resized = resize_to_shape(array, resized_shape, order=interpolation_order)
-
-    if intensity_percentiles is None:
-        normalized = minmax(resized)
-    else:
+    
+    # Normalize BEFORE resample to avoid interpolation of outlier values
+    source = np.asarray(array, dtype=np.float32)
+    if precomputed_intensity_bounds is not None:
+        low, high = precomputed_intensity_bounds
+        if np.isfinite(low) and np.isfinite(high) and high > low:
+            clipped = np.clip(source, low, high)
+            normalized = ((clipped - low) / (high - low)).astype(np.float32, copy=False)
+        else:
+            normalized = np.zeros_like(source, dtype=np.float32)
+    elif intensity_percentiles is not None:
         normalized = percentile_minmax(
-            resized,
+            source,
             lower=float(intensity_percentiles[0]),
             upper=float(intensity_percentiles[1]),
         )
+    else:
+        normalized = minmax(source)
 
-    transformed, center = center_crop_or_pad(normalized, target_shape)
+    # Resample AFTER normalization (Issue #8: correct order)
+    resized_shape = shape_for_spacing(original_shape, source_spacing, target_spacing)
+    resized = resize_to_shape(normalized, resized_shape, order=interpolation_order)
+
+    transformed, center = center_crop_or_pad(resized, target_shape)
     return transformed.astype(np.float32, copy=False), SpatialTransform(
         original_shape=original_shape,
         resized_shape=resized_shape,

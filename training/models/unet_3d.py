@@ -57,12 +57,13 @@ class UpBlock3D(nn.Module):
     def __init__(self, in_channels: int, skip_channels: int, out_channels: int, scale_factor: tuple[int, int, int] = (2, 2, 2)) -> None:
         super().__init__()
         self.scale_factor = scale_factor
+        # Reduce channels during upsample to avoid parameter bloat
         self.conv_trans = nn.ConvTranspose3d(
-            in_channels, in_channels, kernel_size=scale_factor, stride=scale_factor, bias=False
+            in_channels, out_channels, kernel_size=scale_factor, stride=scale_factor, bias=False
         )
-        self.norm = nn.InstanceNorm3d(in_channels, affine=True)
+        self.norm = nn.InstanceNorm3d(out_channels, affine=True)
         self.act = nn.LeakyReLU(negative_slope=0.01, inplace=True)
-        self.conv = ConvBlock3D(in_channels + skip_channels, out_channels)
+        self.conv = ConvBlock3D(out_channels + skip_channels, out_channels)
 
     def forward(self, x: torch.Tensor, skip: torch.Tensor) -> torch.Tensor:
         x = self.act(self.norm(self.conv_trans(x)))
@@ -93,33 +94,28 @@ class UNet3D(nn.Module):
 
         self.in_conv = ConvBlock3D(in_channels, features[0], dropout=dropout)
 
-        # Downsampling: for SAX (192, 192, 16), keep Z-axis pooling reasonable
-        self.down1 = DownBlock3D(features[0], features[1], pool_stride=(2, 2, 2))  # (96, 96, 8)
-        self.down2 = DownBlock3D(features[1], features[2], pool_stride=(2, 2, 2))  # (48, 48, 4)
-        self.down3 = DownBlock3D(features[2], features[3], pool_stride=(2, 2, 2))  # (24, 24, 2)
-
-        # Bottleneck
-        self.bottleneck = ConvBlock3D(features[3], features[3] * 2, dropout=dropout)
+        # Downsampling: anisotropic pooling for thick-slice SAX (192, 192, 16)
+        self.down1 = DownBlock3D(features[0], features[1], pool_stride=(1, 2, 2))  # (16, 96, 96)
+        self.down2 = DownBlock3D(features[1], features[2], pool_stride=(2, 2, 2))  # (8, 48, 48)
+        self.down3 = DownBlock3D(features[2], features[3], pool_stride=(2, 2, 2))  # (4, 24, 24)
+        self.down4 = DownBlock3D(features[3], features[3] * 2, pool_stride=(2, 2, 2))  # (2, 12, 12)
 
         # Upsampling
         self.up3 = UpBlock3D(features[3] * 2, features[3], features[3], scale_factor=(2, 2, 2))
         self.up2 = UpBlock3D(features[3], features[2], features[2], scale_factor=(2, 2, 2))
         self.up1 = UpBlock3D(features[2], features[1], features[1], scale_factor=(2, 2, 2))
-        self.up0 = UpBlock3D(features[1], features[0], features[0], scale_factor=(2, 2, 2))
+        self.up0 = UpBlock3D(features[1], features[0], features[0], scale_factor=(1, 2, 2))
 
         # Final segmentation head
         self.out_conv = nn.Conv3d(features[0], num_classes, kernel_size=1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, 1, H, W, D) or (B, 1, D, H, W)
-        # Note: PyTorch Conv3D expects (B, C, D, H, W).
-        # We ensure standard (B, C, D, H, W) internally.
+        # x: (B, C, D, H, W)
         s0 = self.in_conv(x)
         s1 = self.down1(s0)
         s2 = self.down2(s1)
         s3 = self.down3(s2)
-
-        b = self.bottleneck(s3)
+        b = self.down4(s3)
 
         d3 = self.up3(b, s3)
         d2 = self.up2(d3, s2)

@@ -35,6 +35,7 @@ sys.path.insert(0, str(ROOT))
 from preprocessing.preprocessing import invert_spatial_mask, preprocess_mask, preprocess_spatial
 from training.metrics import calculate_scar_metrics, dice_score, hd95_binary, iou_score
 from training.models import build_model
+from training.postprocess import decode_with_rules, enforce_anatomical_constraints
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)s  %(message)s")
 logger = logging.getLogger(__name__)
@@ -76,7 +77,8 @@ def evaluate_split(
         record_id = str(row["record_id"])
 
         img_file = data_root / row["image_path"]
-        nii_img = nib.load(str(img_file))
+        raw_nii_img = nib.load(str(img_file))
+        nii_img = nib.as_closest_canonical(raw_nii_img)
         raw_img = np.asanyarray(nii_img.dataobj)
         zooms = nii_img.header.get_zooms()
 
@@ -85,16 +87,22 @@ def evaluate_split(
         if has_label:
             lbl_file = data_root / row["label_path"]
             if lbl_file.exists():
-                raw_label = np.rint(np.asanyarray(nib.load(str(lbl_file)).dataobj)).astype(np.int16)
+                raw_nii_lbl = nib.load(str(lbl_file))
+                nii_lbl = nib.as_closest_canonical(raw_nii_lbl)
+                raw_label = np.rint(np.asanyarray(nii_lbl.dataobj)).astype(np.int16)
+
+        post_cfg = config.get("postprocess", {})
+        use_rules = post_cfg.get("use_rules", True)
+        in_channels = int(config.get("training", {}).get("in_channels", config.get("model", {}).get("in_channels", 1)))
 
         # -------------------------------------------------------------
         # CASE 1: 3D SAX
         # -------------------------------------------------------------
         if view == "SAX":
             if raw_img.ndim == 4:
-                raw_img = np.squeeze(raw_img)
+                raw_img = raw_img[..., 0] if raw_img.shape[-1] == 1 else raw_img[:, :, :, 0]
             if raw_label is not None and raw_label.ndim == 4:
-                raw_label = np.squeeze(raw_label)
+                raw_label = raw_label[..., 0] if raw_label.shape[-1] == 1 else raw_label[:, :, :, 0]
 
             orig_spacing = tuple(float(v) for v in zooms[:3])
             proc_img, transform = preprocess_spatial(
@@ -109,10 +117,15 @@ def evaluate_split(
             proc_dhw = np.transpose(proc_img, (2, 0, 1))  # (16, 192, 192)
             tensor = torch.from_numpy(proc_dhw[None, None, ...]).to(device, dtype=torch.float32)
             with torch.no_grad():
-                logits = model(tensor)  # (1, num_classes, 16, 192, 192)
-                pred_dhw = torch.argmax(logits, dim=1)[0].cpu().numpy().astype(np.int16)
-            pred_processed = np.transpose(pred_dhw, (1, 2, 0))  # back to (192, 192, 16)
+                logits = model(tensor)  # (1, C, 16, 192, 192)
+                if logits.shape[1] == num_classes - 1:
+                    pred_dhw = decode_with_rules(logits, view=view)[0].cpu().numpy().astype(np.int16)
+                elif use_rules and logits.shape[1] == num_classes:
+                    pred_dhw = decode_with_rules(logits[:, 1:], view=view)[0].cpu().numpy().astype(np.int16)
+                else:
+                    pred_dhw = torch.argmax(logits, dim=1)[0].cpu().numpy().astype(np.int16)
 
+            pred_processed = np.transpose(pred_dhw, (1, 2, 0))  # back to (192, 192, 16)
             restored_pred = invert_spatial_mask(pred_processed, transform)
 
         # -------------------------------------------------------------
@@ -124,23 +137,65 @@ def evaluate_split(
             restored_slices = []
 
             for s in range(d_count):
-                slice_img = raw_img[:, :, s] if raw_img.ndim >= 3 else raw_img
-                p_sl, trans_s = preprocess_spatial(
-                    slice_img,
-                    source_spacing=orig_spacing,
-                    target_spacing=target_spacing,
-                    target_shape=target_shape,
-                    interpolation_order=1,
-                    intensity_percentiles=percentiles,
-                )
-                t_sl = torch.from_numpy(p_sl[None, None, ...]).to(device, dtype=torch.float32)
+                if in_channels == 3 and raw_img.ndim >= 3:
+                    prev_idx = max(0, s - 1)
+                    curr_idx = s
+                    next_idx = min(d_count - 1, s + 1)
+                    slices_data = [raw_img[:, :, prev_idx], raw_img[:, :, curr_idx], raw_img[:, :, next_idx]]
+                    processed_channels = []
+                    trans_s = None
+                    for s_data in slices_data:
+                        p_img, t_obj = preprocess_spatial(
+                            s_data,
+                            source_spacing=orig_spacing,
+                            target_spacing=target_spacing,
+                            target_shape=target_shape,
+                            interpolation_order=1,
+                            intensity_percentiles=percentiles,
+                        )
+                        processed_channels.append(p_img)
+                        if trans_s is None:
+                            trans_s = t_obj
+                    stacked = np.stack(processed_channels, axis=0)  # (3, H, W)
+                    t_sl = torch.from_numpy(stacked[None, ...]).to(device, dtype=torch.float32)
+                else:
+                    slice_img = raw_img[:, :, s] if raw_img.ndim >= 3 else raw_img
+                    p_sl, trans_s = preprocess_spatial(
+                        slice_img,
+                        source_spacing=orig_spacing,
+                        target_spacing=target_spacing,
+                        target_shape=target_shape,
+                        interpolation_order=1,
+                        intensity_percentiles=percentiles,
+                    )
+                    stacked = p_sl[None, ...]
+                    if in_channels == 3:
+                        stacked = np.repeat(stacked, 3, axis=0)
+                    t_sl = torch.from_numpy(stacked[None, ...]).to(device, dtype=torch.float32)
+
                 with torch.no_grad():
-                    l_sl = model(t_sl)
-                    p_out = torch.argmax(l_sl, dim=1)[0].cpu().numpy().astype(np.int16)
+                    logits = model(t_sl)
+                    if logits.shape[1] == num_classes - 1:
+                        p_out = decode_with_rules(logits, view=view)[0].cpu().numpy().astype(np.int16)
+                    elif use_rules and logits.shape[1] == num_classes:
+                        p_out = decode_with_rules(logits[:, 1:], view=view)[0].cpu().numpy().astype(np.int16)
+                    else:
+                        p_out = torch.argmax(logits, dim=1)[0].cpu().numpy().astype(np.int16)
+
                 rest_s = invert_spatial_mask(p_out, trans_s)
                 restored_slices.append(rest_s)
 
             restored_pred = np.stack(restored_slices, axis=-1) if raw_img.ndim >= 3 else restored_slices[0]
+
+        # Apply anatomical constraints
+        if post_cfg.get("anatomical_constraint", True):
+            restored_pred = enforce_anatomical_constraints(
+                restored_pred,
+                scar_class=3,
+                myo_class=2,
+                dilation_voxels=int(post_cfg.get("dilation_voxels", 1)),
+                min_scar_voxels=int(post_cfg.get("min_scar_voxels", 5)),
+            )
 
         # Save restored NIfTI prediction
         if save_predictions:

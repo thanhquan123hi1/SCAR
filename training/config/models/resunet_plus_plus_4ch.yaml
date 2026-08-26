@@ -1,0 +1,39 @@
+# training/config/models/resunet_plus_plus_4ch.yaml
+# Config cho ResUNet++ 2.5D trên LGE 4-Chamber
+
+model_name: resunet_plus_plus
+view: 4CH
+task: lge_4ch
+num_classes: 5               # 0=bg, 1=lv_cavity, 2=lv_myo, 3=scar, 4=rv_cavity
+
+model:
+  in_channels: 3              # 2.5D context: [s-1, s, s+1]
+  num_classes: 5
+  filters: [32, 64, 128, 256, 512]
+  one_vs_rest: true
+
+preprocessing:
+  target_shape: [256, 256]
+  target_spacing: [1.0, 1.0]
+  intensity_percentiles: [0.5, 99.5]
+
+loss:
+  name: one_vs_rest_compound
+  bce_weight: 0.5
+  dice_weight: 0.5
+  focal_weight: 0.4
+  focal_gamma: 2.0
+  pos_weight: [1.8, 2.2, 3.2, 3.6]
+  class_weights: [1.0, 1.2, 1.5, 1.7]
+
+training:
+  batch_size: 4
+  learning_rate: 1.0e-4
+  in_channels: 3
+  epochs: 100
+  sampler:
+    enabled: true
+    rare_classes: [3, 4]
+    rare_boost: 4.0
+    foreground_boost: 1.6
+
