@@ -1,0 +1,26 @@
+# Ignore all raw data folders placed in data/
+data/LGE_MULTI/
+data/CINE_MULTI/
+data/raw/
+data/processed/
+data/cache/
+
+# Ignore outputs
+outputs/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+*.pt
+*.pth
+*.npz
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,22 @@
+# training/config/models/unet_2d_ras.yaml
+# Config cho 2D Residual U-Net trên LGE Right Atrium (Ultra-Fast Mode: batch_size=32)
+
+model_name: unet_2d
+view: RAS
+task: lge_ras
+num_classes: 2               # 0=bg, 1=right_atrium
+
+model:
+  in_channels: 1
+  num_classes: 2
+  features: [32, 64, 128, 256]
+  dropout: 0.1
+
+preprocessing:
+  target_shape: [256, 256]
+  target_spacing: [1.0, 1.0]
+  intensity_percentiles: null
+
+training:
+  batch_size: 32
+  learning_rate: 1.0e-4

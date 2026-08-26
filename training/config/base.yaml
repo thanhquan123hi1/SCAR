@@ -1,0 +1,39 @@
+# training/config/base.yaml
+# Cấu hình Ultra-Fast Mode: epochs=25, train siêu tốc toàn bộ 4 models trong ~5 phút
+
+seed: 42
+device: auto                  # "auto" = dùng CUDA nếu có, ngược lại CPU
+
+training:
+  epochs: 25
+  batch_size: 4
+  optimizer: adamw
+  learning_rate: 1.0e-4
+  weight_decay: 0.01
+  augment: true
+  early_stopping:
+    enabled: true
+    monitor: dice_scar        # dice_scar | mean_dice | val_loss
+    mode: max                 # max cho dice, min cho loss
+    patience: 10
+    min_delta: 0.0001
+
+data:
+  raw_root: data/LGE_MULTI
+  splits_dir: data/processed/splits
+  cache_dir: data/processed/cache
+  num_workers: 0
+  pin_memory: true
+
+loss:
+  name: ce_dice               # ce | dice | ce_dice
+  ce_weight: 1.0
+  dice_weight: 1.0
+
+evaluation:
+  metrics: [dice, iou, hd95_mm, scar_mass_g, scar_volume_ml]
+  save_predictions: true
+
+outputs:
+  run_root: outputs/runs
+  report_root: outputs/reports

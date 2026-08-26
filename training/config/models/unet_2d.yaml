@@ -1,0 +1,22 @@
+# training/config/models/unet_2d.yaml
+# Config cho 2D U-Net trên LGE per-slice (Ultra-Fast Mode: batch_size=32)
+
+model_name: unet_2d
+view: SAX                    # SAX | 2CH | 4CH | RAS
+task: lge_sax
+num_classes: 5
+
+model:
+  in_channels: 1
+  num_classes: 5
+  features: [64, 128, 256, 512]
+  bilinear: true
+
+preprocessing:
+  target_shape: [192, 192]
+  target_spacing: [1.0, 1.0]
+  intensity_percentiles: [0.95, 99.5]
+
+training:
+  batch_size: 32
+  learning_rate: 1.0e-4

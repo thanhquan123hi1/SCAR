@@ -1,0 +1,22 @@
+# training/config/models/unet_3d.yaml
+# Config cho 3D U-Net trên LGE SAX Volume (Ultra-Fast Mode: batch_size=4)
+
+model_name: unet_3d
+view: SAX
+task: lge_sax
+num_classes: 5               # 0=bg, 1=lv_cavity, 2=lv_myo, 3=scar, 4=rv_cavity
+
+model:
+  in_channels: 1
+  num_classes: 5
+  features: [32, 64, 128, 256]
+  dropout: 0.1
+
+preprocessing:
+  target_shape: [192, 192, 16]
+  target_spacing: [1.0, 1.0, 10.0]
+  intensity_percentiles: [0.95, 99.5]
+
+training:
+  batch_size: 4
+  learning_rate: 1.0e-4
