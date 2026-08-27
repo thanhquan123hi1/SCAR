@@ -35,8 +35,11 @@ def multiclass_soft_dice_loss(
         include_background: Whether to include class 0 (background)
         class_weights: Optional per-class weight tensor of shape (num_classes,)
     """
+    # Sanitize labels to ensure no out-of-bounds indexing occurs on GPU
+    labels = torch.clamp(labels.long(), 0, num_classes - 1)
+
     probs = torch.softmax(logits, dim=1)
-    one_hot = F.one_hot(labels.long(), num_classes=num_classes).movedim(-1, 1).float()
+    one_hot = F.one_hot(labels, num_classes=num_classes).movedim(-1, 1).float()
 
     start_idx = 0 if include_background else 1
     probs_fg = probs[:, start_idx:]
@@ -78,18 +81,17 @@ class ZhangComboLoss(nn.Module):
                 class_weights = torch.tensor(class_weights, dtype=torch.float32)
             self.register_buffer("class_weights", class_weights)
         else:
-            # Default weights giving higher emphasis on rare pathologies (MI and PMO/Scar)
-            # Default 5 classes: [0=bg (0.5), 1=lv_cavity (1.0), 2=lv_myo (1.5), 3=scar (3.0), 4=rv_cavity (1.0)]
             default_w = torch.tensor([0.5, 1.0, 1.5, 3.0, 1.0], dtype=torch.float32)
             if num_classes != 5:
                 default_w = torch.ones(num_classes, dtype=torch.float32)
             self.register_buffer("class_weights", default_w)
 
     def forward(self, logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
-        """Calculate weighted CE + Dice loss."""
+        """Calculate weighted CE + Dice loss with safe label bounds."""
+        labels = torch.clamp(labels.long(), 0, self.num_classes - 1)
         w = self.class_weights.to(logits.device) if self.class_weights is not None else None
 
-        ce_loss = F.cross_entropy(logits, labels.long(), weight=w)
+        ce_loss = F.cross_entropy(logits, labels, weight=w)
         dice_loss = multiclass_soft_dice_loss(
             logits,
             labels,
@@ -117,6 +119,7 @@ class ZhangCascadedLoss(nn.Module):
     ) -> None:
         super().__init__()
         self.coarse_loss_weight = coarse_loss_weight
+        self.num_classes = num_classes
         self.combo_loss = ZhangComboLoss(
             num_classes=num_classes,
             ce_weight=ce_weight,
@@ -129,6 +132,7 @@ class ZhangCascadedLoss(nn.Module):
         outputs: Union[torch.Tensor, Dict[str, torch.Tensor]],
         labels: torch.Tensor,
     ) -> torch.Tensor:
+        labels = torch.clamp(labels.long(), 0, self.num_classes - 1)
         if isinstance(outputs, torch.Tensor):
             return self.combo_loss(outputs, labels)
 

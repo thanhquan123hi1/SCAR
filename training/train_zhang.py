@@ -105,7 +105,9 @@ class ZhangCascadedTrainer:
 
         for batch in dataloader:
             images = batch["image"].to(self.device, dtype=torch.float32)
-            labels = batch["label"].to(self.device, dtype=torch.long)
+            raw_labels = batch["label"].to(self.device, dtype=torch.long)
+            # Ensure label indices are strictly inside valid class range [0, num_classes-1]
+            labels = torch.clamp(raw_labels, 0, self.num_classes - 1)
 
             self.optimizer.zero_grad()
             outputs = self.model.forward_stages(images)
@@ -134,7 +136,8 @@ class ZhangCascadedTrainer:
         with torch.no_grad():
             for batch in dataloader:
                 images = batch["image"].to(self.device, dtype=torch.float32)
-                labels = batch["label"].to(self.device, dtype=torch.long)
+                raw_labels = batch["label"].to(self.device, dtype=torch.long)
+                labels = torch.clamp(raw_labels, 0, self.num_classes - 1)
 
                 outputs = self.model.forward_stages(images)
                 loss = self.loss_fn(outputs, labels)
