@@ -1,0 +1,38 @@
+# training/config/models/zhang_cascaded.yaml
+# Configuration for Zhang (2021) Cascaded 2D-3D U-Net Architecture (EMIDEC Winner)
+
+model_name: zhang_cascaded_unet
+view: SAX
+task: lge_sax
+num_classes: 5               # 0=bg, 1=lv_cavity, 2=lv_myo, 3=scar, 4=rv_cavity
+
+model:
+  in_channels: 1
+  num_classes: 5
+  coarse_features: [32, 64, 128, 256]
+  fine_features: [32, 64, 128, 256]
+  dropout: 0.1
+  use_one_hot: false
+
+preprocessing:
+  target_shape: [192, 192, 16]
+  target_spacing: [1.0, 1.0, 10.0]
+  intensity_percentiles: [0.95, 99.5]
+
+loss:
+  name: zhang_combo
+  ce_weight: 1.0
+  dice_weight: 1.0
+  coarse_loss_weight: 0.5
+  class_weights: [0.5, 1.0, 1.5, 3.0, 1.0]
+
+training:
+  batch_size: 2
+  learning_rate: 1.0e-4
+  weight_decay: 0.01
+  epochs: 30
+
+postprocessing:
+  enabled: true
+  min_size_voxels: 8
+  enforce_myo_proximity: true
