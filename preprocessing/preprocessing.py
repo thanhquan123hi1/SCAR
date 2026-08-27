@@ -12,7 +12,7 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 import numpy as np
-from scipy.ndimage import zoom
+from scipy.ndimage import generate_binary_structure, label, zoom
 
 
 # ---------------------------------------------------------------------------
@@ -365,7 +365,10 @@ def preprocess_mask(
     target_spacing: tuple[float, ...],
     target_shape: tuple[int, ...],
 ) -> np.ndarray:
-    """Resample + crop/pad a discrete label mask (nearest-neighbor, preserving rare classes).
+    """Resample + crop/pad a discrete label mask using one-hot continuous resampling and argmax decoding.
+
+    Preserves exact ground truth morphology, maintains class mutual exclusivity,
+    eliminates dilation artifacts, and preserves tiny lesion centroids.
 
     Args:
         mask: Integer label array.
@@ -374,48 +377,70 @@ def preprocess_mask(
         target_shape: Output spatial shape.
 
     Returns:
-        Integer mask as int64, same label values preserved.
+        Integer mask as int64, with label values preserved.
     """
-
     raw_mask = np.rint(mask).astype(np.int16)
-    original_classes = set(np.unique(raw_mask)) - {0}
+    original_shape = tuple(int(item) for item in raw_mask.shape)
+    resized_shape = shape_for_spacing(original_shape, source_spacing, target_spacing)
 
-    resized_shape = shape_for_spacing(
-        tuple(int(item) for item in raw_mask.shape), source_spacing, target_spacing
-    )
-    resized = resize_to_shape(raw_mask, resized_shape, order=0)
+    unique_classes = np.unique(raw_mask)
+    if len(unique_classes) <= 1:
+        resized = np.full(
+            resized_shape,
+            unique_classes[0] if unique_classes.size > 0 else 0,
+            dtype=np.int16,
+        )
+    elif raw_mask.shape == resized_shape:
+        resized = raw_mask.copy()
+    else:
+        c_list = sorted(unique_classes.tolist())
+        # Construct one-hot continuous representation across all present classes
+        one_hot = np.stack([(raw_mask == c).astype(np.float32) for c in c_list], axis=0)
 
-    # Protection against vanishing tiny rare classes (e.g. Scar) due to nearest-neighbor decimation (fixes C1)
-    resized_classes = set(np.unique(resized)) - {0}
-    missing_classes = original_classes - resized_classes
-    if missing_classes:
-        # Scale factors to map original coordinates to resized coordinates
-        scale_factors = [r / o for r, o in zip(resized_shape, raw_mask.shape, strict=True)]
-        
-        # Priority sort: standard cardiac classes [1 (LV), 4 (RV), 2 (MYO), 3 (SCAR)]
-        # Higher priority (Scar) is processed last to properly paint over surrounding myocardium
-        priority_map = {1: 1, 4: 2, 2: 3, 3: 4}
-        sorted_missing = sorted(missing_classes, key=lambda c: priority_map.get(c, c))
+        # Resample each channel continuously (order=1: bilinear/trilinear)
+        resampled_channels = [
+            resize_to_shape(one_hot[i], resized_shape, order=1)
+            for i in range(len(c_list))
+        ]
+        res_stack = np.stack(resampled_channels, axis=0)  # (K, *resized_shape)
 
-        for cls_id in sorted_missing:
-            # 1. Continuous binary resampling (order=1) with thresholding to preserve morphology
-            bin_mask = (raw_mask == cls_id).astype(np.float32)
-            bin_resized = resize_to_shape(bin_mask, resized_shape, order=1)
-            bin_thresholded = bin_resized >= 0.30
+        # Channel-wise argmax decoding: preserves 0.50 natural boundary and mutual exclusivity
+        argmax_idx = np.argmax(res_stack, axis=0)
+        c_arr = np.array(c_list, dtype=np.int16)
+        resized = c_arr[argmax_idx]
 
-            if np.any(bin_thresholded):
-                resized[bin_thresholded] = cls_id
-            else:
-                # 2. Fallback for ultra-tiny micro-structures (< a few voxels):
-                # Project ALL original voxels of the lesion to preserve the local cluster footprint
-                coords = np.argwhere(raw_mask == cls_id)
-                if coords.size > 0:
-                    for pt in coords:
-                        mapped_idx = tuple(
-                            min(int(round(c * s)), r_dim - 1)
-                            for c, s, r_dim in zip(pt, scale_factors, resized_shape, strict=True)
-                        )
-                        resized[mapped_idx] = cls_id
+        # Connected-component-aware micro-structure peak preservation guard
+        structure = generate_binary_structure(raw_mask.ndim, raw_mask.ndim)
+        for c in sorted(set(c_list) - {0}):
+            c_bin = (raw_mask == c)
+            labeled_comp, num_features = label(c_bin, structure=structure)
+            for feat_idx in range(1, num_features + 1):
+                comp_mask = (labeled_comp == feat_idx).astype(np.float32)
+                res_comp = resize_to_shape(comp_mask, resized_shape, order=1)
+                if not np.any((resized == c) & (res_comp > 0.0)):
+                    max_val = float(np.max(res_comp))
+                    if max_val > 0.0:
+                        coords = np.argwhere(res_comp == max_val)
+                        for coord in coords:
+                            resized[tuple(coord)] = c
+                    else:
+                        orig_coords = np.argwhere(labeled_comp == feat_idx)
+                        if orig_coords.size > 0:
+                            orig_center = orig_coords.mean(axis=0)
+                            target_coord = tuple(
+                                int(
+                                    np.clip(
+                                        np.round(
+                                            orig_center[d]
+                                            * (resized_shape[d] / original_shape[d])
+                                        ),
+                                        0,
+                                        resized_shape[d] - 1,
+                                    )
+                                )
+                                for d in range(len(resized_shape))
+                            )
+                            resized[target_coord] = c
 
     transformed, _ = center_crop_or_pad(resized, target_shape, value=0)
     return np.rint(transformed).astype(np.int64, copy=False)
@@ -429,11 +454,40 @@ def invert_spatial_mask(
     mask: np.ndarray,
     transform: SpatialTransform,
 ) -> np.ndarray:
-    """Restore a discrete prediction mask to the original array shape.
+    """Restore a discrete prediction mask to the original NIfTI array shape.
 
-    Uses nearest-neighbor resize — never interpolates discrete labels.
+    Uses one-hot continuous resampling and argmax decoding to prevent small lesion
+    drop-out and eliminate aliasing artifacts.
+
+    Args:
+        mask: Discrete prediction mask from model output.
+        transform: SpatialTransform metadata recorded during preprocessing.
+
+    Returns:
+        Integer mask restored to transform.original_shape as int16.
     """
-
     uncropped = invert_center_crop_or_pad(mask, transform.center, value=0)
-    restored = resize_to_shape(uncropped, transform.original_shape, order=0)
-    return np.rint(restored).astype(np.int16, copy=False)
+    if uncropped.shape == transform.original_shape:
+        return uncropped.astype(np.int16, copy=False)
+
+    unique_classes = np.unique(uncropped)
+    if len(unique_classes) <= 1:
+        return np.full(
+            transform.original_shape,
+            unique_classes[0] if unique_classes.size > 0 else 0,
+            dtype=np.int16,
+        )
+
+    c_list = sorted(unique_classes.tolist())
+    one_hot = np.stack([(uncropped == c).astype(np.float32) for c in c_list], axis=0)
+
+    resampled_channels = [
+        resize_to_shape(one_hot[i], transform.original_shape, order=1)
+        for i in range(len(c_list))
+    ]
+    res_stack = np.stack(resampled_channels, axis=0)
+    argmax_idx = np.argmax(res_stack, axis=0)
+    c_arr = np.array(c_list, dtype=np.int16)
+    restored = c_arr[argmax_idx]
+
+    return restored.astype(np.int16, copy=False)

@@ -38,7 +38,15 @@ from preprocessing.preprocessing import (
     preprocess_mask,
     preprocess_spatial,
 )
-from training.metrics import calculate_scar_metrics, dice_score, hd95_binary, iou_score
+from training.metrics import (
+    calculate_scar_metrics,
+    compute_fov_diagonal,
+    dice_score,
+    dice_score_symmetric,
+    hd95_binary,
+    iou_score,
+    iou_score_symmetric,
+)
 from training.models import build_model
 from training.postprocess import decode_with_rules, enforce_anatomical_constraints
 
@@ -173,10 +181,10 @@ def evaluate_split(
 
             for s in range(d_count):
                 if in_channels == 3 and raw_img.ndim >= 3:
-                    # Reflection padding on boundaries (fixes W3)
-                    prev_idx = 1 if (s == 0 and d_count > 1) else max(0, s - 1)
+                    # Edge clamping on boundaries (preserves through-plane gradient)
+                    prev_idx = max(0, s - 1)
                     curr_idx = s
-                    next_idx = d_count - 2 if (s == d_count - 1 and d_count > 1) else min(d_count - 1, s + 1)
+                    next_idx = min(d_count - 1, s + 1)
                     slices_data = [raw_img[:, :, prev_idx], raw_img[:, :, curr_idx], raw_img[:, :, next_idx]]
                     processed_channels = []
                     trans_s = None
@@ -252,22 +260,52 @@ def evaluate_split(
         }
 
         if raw_label is not None:
-            # Overlap metrics
-            dice_dict = dice_score(restored_pred, raw_label, num_classes=num_classes)
-            iou_dict = iou_score(restored_pred, raw_label, num_classes=num_classes)
+            full_spacing = tuple(float(v) for v in zooms[:restored_pred.ndim])
+            fov_diag = compute_fov_diagonal(restored_pred.shape, full_spacing)
+            row_metrics["fov_diagonal_mm"] = fov_diag
 
             for c in range(1, num_classes):
                 c_name = label_names.get(c, f"class_{c}")
-                row_metrics[f"dice_{c_name}"] = dice_dict.get(c, float("nan"))
-                row_metrics[f"iou_{c_name}"] = iou_dict.get(c, float("nan"))
-                # HD95
-                full_spacing = tuple(float(v) for v in zooms[:restored_pred.ndim])
-                hd95_val = hd95_binary(restored_pred == c, raw_label == c, spacing=full_spacing)
-                row_metrics[f"hd95_{c_name}_mm"] = hd95_val if hd95_val is not None else float("nan")
+                gt_mask = (raw_label == c)
+                pred_mask = (restored_pred == c)
+                has_gt = bool(gt_mask.any())
+                has_pred = bool(pred_mask.any())
+
+                row_metrics[f"has_gt_{c_name}"] = has_gt
+                row_metrics[f"has_pred_{c_name}"] = has_pred
+
+                # 1. Overall Cohort Metrics (Metrics Reloaded 2024: Symmetric True Negatives TN -> Dice=1.0, IoU=1.0, HD95=0.0)
+                if not has_gt and not has_pred:
+                    dice_overall = 1.0
+                    iou_overall = 1.0
+                    hd95_overall = 0.0
+                elif not has_gt or not has_pred:
+                    dice_overall = 0.0
+                    iou_overall = 0.0
+                    hd95_overall = fov_diag
+                else:
+                    intersection = int((gt_mask & pred_mask).sum())
+                    dice_overall = float(2.0 * intersection / (gt_mask.sum() + pred_mask.sum()))
+                    iou_overall = float(intersection / (gt_mask | pred_mask).sum())
+                    hd95_val = hd95_binary(pred_mask, gt_mask, spacing=full_spacing, empty_value=0.0)
+                    hd95_overall = float(hd95_val) if hd95_val is not None else 0.0
+
+                row_metrics[f"dice_{c_name}"] = dice_overall
+                row_metrics[f"iou_{c_name}"] = iou_overall
+                row_metrics[f"hd95_{c_name}_mm"] = hd95_overall
+
+                # 2. Conditional Positive Metrics (Dice/IoU/HD95 | GT > 0)
+                if has_gt:
+                    row_metrics[f"dice_conditional_{c_name}"] = dice_overall
+                    row_metrics[f"iou_conditional_{c_name}"] = iou_overall
+                    row_metrics[f"hd95_conditional_{c_name}_mm"] = hd95_overall
+                else:
+                    row_metrics[f"dice_conditional_{c_name}"] = float("nan")
+                    row_metrics[f"iou_conditional_{c_name}"] = float("nan")
+                    row_metrics[f"hd95_conditional_{c_name}_mm"] = float("nan")
 
             # Clinical scar metrics (available for SAX, 2CH, 4CH)
             if 3 in label_names and label_names[3] == "scar":
-                full_spacing = tuple(float(v) for v in zooms[:restored_pred.ndim])
                 scar_pred = calculate_scar_metrics(restored_pred, spacing=full_spacing)
                 scar_true = calculate_scar_metrics(raw_label, spacing=full_spacing)
 
@@ -299,6 +337,8 @@ def evaluate_split(
             "std": float(series_clean.std()) if len(series_clean) else float("nan"),
             "median": float(series_clean.median()) if len(series_clean) else float("nan"),
             "iqr": float(series_clean.quantile(0.75) - series_clean.quantile(0.25)) if len(series_clean) else float("nan"),
+            "q25": float(series_clean.quantile(0.25)) if len(series_clean) else float("nan"),
+            "q75": float(series_clean.quantile(0.75)) if len(series_clean) else float("nan"),
             "count": int(len(series_clean)),
         })
 

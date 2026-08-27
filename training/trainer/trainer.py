@@ -131,6 +131,8 @@ class Trainer:
             loss = self.loss_fn(logits, labels)
 
             loss.backward()
+            max_grad_norm = float(self.config.get("training", {}).get("max_grad_norm", 1.0))
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=max_grad_norm)
             self.optimizer.step()
 
             losses.append(float(loss.detach().cpu()))
@@ -143,16 +145,18 @@ class Trainer:
     def _validate_epoch(self, dataloader: DataLoader) -> tuple[float, dict[str, float]]:
         """Validate model on the validation DataLoader in preprocessed batch space.
         
-        Note (M4): Training-time validation Dice is computed in preprocessed resolution
-        (e.g., 192x192x16 or 256x256) for fast iteration and early stopping.
-        Official challenge/benchmark metrics in original NIfTI physical space are computed
-        via `training/evaluate.py` using `invert_spatial_mask()`.
+        Uses Subject-Level Macro-Dice aligned with Metrics Reloaded (Nature Methods 2024)
+        and training/evaluate.py standards. Slices belonging to the same subject are aggregated
+        before computing per-subject Dice, and True Negative subjects (GT=0, Pred=0) evaluate to 1.0.
         """
         self.model.eval()
         losses = []
-        all_dices: list[dict[int, float]] = []
-        global_inter: dict[int, int] = {c: 0 for c in range(1, self.num_classes)}
-        global_denom: dict[int, int] = {c: 0 for c in range(1, self.num_classes)}
+
+        # Subject-level voxel counters: subject_id -> class_id -> count
+        subj_inter: dict[str, dict[int, int]] = {}
+        subj_gt: dict[str, dict[int, int]] = {}
+        subj_pred: dict[str, dict[int, int]] = {}
+        sample_idx = 0
 
         with torch.no_grad():
             for batch in dataloader:
@@ -196,24 +200,51 @@ class Trainer:
 
                 targets = labels.cpu().numpy()
 
+                # Resolve subject identifiers from batch metadata or fallback to sample index
+                batch_subjects = batch.get("subject_id")
+                if batch_subjects is None:
+                    batch_subjects = batch.get("record_id")
+
                 for b in range(len(preds)):
-                    d_dict = dice_score(preds[b], targets[b], num_classes=self.num_classes)
-                    all_dices.append(d_dict)
+                    if batch_subjects is not None:
+                        s_id = str(batch_subjects[b]) if not isinstance(batch_subjects, str) else str(batch_subjects)
+                    else:
+                        s_id = f"sample_{sample_idx}"
+                    sample_idx += 1
+
+                    if s_id not in subj_inter:
+                        subj_inter[s_id] = {c: 0 for c in range(1, self.num_classes)}
+                        subj_gt[s_id] = {c: 0 for c in range(1, self.num_classes)}
+                        subj_pred[s_id] = {c: 0 for c in range(1, self.num_classes)}
+
                     for c in range(1, self.num_classes):
                         p_mask = preds[b] == c
                         t_mask = targets[b] == c
-                        global_inter[c] += int((p_mask & t_mask).sum())
-                        global_denom[c] += int(p_mask.sum() + t_mask.sum())
+                        subj_inter[s_id][c] += int((p_mask & t_mask).sum())
+                        subj_gt[s_id][c] += int(t_mask.sum())
+                        subj_pred[s_id][c] += int(p_mask.sum())
 
         val_loss = float(np.mean(losses)) if losses else math.nan
         metrics_summary: dict[str, float] = {}
+        all_subjects = list(subj_inter.keys())
 
         for c in range(1, self.num_classes):
-            if global_denom[c] > 0:
-                metrics_summary[f"dice_class_{c}"] = float(2.0 * global_inter[c] / global_denom[c])
-            else:
-                c_scores = [d[c] for d in all_dices if c in d and not np.isnan(d[c])]
-                metrics_summary[f"dice_class_{c}"] = float(np.mean(c_scores)) if c_scores else float("nan")
+            c_subject_dices: list[float] = []
+            for s_id in all_subjects:
+                gt_c = subj_gt[s_id][c]
+                pred_c = subj_pred[s_id][c]
+                inter_c = subj_inter[s_id][c]
+
+                # Metrics Reloaded (2024) Subject-Level Formulation
+                if gt_c == 0 and pred_c == 0:
+                    dice_val = 1.0  # Symmetric True Negative
+                elif gt_c == 0 or pred_c == 0:
+                    dice_val = 0.0  # Complete False Positive or False Negative
+                else:
+                    dice_val = float(2.0 * inter_c / (gt_c + pred_c))
+                c_subject_dices.append(dice_val)
+
+            metrics_summary[f"dice_class_{c}"] = float(np.mean(c_subject_dices)) if c_subject_dices else float("nan")
 
         # Class 3 is SCAR in LGE SAX, 2CH, 4CH
         if "dice_class_3" in metrics_summary:
@@ -231,11 +262,22 @@ class Trainer:
                 "epoch": epoch,
                 "model_state_dict": self.model.state_dict(),
                 "optimizer_state_dict": self.optimizer.state_dict(),
+                "scheduler_state_dict": self.scheduler.state_dict() if self.scheduler is not None else None,
                 "val_loss": val_loss,
                 "metrics": metrics,
             },
             path,
         )
+
+    def load_checkpoint(self, path: Path | str) -> dict[str, Any]:
+        """Load checkpoint state into model, optimizer, and scheduler."""
+        ckpt = torch.load(path, map_location=self.device, weights_only=False)
+        self.model.load_state_dict(ckpt["model_state_dict"])
+        if "optimizer_state_dict" in ckpt and self.optimizer is not None:
+            self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        if "scheduler_state_dict" in ckpt and ckpt["scheduler_state_dict"] is not None and self.scheduler is not None:
+            self.scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+        return ckpt
 
     def _save_history(self) -> None:
         """Save history to JSON and CSV in both run_dir and run_dir/logs."""

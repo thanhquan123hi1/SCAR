@@ -146,10 +146,10 @@ def main() -> None:
 
             for s in range(d_count):
                 if in_channels == 3 and raw_image.ndim >= 3:
-                    # Reflection padding on boundaries (fixes W3)
-                    prev_idx = 1 if (s == 0 and d_count > 1) else max(0, s - 1)
+                    # Edge clamping on boundaries (preserves through-plane gradient)
+                    prev_idx = max(0, s - 1)
                     curr_idx = s
-                    next_idx = d_count - 2 if (s == d_count - 1 and d_count > 1) else min(d_count - 1, s + 1)
+                    next_idx = min(d_count - 1, s + 1)
                     slices_data = [raw_image[:, :, prev_idx], raw_image[:, :, curr_idx], raw_image[:, :, next_idx]]
                     processed_channels = []
                     trans_s = None

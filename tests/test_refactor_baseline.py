@@ -217,10 +217,42 @@ def test_competitive_postprocessing():
     assert not np.any(cleaned_highres == 3), "Under-volume scar speckle at high-res must be filtered!"
     print("  -> Physical Volume Spacing-Aware Filtering (W5): VERIFIED")
 
+    # 5. 3D Structuring Element Connectivity & Transmural Apical Scar Preservation (R4)
+    vol_3d = np.zeros((4, 50, 50), dtype=np.int16)
+    vol_3d[0, 20:30, 20:30] = 3  # Apical transmural scar on slice 0 (zero myocardium on slice 0)
+    vol_3d[1, 15:35, 15:35] = 2  # Contiguous myocardium on slice 1
+    vol_3d[2, 15:35, 15:35] = 2  # Myocardium on slice 2
+    vol_3d[3, 15:35, 15:35] = 2  # Myocardium on slice 3
+    cleaned_3d = enforce_anatomical_constraints(
+        vol_3d,
+        scar_class=3,
+        myo_class=2,
+        spacing=(10.0, 1.0, 1.0),
+        tolerance_mm=2.5,
+    )
+    assert np.all(cleaned_3d[0, 20:30, 20:30] == 3), "3D apical scar connecting to slice 1 must be PRESERVED!"
+    
+    # 6. Suppression of floating scar when there is zero myocardium (R4)
+    vol_no_myo = np.zeros((4, 50, 50), dtype=np.int16)
+    vol_no_myo[0, 20:30, 20:30] = 3
+    cleaned_no_myo = enforce_anatomical_constraints(vol_no_myo, scar_class=3, myo_class=2)
+    assert not np.any(cleaned_no_myo == 3), "Scar with zero myocardium anywhere must be suppressed!"
+    print("  -> 3D Structuring Element Connectivity & Apical Scar Preservation (R4): VERIFIED")
+
 
 def test_preprocessing_and_rare_class_protection():
-    print("[6/9] Testing preprocessing, adaptive foreground extraction & multi-voxel continuous mask resampling (C1)...")
-    from preprocessing.preprocessing import extract_tissue_foreground, percentile_minmax, preprocess_mask, preprocess_spatial
+    print("[6/9] Testing preprocessing, adaptive foreground extraction, one-hot argmax resampling, inverse mapping & cross-view split independence (R1)...")
+    import pandas as pd
+    from preprocessing.build_splits import DataLeakageError, verify_split_independence
+    from preprocessing.preprocessing import (
+        CenterTransform,
+        SpatialTransform,
+        extract_tissue_foreground,
+        invert_spatial_mask,
+        percentile_minmax,
+        preprocess_mask,
+        preprocess_spatial,
+    )
 
     # 1. Background noise extraction (W2)
     img_with_air = np.random.uniform(0.0, 0.05, (100, 100)).astype(np.float32)  # air noise
@@ -229,18 +261,143 @@ def test_preprocessing_and_rare_class_protection():
     assert fg.mean() > 0.3, "extract_tissue_foreground must isolate high-intensity tissue from air noise"
     print("  -> Adaptive MRI Air Noise Filter (W2): VERIFIED")
 
-    # 2. Multi-voxel rare class mask protection via continuous binary resampling & full projection (fixes C1)
-    tiny_mask = np.zeros((200, 200), dtype=np.int16)
-    tiny_mask[100, 100:106] = 3  # 6-voxel thin scar band
-    downsampled_mask = preprocess_mask(
-        tiny_mask,
+    # 2. One-Hot Continuous Resampling Anti-Dilation & Morphology Preservation (R1)
+    # A 10x10 = 100 voxel square scar resampled 2x down (1.0mm -> 2.0mm) must scale to exactly 25 voxels (100/4)
+    geom_mask = np.zeros((200, 200), dtype=np.int16)
+    geom_mask[90:100, 90:100] = 3  # 10x10 scar patch (100 voxels, centroid=(94.5, 94.5))
+    res_geom = preprocess_mask(
+        geom_mask,
         source_spacing=(1.0, 1.0),
         target_spacing=(2.0, 2.0),
         target_shape=(100, 100),
     )
-    scar_voxels_downsampled = int((downsampled_mask == 3).sum())
-    assert scar_voxels_downsampled >= 1, "Rare class must not vanish during resampling!"
-    print(f"  -> Multi-Voxel Scar Protection in Mask Resampling (C1): VERIFIED ({scar_voxels_downsampled} voxels preserved, no single-point artifact)")
+    scar_count = int((res_geom == 3).sum())
+    assert scar_count == 25, f"Anti-Dilation Violation: Expected exactly 25 voxels (100/4), got {scar_count}"
+    
+    scar_pts = np.argwhere(res_geom == 3)
+    centroid_y, centroid_x = scar_pts.mean(axis=0)
+    # Centroid in target 100x100 grid should be 47.0 (mapping 90..99 / 2 -> 45..49, center=47.0)
+    assert abs(centroid_y - 47.0) < 0.5 and abs(centroid_x - 47.0) < 0.5, (
+        f"Centroid distortion: expected (47.0, 47.0), got ({centroid_y:.2f}, {centroid_x:.2f})"
+    )
+    print(f"  -> Anti-Dilation & Centroid Preservation (R1): VERIFIED (Exact 100->25 voxels, centroid=({centroid_y:.1f}, {centroid_x:.1f}))")
+
+    # 3. Multi-Class Mutual Exclusivity & Thin Band Micro-Structure Preservation (R1)
+    multi_mask = np.zeros((200, 200), dtype=np.int16)
+    multi_mask[60:140, 60:140] = 2  # Myo
+    multi_mask[75:125, 75:125] = 1  # LV
+    multi_mask[60:140, 140:170] = 4  # RV
+    multi_mask[100, 100:106] = 3  # 1x6 thin scar band
+    res_multi = preprocess_mask(
+        multi_mask,
+        source_spacing=(1.0, 1.0),
+        target_spacing=(2.0, 2.0),
+        target_shape=(100, 100),
+    )
+    res_classes = set(np.unique(res_multi))
+    assert {0, 1, 2, 3, 4}.issubset(res_classes), f"Missing classes in multi-class resampling: {res_classes}"
+    thin_scar_count = int((res_multi == 3).sum())
+    assert thin_scar_count == 3, f"Thin scar band must resample 6->3 voxels, got {thin_scar_count}"
+    print(f"  -> Multi-Class Mutual Exclusivity & Thin Band Preservation (R1): VERIFIED ({thin_scar_count} voxels, classes: {res_classes})")
+
+    # 4. Inverse Spatial Mask Restoration (invert_spatial_mask) (R1)
+    dummy_transform = SpatialTransform(
+        original_shape=(200, 200),
+        resized_shape=(100, 100),
+        source_spacing=(1.0, 1.0),
+        target_spacing=(2.0, 2.0),
+        center=CenterTransform(
+            source_shape=(100, 100),
+            target_shape=(100, 100),
+            crop_start=(0, 0),
+            crop_stop=(100, 100),
+            pad_lower=(0, 0),
+            pad_upper=(0, 0),
+        ),
+    )
+    pred_mask = np.zeros((100, 100), dtype=np.int16)
+    pred_mask[45:50, 45:50] = 2  # Myo
+    pred_mask[47:49, 47:49] = 3  # 2x2 scar
+    restored = invert_spatial_mask(pred_mask, dummy_transform)
+    assert restored.shape == (200, 200), f"Restored shape mismatch: {restored.shape}"
+    assert int((restored == 3).sum()) == 16, f"Expected 2x2 -> 4x4 (16 voxels) restored scar, got {(restored == 3).sum()}"
+    print(f"  -> Inverse Spatial Mask Restoration (R1): VERIFIED (Shape {restored.shape}, {(restored == 3).sum()} scar voxels preserved)")
+
+    # 5. Cross-View Patient Split Independence Verification (build_splits.py) (R1)
+    # Clean split manifest
+    df_clean = pd.DataFrame([
+        {"subject_id": "001", "view": "SAX", "split": "train"},
+        {"subject_id": "001", "view": "2CH", "split": "train"},
+        {"subject_id": "002", "view": "SAX", "split": "validation"},
+        {"subject_id": "002", "view": "4CH", "split": "validation"},
+        {"subject_id": "003", "view": "SAX", "split": "test"},
+        {"subject_id": "003", "view": "RAS", "split": "test"},
+    ])
+    clean_report = verify_split_independence(df_clean, strict=True)
+    assert clean_report["is_independent"] is True
+    assert clean_report["patient_counts"] == {"train": 1, "validation": 1, "test": 1}
+
+    # Leaky split manifest (Patient 001 cross-view leakage: SAX in train, 2CH in validation)
+    df_leaky = pd.DataFrame([
+        {"subject_id": "001", "view": "SAX", "split": "train"},
+        {"subject_id": "001", "view": "2CH", "split": "validation"},
+        {"subject_id": "002", "view": "SAX", "split": "validation"},
+        {"subject_id": "003", "view": "SAX", "split": "test"},
+    ])
+    leakage_caught = False
+    try:
+        verify_split_independence(df_leaky, strict=True)
+    except (ValueError, RuntimeError) as e:
+        leakage_caught = True
+        assert "001" in str(e)
+    assert leakage_caught, "verify_split_independence must detect and raise on cross-view patient leakage!"
+    print("  -> Cross-View Patient Split Leakage Detection (R1): VERIFIED (Clean passed, Leaky caught)")
+
+    # 6. Multi-Component / Disconnected Satellite Lesion Preservation (R1)
+    sat_mask = np.zeros((200, 200), dtype=np.int16)
+    sat_mask[50:55, 50:55] = 3   # 5x5 main scar (25 voxels)
+    sat_mask[150, 150] = 3       # 1-voxel satellite scar
+    res_sat = preprocess_mask(
+        sat_mask,
+        source_spacing=(1.0, 1.0),
+        target_spacing=(2.0, 2.0),
+        target_shape=(100, 100),
+    )
+    assert (res_sat[20:35, 20:35] == 3).sum() > 0, "Primary scar must be preserved!"
+    assert (res_sat[70:80, 70:80] == 3).sum() > 0, "Satellite micro-scar must not vanish when primary scar is present!"
+
+    # Invert round-trip check for satellite scar
+    sat_tr = SpatialTransform(
+        original_shape=(200, 200),
+        resized_shape=(100, 100),
+        source_spacing=(1.0, 1.0),
+        target_spacing=(2.0, 2.0),
+        center=CenterTransform(
+            source_shape=(100, 100),
+            target_shape=(100, 100),
+            crop_start=(0, 0),
+            crop_stop=(100, 100),
+            pad_lower=(0, 0),
+            pad_upper=(0, 0),
+        ),
+    )
+    rest_sat = invert_spatial_mask(res_sat, sat_tr)
+    assert (rest_sat[145:155, 145:155] == 3).sum() > 0, "Satellite scar must be preserved through inverse restoration!"
+    print("  -> Connected-Component Satellite Lesion Preservation (R1): VERIFIED (Zero satellite vanishing)")
+
+    # 7. Extreme 10x Anisotropic Resampling & Centroid Fallback (R1)
+    mask_10x = np.zeros((100, 100), dtype=np.int16)
+    mask_10x[40:60, 40:60] = 2  # Class 2
+    mask_10x[48:52, 48:52] = 3  # Class 3 (4x4)
+    res_10x = preprocess_mask(
+        mask_10x,
+        source_spacing=(1.0, 10.0),
+        target_spacing=(10.0, 2.0),
+        target_shape=(10, 500),
+    )
+    assert res_10x.shape == (10, 500), f"Shape mismatch {res_10x.shape}"
+    assert (res_10x == 3).sum() > 0, "Class 3 must be preserved under 10x decimation via centroid fallback!"
+    print("  -> Extreme 10x Anisotropic Resampling & Centroid Mapping (R1): VERIFIED")
 
 
 def test_configs_and_metrics():
@@ -307,8 +464,16 @@ def test_all_model_forward_passes():
 
 
 def test_rigorous_benchmark_metrics():
-    print("[9/9] Testing medical benchmark metrics (Dice NaN, HD95 penalty & tiny-structure guard, Clinical Quantification)...")
-    from training.metrics import dice_score, hd95_binary, calculate_scar_metrics
+    print("[9/9] Testing medical benchmark metrics (Dice NaN, HD95 penalty & tiny-structure guard, Clinical Quantification, Dynamic FOV & Symmetric TN)...")
+    from training.metrics import (
+        calculate_scar_metrics,
+        compute_fov_diagonal,
+        dice_score,
+        dice_score_symmetric,
+        hd95_binary,
+        iou_score,
+        iou_score_symmetric,
+    )
 
     # 1. Dice score: empty slice test
     pred_empty = np.zeros((100, 100), dtype=np.int16)
@@ -317,9 +482,23 @@ def test_rigorous_benchmark_metrics():
     assert np.isnan(scores[3]), "Empty class 3 must return NaN (prevents score inflation)!"
     print("  -> Dice Score Empty Class: VERIFIED (returns NaN)")
 
-    # 2. HD95 penalty and single-voxel robustness (M6)
+    # 2. Symmetric True Negative (Metrics Reloaded 2024)
+    sym_dice = dice_score_symmetric(pred_empty, target_empty, num_classes=4)
+    assert sym_dice[3] == 1.0, "Symmetric TN Dice must be 1.0"
+    sym_iou = iou_score_symmetric(pred_empty, target_empty, num_classes=4)
+    assert sym_iou[3] == 1.0, "Symmetric TN IoU must be 1.0"
+    sym_hd = hd95_binary(pred_empty, target_empty, empty_value=0.0)
+    assert sym_hd == 0.0, "Symmetric TN HD95 must be 0.0 mm"
+    print("  -> Symmetric True Negative Calibration (Metrics Reloaded 2024): VERIFIED (Dice=1.0, IoU=1.0, HD95=0.0mm)")
+
+    # 3. Dynamic Patient FOV Diagonal HD95 Scaling
     target_scar = np.zeros((100, 100), dtype=np.int16)
     target_scar[40:50, 40:50] = 1
+    # Without penalty_distance -> dynamic FOV diagonal sqrt(100^2 + 100^2) ≈ 141.42 mm
+    hd_dyn = hd95_binary(pred_empty, target_scar, spacing=(1.0, 1.0))
+    assert np.isclose(hd_dyn, np.sqrt(20000.0)), f"Expected FOV diagonal {np.sqrt(20000.0)}, got {hd_dyn}"
+    
+    # With explicit penalty override -> 300.0 mm
     hd_val = hd95_binary(pred_empty, target_scar, spacing=(1.0, 1.0), penalty_distance=300.0)
     assert hd_val == 300.0, f"Expected penalty 300.0, got {hd_val}"
 
@@ -331,9 +510,9 @@ def test_rigorous_benchmark_metrics():
     hd_single = hd95_binary(pred_single, target_single, spacing=(1.0, 1.0))
     assert np.isclose(hd_single, 3.0), f"Expected HD95 of 3.0 mm for 3 voxels distance, got {hd_single}"
     print(f"  -> HD95 Single-Voxel Robustness (M6): VERIFIED ({hd_single:.1f} mm without empty-surface crash)")
-    print("  -> HD95 Failure Penalty: VERIFIED (300.0 mm penalty)")
+    print(f"  -> Dynamic Patient FOV HD95 Penalty: VERIFIED ({hd_dyn:.1f} mm dynamic FOV diagonal)")
 
-    # 3. Clinical Scar Quantification: 3D SAX vs 2D Slice
+    # 4. Clinical Scar Quantification: 3D SAX vs 2D Slice
     mask_2d = np.zeros((256, 256), dtype=np.int16)
     mask_2d[100:110, 100:110] = 3
     metrics_2d = calculate_scar_metrics(mask_2d, spacing=(1.0, 1.0))

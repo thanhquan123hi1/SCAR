@@ -325,9 +325,9 @@ class LgeLaxDataset(Dataset):
                         all_labels = np.transpose(all_labels, (2, 0, 1))
 
                 if self.in_channels == 3 and all_images.ndim >= 3:
-                    prev_idx = 1 if (slice_idx == 0 and total_slices > 1) else max(0, slice_idx - 1)
+                    prev_idx = max(0, slice_idx - 1)
                     curr_idx = slice_idx
-                    next_idx = total_slices - 2 if (slice_idx == total_slices - 1 and total_slices > 1) else min(total_slices - 1, slice_idx + 1)
+                    next_idx = min(total_slices - 1, slice_idx + 1)
                     image = np.stack([all_images[prev_idx], all_images[curr_idx], all_images[next_idx]], axis=0)
                 elif all_images.ndim >= 3:
                     image = all_images[slice_idx][None, ...]  # (1, H, W)
@@ -353,9 +353,9 @@ class LgeLaxDataset(Dataset):
                     precomputed_bounds = (float(p_low), float(p_high))
 
             if self.in_channels == 3 and raw_img.ndim >= 3:
-                prev_idx = 1 if (slice_idx == 0 and total_slices > 1) else max(0, slice_idx - 1)
+                prev_idx = max(0, slice_idx - 1)
                 curr_idx = slice_idx
-                next_idx = total_slices - 2 if (slice_idx == total_slices - 1 and total_slices > 1) else min(total_slices - 1, slice_idx + 1)
+                next_idx = min(total_slices - 1, slice_idx + 1)
                 slices_data = [raw_img[:, :, prev_idx], raw_img[:, :, curr_idx], raw_img[:, :, next_idx]]
                 processed_channels = []
                 for s_data in slices_data:

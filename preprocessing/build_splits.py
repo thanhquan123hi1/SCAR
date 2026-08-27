@@ -13,6 +13,8 @@ import logging
 import re
 from pathlib import Path
 
+from typing import Any
+
 import pandas as pd
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)s  %(message)s")
@@ -21,6 +23,95 @@ logger = logging.getLogger("BuildSplits")
 TASK_DIR_PATTERN = re.compile(r"^(SAX|2CH|4CH|RAS)_(TR|VAL|TST)$", re.IGNORECASE)
 FILE_PATTERN = re.compile(r"^(?:LGE_)?(SAX|2CH|4CH|RAS)_(\d+)\.nii(?:\.gz)?$", re.IGNORECASE)
 SPLIT_ALIASES = {"TR": "train", "VAL": "validation", "TST": "test"}
+
+
+class DataLeakageError(ValueError, RuntimeError):
+    """Raised when patient-level data leakage is detected across splits."""
+
+    pass
+
+
+def verify_split_independence(df: pd.DataFrame, strict: bool = True) -> dict[str, Any]:
+    """Verify strict patient-level split independence both within views and across all views.
+
+    Enforces 0% patient leakage between train, validation, and test splits across all views.
+
+    Args:
+        df: Manifest DataFrame with columns ['subject_id', 'split'] (and optionally 'view').
+        strict: If True, raise DataLeakageError (inherits from ValueError & RuntimeError) on any patient overlap.
+
+    Returns:
+        Dictionary summary containing 'is_independent', 'splits', 'patient_counts',
+        'split_patients', and 'leakages'.
+
+    Raises:
+        DataLeakageError: If strict=True and any patient overlap is found across splits.
+    """
+    if "subject_id" not in df.columns or "split" not in df.columns:
+        raise ValueError("DataFrame must contain 'subject_id' and 'split' columns.")
+
+    splits = sorted([s for s in df["split"].unique() if pd.notna(s)])
+    split_patients = {s: set(df[df["split"] == s]["subject_id"].astype(str)) for s in splits}
+
+    leakage_records = []
+    for i, s1 in enumerate(splits):
+        for s2 in splits[i + 1 :]:
+            overlap = split_patients[s1] & split_patients[s2]
+            if overlap:
+                for pid in sorted(overlap):
+                    if "view" in df.columns:
+                        views_s1 = sorted(
+                            df[(df["split"] == s1) & (df["subject_id"].astype(str) == pid)]["view"]
+                            .dropna()
+                            .unique()
+                            .tolist()
+                        )
+                        views_s2 = sorted(
+                            df[(df["split"] == s2) & (df["subject_id"].astype(str) == pid)]["view"]
+                            .dropna()
+                            .unique()
+                            .tolist()
+                        )
+                    else:
+                        views_s1 = ["N/A"]
+                        views_s2 = ["N/A"]
+
+                    leakage_records.append({
+                        "subject_id": pid,
+                        "split_1": s1,
+                        "views_1": views_s1,
+                        "split_2": s2,
+                        "views_2": views_s2,
+                    })
+
+    has_leakage = len(leakage_records) > 0
+    if has_leakage:
+        msg_lines = [
+            f"CRITICAL CROSS-VIEW DATA LEAKAGE: Found {len(leakage_records)} patient-level split conflicts:"
+        ]
+        for rec in leakage_records:
+            msg_lines.append(
+                f"  • Patient '{rec['subject_id']}': present in '{rec['split_1']}' (views: {rec['views_1']}) "
+                f"AND '{rec['split_2']}' (views: {rec['views_2']})"
+            )
+        full_msg = "\n".join(msg_lines)
+        if strict:
+            raise DataLeakageError(full_msg)
+        logger.error("⚠️ %s", full_msg)
+
+    # Log per-split patient counts
+    for s in splits:
+        logger.info("  ✓ Split '%s': %d unique patients", f"{s:12s}", len(split_patients[s]))
+    if not has_leakage:
+        logger.info("✓ Patient-level cross-view data partition verified: ZERO leakage across all splits!")
+
+    return {
+        "is_independent": not has_leakage,
+        "splits": splits,
+        "patient_counts": {s: len(split_patients[s]) for s in splits},
+        "split_patients": split_patients,
+        "leakages": leakage_records,
+    }
 
 
 def get_lge_directory(data_root: Path) -> Path:
@@ -141,34 +232,8 @@ def main() -> None:
     logger.info("Splits CSVs saved to %s", out_dir)
     logger.info("Total: %d records across %d views.", len(df), df["view"].nunique())
 
-    # ---- Patient-level data leakage check (fixes W6: hard assert in strict mode) ----
-    leakage_found = False
-    for view in df["view"].unique():
-        view_df = df[df["view"] == view]
-        splits_present = view_df["split"].unique()
-        if len(splits_present) <= 1:
-            continue
-        for s1 in splits_present:
-            for s2 in splits_present:
-                if s1 >= s2:
-                    continue
-                ids_s1 = set(view_df[view_df["split"] == s1]["subject_id"])
-                ids_s2 = set(view_df[view_df["split"] == s2]["subject_id"])
-                overlap = ids_s1 & ids_s2
-                if overlap:
-                    leakage_found = True
-                    msg = (
-                        f"CRITICAL DATA LEAKAGE: View '{view}' has {len(overlap)} overlapping "
-                        f"patients between '{s1}' and '{s2}': {overlap}"
-                    )
-                    if args.strict:
-                        raise RuntimeError(msg)
-                    logger.error("⚠️ %s", msg)
-                else:
-                    logger.info("  ✓ View '%s': '%s' ∩ '%s' = ∅ (no leakage)", view, s1, s2)
-
-    if not leakage_found:
-        logger.info("✓ Patient-level data partition verified: ZERO leakage across all splits!")
+    # ---- Patient-level cross-view data leakage check ----
+    verify_split_independence(df, strict=args.strict)
 
 
 if __name__ == "__main__":

@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from preprocessing.build_splits import (
+    DataLeakageError,
+    verify_split_independence,
+)
 from preprocessing.preprocessing import (
     CenterTransform,
     SpatialTransform,
@@ -18,6 +22,7 @@ from preprocessing.preprocessing import (
 
 __all__ = [
     "CenterTransform",
+    "DataLeakageError",
     "SpatialTransform",
     "center_crop_or_pad",
     "invert_center_crop_or_pad",
@@ -28,4 +33,5 @@ __all__ = [
     "preprocess_spatial",
     "resize_to_shape",
     "shape_for_spacing",
+    "verify_split_independence",
 ]

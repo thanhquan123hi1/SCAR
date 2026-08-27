@@ -35,39 +35,92 @@ def _surface(mask: np.ndarray) -> np.ndarray:
     return surf
 
 
+def compute_fov_diagonal(
+    shape: tuple[int, ...],
+    spacing: tuple[float, ...] | None = None,
+) -> float:
+    """Compute physical Field-of-View (FOV) diagonal length in mm: sqrt(sum((shape_i * spacing_i)^2))."""
+    if spacing is not None:
+        if len(spacing) < len(shape):
+            sp = tuple(float(s) for s in spacing) + tuple([1.0] * (len(shape) - len(spacing)))
+        else:
+            sp = tuple(float(s) for s in spacing[:len(shape)])
+    else:
+        sp = tuple([1.0] * len(shape))
+    return float(np.sqrt(sum((float(dim) * float(s)) ** 2 for dim, s in zip(shape, sp))))
+
+
 def hd95_binary(
     prediction: np.ndarray,
     target: np.ndarray,
     spacing: tuple[float, ...] | None = None,
-    penalty_distance: float = 300.0,
+    penalty_distance: float | None = None,
+    empty_value: float | None = 0.0,
 ) -> float | None:
     """Return physical-space 95th percentile Hausdorff Distance (HD95 in mm).
     
-    If both prediction and target are empty: returns None (not applicable).
-    If one is empty and the other is not (complete miss/false alarm): returns penalty_distance (300.0 mm).
+    Aligned with Metrics Reloaded (Nature Methods 2024):
+    - If both prediction and target are empty (Symmetric True Negative): returns empty_value (default: 0.0 mm).
+    - If one is empty and the other is not (complete miss / false alarm): returns dynamic FOV diagonal
+      sqrt(sum((dim * sp)^2)) when penalty_distance is None, or penalty_distance when explicitly provided.
+    - If both are non-empty: computes the 95th percentile symmetric surface distance in mm.
     """
     pred = np.asarray(prediction, dtype=bool)
     truth = np.asarray(target, dtype=bool)
 
     if not pred.any() and not truth.any():
-        return None  # Not applicable (both empty)
-    if not pred.any() or not truth.any():
-        return float(penalty_distance)  # Benchmark penalty for complete miss
+        return empty_value  # Symmetrically handled True Negative (both empty -> 0.0 mm)
 
-    sampling = spacing if spacing is not None else tuple([1.0] * pred.ndim)
+    if spacing is not None:
+        if len(spacing) < pred.ndim:
+            sampling = tuple(float(s) for s in spacing) + tuple([1.0] * (pred.ndim - len(spacing)))
+        else:
+            sampling = tuple(float(s) for s in spacing[:pred.ndim])
+    else:
+        sampling = tuple([1.0] * pred.ndim)
+
+    # Dynamic patient FOV diagonal scaling when penalty_distance is None
+    if penalty_distance is None:
+        penalty_val = compute_fov_diagonal(pred.shape, sampling)
+    else:
+        penalty_val = float(penalty_distance)
+
+    if not pred.any() or not truth.any():
+        return penalty_val
+
     pred_surf = _surface(pred)
     truth_surf = _surface(truth)
 
     if not pred_surf.any() or not truth_surf.any():
-        return float(penalty_distance)
+        return penalty_val
 
     truth_dist = distance_transform_edt(~truth_surf, sampling=sampling)
     pred_dist = distance_transform_edt(~pred_surf, sampling=sampling)
 
     distances = np.concatenate([truth_dist[pred_surf], pred_dist[truth_surf]])
     if distances.size == 0:
-        return float(penalty_distance)
+        return penalty_val
     return float(np.percentile(distances, 95))
+
+
+def dice_score_symmetric(
+    pred: np.ndarray,
+    target: np.ndarray,
+    *,
+    num_classes: int,
+) -> dict[int, float]:
+    """Per-class Dice score with symmetric True Negative handling (empty GT & empty Pred -> 1.0)."""
+    return dice_score(pred, target, num_classes=num_classes, empty_value=1.0)
+
+
+def iou_score_symmetric(
+    pred: np.ndarray,
+    target: np.ndarray,
+    *,
+    num_classes: int,
+) -> dict[int, float]:
+    """Per-class IoU score with symmetric True Negative handling (empty GT & empty Pred -> 1.0)."""
+    return iou_score(pred, target, num_classes=num_classes, empty_value=1.0)
 
 
 def dice_score(

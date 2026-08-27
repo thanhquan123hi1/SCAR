@@ -17,8 +17,8 @@ logger = logging.getLogger(__name__)
 def build_rare_class_sampler(
     dataset: Dataset,
     rare_classes: list[int] | None = None,
-    rare_boost: float = 2.5,
-    foreground_boost: float = 1.5,
+    rare_boost: float = 2.0,
+    foreground_boost: float = 1.3,
     strict: bool = False,
 ) -> WeightedRandomSampler | None:
     """Build a WeightedRandomSampler that over-samples records containing rare pathology.
@@ -47,8 +47,11 @@ def build_rare_class_sampler(
                     with np.load(cache_dir / f"{row.record_id}.npz", allow_pickle=True) as data:
                         if "label" in data:
                             lbl = data["label"]
-                            # Check slice or volume
-                            lbl_slice = lbl[slice_idx] if lbl.ndim >= 3 and slice_idx < lbl.shape[0] else lbl
+                            # Normalize layout to (D, H, W) if stored as (H, W, D) (e.g. SAX 3D cache)
+                            if lbl.ndim == 3 and ((lbl.shape[0] > 32 and lbl.shape[-1] <= 32) or (lbl.shape[0] == lbl.shape[1] and lbl.shape[-1] < lbl.shape[0])):
+                                lbl = np.transpose(lbl, (2, 0, 1))
+
+                            lbl_slice = lbl[slice_idx] if lbl.ndim >= 3 and slice_idx < lbl.shape[0] else (lbl if lbl.ndim == 2 else lbl)
                             unique_cls = np.unique(lbl_slice)
                             if primary_rare in unique_cls:
                                 weight = rare_boost
@@ -96,17 +99,21 @@ def build_rare_class_sampler(
         weights.append(weight)
 
     # Validate that sampler is actually boosting some samples
-    num_default = sum(1 for w in weights if w == 1.0)
-    if num_default == len(weights) and len(weights) > 0:
-        if strict:
+    if len(weights) == 0:
+        return None
+
+    all_uniform = all(w == weights[0] for w in weights)
+    if all_uniform:
+        if strict and weights[0] == 1.0:
             raise RuntimeError(
                 f"All {len(weights)} samples have default weight=1.0. "
                 "Rare-class sampler cannot boost any samples because labels/cache are missing."
             )
         logger.warning(
-            "⚠️ ALL %d samples have weight=1.0 — rare-class sampler cannot boost any samples! "
+            "⚠️ ALL %d samples have uniform weight=%.2f — rare-class sampler cannot boost any samples! "
             "Falling back to standard DataLoader shuffle=True to avoid degenerate replacement sampling.",
             len(weights),
+            weights[0],
         )
         return None
 

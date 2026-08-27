@@ -27,15 +27,28 @@ def _get_norm_layer_3d(norm_type: str, channels: int) -> nn.Module:
 
 
 class ConvBlock3D(nn.Module):
-    """(Conv3D -> Norm3D -> LeakyReLU) * 2 with residual connection."""
+    """(Conv3D -> Norm3D -> LeakyReLU) * 2 with residual connection and anisotropic kernel support."""
 
-    def __init__(self, in_channels: int, out_channels: int, dropout: float = 0.0, norm_type: str = "group") -> None:
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: tuple[int, int, int] | int = 3,
+        padding: tuple[int, int, int] | int | None = None,
+        dropout: float = 0.0,
+        norm_type: str = "group",
+    ) -> None:
         super().__init__()
-        self.conv1 = nn.Conv3d(in_channels, out_channels, kernel_size=3, padding=1, bias=False)
+        if isinstance(kernel_size, int):
+            kernel_size = (kernel_size, kernel_size, kernel_size)
+        if padding is None:
+            padding = tuple(k // 2 for k in kernel_size)
+
+        self.conv1 = nn.Conv3d(in_channels, out_channels, kernel_size=kernel_size, padding=padding, bias=False)
         self.norm1 = _get_norm_layer_3d(norm_type, out_channels)
         self.act1 = nn.LeakyReLU(negative_slope=0.01, inplace=True)
 
-        self.conv2 = nn.Conv3d(out_channels, out_channels, kernel_size=3, padding=1, bias=False)
+        self.conv2 = nn.Conv3d(out_channels, out_channels, kernel_size=kernel_size, padding=padding, bias=False)
         self.norm2 = _get_norm_layer_3d(norm_type, out_channels)
         self.act2 = nn.LeakyReLU(negative_slope=0.01, inplace=True)
 
@@ -59,31 +72,33 @@ class ConvBlock3D(nn.Module):
 
 
 class DownBlock3D(nn.Module):
-    """MaxPool3d or Strided Conv -> ConvBlock3D."""
+    """MaxPool3d or Strided Conv -> ConvBlock3D with anisotropic kernel/pooling support."""
 
     def __init__(
         self,
         in_channels: int,
         out_channels: int,
+        kernel_size: tuple[int, int, int] | int = 3,
         pool_stride: tuple[int, int, int] = (2, 2, 2),
         norm_type: str = "group",
     ) -> None:
         super().__init__()
         self.pool = nn.MaxPool3d(kernel_size=pool_stride, stride=pool_stride)
-        self.conv = ConvBlock3D(in_channels, out_channels, norm_type=norm_type)
+        self.conv = ConvBlock3D(in_channels, out_channels, kernel_size=kernel_size, norm_type=norm_type)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.conv(self.pool(x))
 
 
 class UpBlock3D(nn.Module):
-    """Upsample -> Concatenate -> ConvBlock3D."""
+    """Upsample -> Concatenate -> ConvBlock3D with anisotropic kernel/scale support."""
 
     def __init__(
         self,
         in_channels: int,
         skip_channels: int,
         out_channels: int,
+        kernel_size: tuple[int, int, int] | int = 3,
         scale_factor: tuple[int, int, int] = (2, 2, 2),
         norm_type: str = "group",
     ) -> None:
@@ -95,7 +110,7 @@ class UpBlock3D(nn.Module):
         )
         self.norm = _get_norm_layer_3d(norm_type, out_channels)
         self.act = nn.LeakyReLU(negative_slope=0.01, inplace=True)
-        self.conv = ConvBlock3D(out_channels + skip_channels, out_channels, norm_type=norm_type)
+        self.conv = ConvBlock3D(out_channels + skip_channels, out_channels, kernel_size=kernel_size, norm_type=norm_type)
 
     def forward(self, x: torch.Tensor, skip: torch.Tensor) -> torch.Tensor:
         x = self.act(self.norm(self.conv_trans(x)))
@@ -125,19 +140,38 @@ class UNet3D(nn.Module):
         if features is None:
             features = [32, 64, 128, 256]
 
-        self.in_conv = ConvBlock3D(in_channels, features[0], dropout=dropout, norm_type=norm_type)
+        # Stage 0: Anisotropic in-plane conv for thick-slice (1.0, 1.0, 10.0) mm
+        self.in_conv = ConvBlock3D(
+            in_channels, features[0], kernel_size=(1, 3, 3), dropout=dropout, norm_type=norm_type
+        )
 
-        # Downsampling: anisotropic pooling for thick-slice SAX (192, 192, 16)
-        self.down1 = DownBlock3D(features[0], features[1], pool_stride=(1, 2, 2), norm_type=norm_type)  # (16, 96, 96)
-        self.down2 = DownBlock3D(features[1], features[2], pool_stride=(2, 2, 2), norm_type=norm_type)  # (8, 48, 48)
-        self.down3 = DownBlock3D(features[2], features[3], pool_stride=(2, 2, 2), norm_type=norm_type)  # (4, 24, 24)
-        self.down4 = DownBlock3D(features[3], features[3] * 2, pool_stride=(2, 2, 2), norm_type=norm_type)  # (2, 12, 12)
+        # Downsampling: preserve depth D=16 across early stages, pool depth only at bottleneck (D=8)
+        self.down1 = DownBlock3D(
+            features[0], features[1], kernel_size=(1, 3, 3), pool_stride=(1, 2, 2), norm_type=norm_type
+        )  # (16, 96, 96)
+        self.down2 = DownBlock3D(
+            features[1], features[2], kernel_size=(1, 3, 3), pool_stride=(1, 2, 2), norm_type=norm_type
+        )  # (16, 48, 48)
+        self.down3 = DownBlock3D(
+            features[2], features[3], kernel_size=(3, 3, 3), pool_stride=(1, 2, 2), norm_type=norm_type
+        )  # (16, 24, 24)
+        self.down4 = DownBlock3D(
+            features[3], features[3] * 2, kernel_size=(3, 3, 3), pool_stride=(2, 2, 2), norm_type=norm_type
+        )  # (8, 12, 12)
 
-        # Upsampling
-        self.up3 = UpBlock3D(features[3] * 2, features[3], features[3], scale_factor=(2, 2, 2), norm_type=norm_type)
-        self.up2 = UpBlock3D(features[3], features[2], features[2], scale_factor=(2, 2, 2), norm_type=norm_type)
-        self.up1 = UpBlock3D(features[2], features[1], features[1], scale_factor=(2, 2, 2), norm_type=norm_type)
-        self.up0 = UpBlock3D(features[1], features[0], features[0], scale_factor=(1, 2, 2), norm_type=norm_type)
+        # Upsampling: mirror encoder strides
+        self.up3 = UpBlock3D(
+            features[3] * 2, features[3], features[3], kernel_size=(3, 3, 3), scale_factor=(2, 2, 2), norm_type=norm_type
+        )  # (8, 12, 12) -> (16, 24, 24)
+        self.up2 = UpBlock3D(
+            features[3], features[2], features[2], kernel_size=(3, 3, 3), scale_factor=(1, 2, 2), norm_type=norm_type
+        )  # (16, 24, 24) -> (16, 48, 48)
+        self.up1 = UpBlock3D(
+            features[2], features[1], features[1], kernel_size=(1, 3, 3), scale_factor=(1, 2, 2), norm_type=norm_type
+        )  # (16, 48, 48) -> (16, 96, 96)
+        self.up0 = UpBlock3D(
+            features[1], features[0], features[0], kernel_size=(1, 3, 3), scale_factor=(1, 2, 2), norm_type=norm_type
+        )  # (16, 96, 96) -> (16, 192, 192)
 
         # Final segmentation head
         self.out_conv = nn.Conv3d(features[0], num_classes, kernel_size=1)

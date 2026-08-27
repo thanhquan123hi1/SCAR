@@ -47,7 +47,7 @@ class MultiClassSoftDiceLoss(nn.Module):
         p = probs[:, start_cls:]
         t = one_hot[:, start_cls:]
         intersection = torch.sum(p * t, dim=dims)
-        denominator = torch.sum(p + t, dim=dims).clamp_min(1e-6)
+        denominator = torch.sum(p.pow(2) + t.pow(2), dim=dims).clamp_min(1e-6)
         dice = (2.0 * intersection + self.smooth) / (denominator + self.smooth)
         return (1.0 - dice).mean()
 
@@ -108,7 +108,7 @@ class OneVsRestCompoundLoss(nn.Module):
 
         dims = tuple(range(2, probs.ndim))
         intersection = (probs * fg_target).sum(dim=dims)
-        union = (probs + fg_target).sum(dim=dims)
+        union = (probs.pow(2) + fg_target.pow(2)).sum(dim=dims).clamp_min(1e-6)
         dice = (2.0 * intersection + self.smooth) / (union + self.smooth)  # (B, K)
 
         if self.class_weights is not None:
@@ -159,7 +159,7 @@ class OneVsRestCompoundLoss(nn.Module):
             if cw.numel() == K:
                 cw_view = cw.view(1, -1, *([1] * (fg_logits.ndim - 2)))
                 loss_map = loss_map * cw_view
-                spatial_voxels = fg_logits.shape[0] * torch.prod(torch.tensor(fg_logits.shape[2:], device=fg_logits.device))
+                spatial_voxels = fg_logits.shape[0] * torch.prod(torch.tensor(fg_logits.shape[2:], device=fg_logits.device, dtype=torch.float32))
                 return loss_map.sum() / (cw.sum().clamp_min(1e-8) * spatial_voxels)
 
         return loss_map.mean()
@@ -204,6 +204,8 @@ class FocalTverskyLoss(nn.Module):
     def forward(self, logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
         if logits.shape[1] == self.num_classes:
             probs = torch.softmax(logits, dim=1)[:, 1:]
+        elif logits.shape[1] == self.num_classes - 1:
+            probs = torch.sigmoid(logits)
         else:
             probs = torch.sigmoid(logits)
 
@@ -217,8 +219,9 @@ class FocalTverskyLoss(nn.Module):
         fp = (probs * (1.0 - targets)).sum(dim=dims)
         fn = ((1.0 - probs) * targets).sum(dim=dims)
 
-        tversky = (tp + self.smooth) / (tp + self.alpha * fp + self.beta * fn + self.smooth)
-        focal_tversky = (1.0 - tversky).pow(self.gamma)
+        denom = (tp + self.alpha * fp + self.beta * fn + self.smooth).clamp_min(1e-6)
+        tversky = (tp + self.smooth) / denom
+        focal_tversky = (1.0 - tversky.clamp(0.0, 1.0)).pow(self.gamma)
         return focal_tversky.mean()
 
 
