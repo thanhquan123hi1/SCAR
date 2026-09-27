@@ -83,44 +83,44 @@ Các phép lấy trung bình giữ lại chiều để broadcast. Công thức d
 **SSPANet:** pooling theo kênh tạo gate không gian (giữ tên CA trong code).
 
 $$
-Z = \operatorname{Concat}(\operatorname{Max}_C(X),\operatorname{Mean}_C(X))
+Z = \mathrm{Concat}(\mathrm{Max}_C(X),\mathrm{Mean}_C(X))
 $$
 
 $$
-\operatorname{CA}(X)=X\odot\sigma(\operatorname{BN}(\operatorname{Conv}_{7\times7}(Z)))
+\mathrm{CA}(X)=X\odot\sigma(\mathrm{BN}(\mathrm{Conv}_{7\times7}(Z)))
 $$
 
 $$
-R_h=\sqrt{\operatorname{Mean}_W(X^2)+\epsilon},\qquad
-R_w=\sqrt{\operatorname{Mean}_H(X^2)+\epsilon}
+R_h=\sqrt{\mathrm{Mean}_W(X^2)+\epsilon},\qquad
+R_w=\sqrt{\mathrm{Mean}_H(X^2)+\epsilon}
 $$
 
 $$
-U_h=\operatorname{BN}(\operatorname{Conv}_{3\times1}(R_h)),\qquad
-U_w=\operatorname{BN}(\operatorname{Conv}_{1\times3}(R_w))
+U_h=\mathrm{BN}(\mathrm{Conv}_{3\times1}(R_h)),\qquad
+U_w=\mathrm{BN}(\mathrm{Conv}_{1\times3}(R_w))
 $$
 
 $$
-\operatorname{SA}(X)=X\odot\sigma(\operatorname{Conv}_{1\times1}(U_h+U_w))
+\mathrm{SA}(X)=X\odot\sigma(\mathrm{Conv}_{1\times1}(U_h+U_w))
 $$
 
 $$
-\operatorname{SSPA}(X)=X+X\odot\sigma(\operatorname{CA}(X)+\operatorname{SA}(X))
+\mathrm{SSPA}(X)=X+X\odot\sigma(\mathrm{CA}(X)+\mathrm{SA}(X))
 $$
 
 **CMSPA:** $g_A$ và $g_P$ đều là Conv 1×1 → BN → ReLU → Conv 1×1 → sigmoid.
 Độ lệch chuẩn dùng population variance và epsilon; gate là đặc trưng học được, không phải mask giải phẫu được đảm bảo.
 
 $$
-A=g_A(\operatorname{Mean}_W(C)+\operatorname{Mean}_H(C))
+A=g_A(\mathrm{Mean}_W(C)+\mathrm{Mean}_H(C))
 $$
 
 $$
-P=g_P\left(\sqrt{\operatorname{Var}_C(L)+\epsilon}+\sqrt{\operatorname{Var}_C(T)+\epsilon}\right)
+P=g_P\left(\sqrt{\mathrm{Var}_C(L)+\epsilon}+\sqrt{\mathrm{Var}_C(T)+\epsilon}\right)
 $$
 
 $$
-F=g_F(\operatorname{Concat}(C+C\odot P, L\odot A, T\odot A))
+F=g_F(\mathrm{Concat}(C+C\odot P, L\odot A, T\odot A))
 $$
 
 $g_F$ là Conv 1×1 → BN → ReLU, đầu ra 512 kênh ở cấu hình mặc định.
