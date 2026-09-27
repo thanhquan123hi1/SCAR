@@ -1,4 +1,4 @@
-"""Prepare or validate MyoPS cache, train M0-M3, then evaluate held-out volumes."""
+"""Prepare or validate MyoPS cache, train M2/M3, then evaluate held-out volumes."""
 from __future__ import annotations
 
 import argparse
@@ -69,7 +69,7 @@ def main(argv=None) -> Path:
     seed = args.seed if args.seed is not None else config.get("seed", 1234)
     model_name = config["model"].get("model_name") or config["model"].get("architecture", config["model"]["ablation"])
     clean_model = str(model_name).replace(" ", "-").replace("/", "-")
-    timestamp = datetime.now().strftime("%Hh%M")
+    timestamp = datetime.now().strftime("%Y-%m-%d_%Hh%M")
     run_id = args.run_id or f"{clean_model}_seed{seed}_{timestamp}"
     if Path(run_id).name != run_id or run_id in {".", ".."} or "/" in run_id or "\\" in run_id:
         parser.error("--run-id must be a single directory name")
@@ -115,7 +115,7 @@ def main(argv=None) -> Path:
         if value is not None:
             train_command.append("--" + ("" if value else "no-") + name.replace("_", "-"))
     run_command(train_command, "3/4: Train with validation-based checkpoint selection")
-    checkpoint = run_dir / "best.pth"
+    checkpoint = run_dir / "checkpoints" / "best.pth"
     if not checkpoint.is_file():
         raise FileNotFoundError(f"Training did not produce the best checkpoint: {checkpoint}")
     if not args.skip_evaluate:

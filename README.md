@@ -1,8 +1,5 @@
 # SCAR: Phân đoạn Cơ tim Đa phương thức với SSPANet + CMSPA
 
-**M3-DPF (model riêng):** xem [thiết kế, loss, hướng dẫn train và precision/recall](docs/M3_DPF.md).
-Chọn `--config training/config/models/m3_dpf.yaml`; model và loss M3 mặc định vẫn giữ nguyên. Tài liệu được lưu UTF-8; công thức dùng Markdown math của GitHub. Trình xem local cần bật hỗ trợ math.
-
 <p align="center">
   <a href="https://colab.research.google.com/github/thanhquan123hi1/SCAR/blob/main/scar_pipeline.ipynb">
     <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab">
@@ -33,12 +30,11 @@ Mô hình chủ lực **CMSPA-Net (M3)** kết hợp **3 encoder ResNetV2 độc
 ## Mục lục
 - [Chạy nhanh trên Google Colab](#chạy-nhanh-trên-google-colab)
 - [Kiến trúc Mô hình CMSPA-Net (M3)](#kiến-trúc-mô-hình-cmspa-net-m3)
-- [M3-DPF (thử nghiệm)](#m3-dpf-thử-nghiệm)
-- [Các cấu hình nghiên cứu (Ablation Studies M0–M3)](#các-cấu-hình-nghiên-cứu-ablation-studies-m0m3)
-- [Hợp đồng Dữ liệu & Quy ước Nhãn Canonical](#hợp-đồng-dữ-liệu--quy-ước-nhãn-canonical)
+- [Các cấu hình nghiên cứu (Ablation Studies M2, M3)](#các-cấu-hình-nghiên-cứu-ablation-studies-m2-m3)
+- [Hợp đồng Dữ liệu và Quy ước Nhãn Canonical](#hợp-đồng-dữ-liệu-và-quy-ước-nhãn-canonical)
 - [Cài đặt Môi trường](#cài-đặt-môi-trường)
 - [Huấn luyện Mô hình](#huấn-luyện-mô-hình)
-- [Đánh giá & Xuất kết quả NIfTI](#đánh-giá--xuất-kết-quả-nifti)
+- [Đánh giá và Xuất kết quả NIfTI](#đánh-giá-và-xuất-kết-quả-nifti)
 - [Cấu trúc Repository](#cấu-trúc-repository)
 - [Tài liệu Tham khảo](#tài-liệu-tham-khảo)
 
@@ -129,44 +125,18 @@ $$
 
 $g_F$ là Conv 1×1 → BN → ReLU, đầu ra 512 kênh ở cấu hình mặc định.
 
-### M3-DPF (thử nghiệm)
-
-M3-DPF giữ ba encoder và SSPANet; thay fusion bottleneck ở 1/16 và skip thứ hai ở 1/4 bằng DualPathologyFusion. Mô hình mặc định có **64.525.984 tham số**.
-Hai router softmax trộn CINE/LGE/T2w cho hai expert. Nhánh skip có auxiliary logits theo thứ tự **scar, edema độc lập**. Expert ở bottleneck chỉ được giám sát gián tiếp qua đầu ra cuối; chưa có bảo đảm mỗi expert tự chuyên biệt đúng bệnh lý.
-
-$$
-F_{\mathrm{DPF}}=F_{\mathrm{concat}}+\sigma(\eta)\operatorname{Conv}_{1\times1}(\operatorname{Concat}(E_s,E_e))
-$$
-
-Hệ số residual ban đầu là 0,1. Loss phiên bản 1:
-
-$$
-\mathcal{L}=0.5\mathcal{L}_{\mathrm{CE}}+0.5\mathcal{L}_{\mathrm{Dice}}
-+r(t)(0.2\mathcal{L}_{\mathrm{hierarchy}}+0.1\mathcal{L}_{\mathrm{aux}})
-$$
-
-$$
-r(t)=\min(t/10,1),\qquad t=1,2,\ldots
-$$
-
-Dice foreground có trọng số normal/edema/scar là 0,2/0,4/0,4 và chỉ trung bình trên ảnh có lớp mục tiêu. Hierarchy dùng hợp cơ tim `{1,2,3}` và hợp tổn thương `{2,3}`. Auxiliary BCE dùng mask trung bình xuống 1/4. CE/Dice có thể đổi qua CLI.
-
-Gradient accumulation không tương đương hoàn toàn batch lớn vì mẫu số Dice phụ thuộc lớp hiện diện trong từng microbatch; BatchNorm cũng dùng thống kê từng microbatch. Chưa có kết quả thực nghiệm chứng minh DPF tốt hơn M3. Xem [chi tiết M3-DPF](docs/M3_DPF.md) và [báo cáo rà soát](docs/M3_DPF_REVIEW.md).
-
 ---
 
-## Các cấu hình nghiên cứu (Ablation Studies M0–M3)
+## Các cấu hình nghiên cứu (Ablation Studies M2, M3)
 
 | Mã Ablation | Attention từng nhánh | Fusion Bottleneck | File cấu hình YAML |
 |:---:|:---:|:---:|:---:|
-| **M0** | Không sử dụng | Concat đơn giản | [`training/config/models/concat_baseline.yaml`](training/config/models/concat_baseline.yaml) |
-| **M1** | SSPANet | Concat đơn giản | [`training/config/models/sspanet_baseline.yaml`](training/config/models/sspanet_baseline.yaml) |
 | **M2** | SSPANet | Cross-Attention | [`training/config/models/cross_attn_baseline.yaml`](training/config/models/cross_attn_baseline.yaml) |
 | **M3 (Đề xuất)** | **SSPANet** | **CMSPA** | [`training/config/models/cmspa_net.yaml`](training/config/models/cmspa_net.yaml) |
 
 ---
 
-## Hợp đồng Dữ liệu & Quy ước Nhãn Canonical
+## Hợp đồng Dữ liệu và Quy ước Nhãn Canonical
 
 ### Bảng nhãn Canonical chuẩn hóa:
 | ID Lớp | Tên nhãn | Định nghĩa giải phẫu |
@@ -235,27 +205,53 @@ Với GPU ít VRAM, bắt đầu bằng `--batch-size 2`; dùng `--accum-steps 8
 
 Truyền lại config và các tham số của run gốc, gồm batch size, accumulation, LR, số epoch và quy ước nhãn. `--resume` không tự nạp các tùy chọn CLI từ checkpoint; bỏ `--pretrained` khi resume.
 ```bash
-python train.py --config training/config/models/cmspa_net.yaml --data-root /path/to/Processed_data --list-dir data/processed/splits --resume outputs/runs/m3_run01/last.pth
+python train.py --config training/config/models/cmspa_net.yaml --data-root /path/to/Processed_data --list-dir data/processed/splits --resume outputs/runs/m3_run01/checkpoints/last.pth
 ```
 
 ---
 
-## Đánh giá & Xuất kết quả NIfTI
+## Đánh giá và Xuất kết quả NIfTI
 
 Đánh giá checkpoint tốt nhất trên tập dữ liệu kiểm thử 3D:
 ```bash
 python test.py \
-    --checkpoint outputs/runs/m3_run01/best.pth \
+    --checkpoint outputs/runs/m3_run01/checkpoints/best.pth \
     --data-root /path/to/Processed_data \
     --split test_vol \
     --batch-size 8 \
     --save-predictions
 ```
 
-Báo cáo kết quả được lưu tại `outputs/runs/m3_run01/evaluation_test_vol/` gồm:
+Run tự động có tên `<model>_seed<seed>_<YYYY-MM-DD_HHhMM>`. Có thể chọn tên riêng bằng `--run-id` hoặc `--output-dir`.
+
+```text
+outputs/runs/CMSPA-Net_seed1234_2026-09-22_14h30/
+├── tensorboard/
+│   ├── epochs/
+│   └── updates/
+├── checkpoints/
+│   ├── best.pth
+│   └── last.pth
+└── logs_CMSPA-Net_seed1234/
+    ├── train.log
+    ├── metrics.csv
+    ├── metrics.jsonl
+    ├── summary.json
+    ├── config.json
+    ├── splits/
+    └── test_results/
+```
+
+Tên thư mục logs lấy model và seed từ cấu hình. `test_results/` được tạo khi đánh giá `test_vol`; `validation_results/` khi đánh giá `val_vol`. `--output-dir` của lệnh test cho phép chọn nơi lưu khác. Resume và test vẫn đọc được run cũ có checkpoint/log/splits nằm trực tiếp trong thư mục run; không tự di chuyển dữ liệu cũ.
+
+Báo cáo kết quả được lưu tại `outputs/runs/m3_run01/logs_CMSPA-Net_seed1234/test_results/` gồm:
 * `per_case.csv`: Chi tiết Dice, IoU, HD95, ASD cho từng ca bệnh.
 * `metrics.json`: Điểm theo bệnh nhân, protocol, hash dữ liệu và số ca metric xác định/không xác định.
 * Mask `.npz`; chỉ xuất thêm NIfTI khi cache có affine hợp lệ. Không tạo geometry giả cho cache legacy.
+
+Đánh giá cũng ghi `test.log` trong thư mục kết quả: tiến độ, metric từng ca/vùng, tổng kết và traceback nếu lỗi trong vòng đánh giá. Các lỗi kiểm tra đầu vào trước khi tạo thư mục kết quả vẫn hiển thị trên terminal.
+
+Test không sử dụng TensorBoard và không cần thư mục `tensorboard/`. Kết quả được lưu bằng `test.log`, `per_case.csv`, `metrics.json` và prediction nếu bật. TensorBoard chỉ dùng cho train. Text log của test được ghi ngoài khoảng đo inference.
 
 ---
 
@@ -280,8 +276,7 @@ Protocol `myops380_voxel_v1` tính HD95/ASD trên lưới voxel đơn vị (`vox
 ```text
 SCAR/
 ├── data/                        # Dữ liệu splits (train.txt, val.txt, test_vol.txt)
-├── outputs/                     # Sơ đồ kiến trúc (figures/) và checkpoints huấn luyện (runs/)
-│   └── figures/                 # pipeline_cmspa_net.png (300 DPI) & pipeline_cmspa_net.pdf
+├── outputs/                     # Checkpoints và logs huấn luyện (runs/)
 ├── preprocessing/               # Pipeline tiền xử lý NIfTI, chuẩn hóa cường độ, chia splits
 │   ├── build_splits.py
 │   ├── config.yaml
@@ -290,7 +285,7 @@ SCAR/
 │   ├── verify.py
 │   └── splits/test_vol.txt      # 76 ca test cố định
 ├── training/                    # Toàn bộ mã nguồn mô hình & huấn luyện cốt lõi
-│   ├── config/                  # base.yaml và cấu hình models/ (M0 -> M3)
+│   ├── config/                  # base.yaml và cấu hình models/ (M2, M3)
 │   ├── dataset/                 # Dataset loader, Data Contract, Sampler
 │   ├── loss/                    # DiceLoss, SegmentationLoss (AMP-safe)
 │   ├── metrics/                 # ConfusionMeter, SurfaceDistance (HD95, ASD)

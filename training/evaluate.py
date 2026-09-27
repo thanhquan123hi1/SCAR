@@ -23,6 +23,8 @@ from training.predict import predict_volume
 from training.metrics.surface_distance import BENCHMARK_PROTOCOL, benchmark_rows, summarize_rows
 from training.models.cmspa_net import CMSPANet, VisionTransformer
 from training.models import model_from_config
+from training.run_layout import RunLayout
+from training.evaluation_logging import evaluation_logger
 from training.trainer.trainer import (
     json_safe,
     load_checkpoint,
@@ -73,21 +75,19 @@ def main(argv=None):
     model.to(device).eval()
 
     checkpoint_path = Path(args.checkpoint).resolve()
-    run_dir = checkpoint_path.parent
-    if run_dir.name == "checkpoints" or (not (run_dir / "splits").exists() and (run_dir.parent / "splits").exists()):
-        run_dir = run_dir.parent
-
-    list_dir = Path(args.list_dir) if args.list_dir else run_dir / "splits"
-    output = Path(args.output_dir) if args.output_dir else run_dir / ("evaluation_" + args.split)
+    layout = RunLayout.from_checkpoint(checkpoint_path)
+    saved_splits = layout.logs / "splits"
+    list_dir = Path(args.list_dir) if args.list_dir else saved_splits
+    output = Path(args.output_dir) if args.output_dir else layout.evaluation(args.split)
     roots = [str(Path(args.data_root) / modality / f"{args.split}_h5") for modality in ("bSSFP", "LGE", "T2w")]
 
     for split_name, expected in checkpoint["split_hashes"].items():
-        manifest = run_dir / "splits" / f"{split_name}.txt"
+        manifest = saved_splits / f"{split_name}.txt"
         if hashlib.sha256(manifest.read_bytes()).hexdigest() != expected:
             raise ValueError(f"Saved {split_name} manifest was modified after training.")
 
-    training_ids = {patient_id(name) for name in read_split_names(run_dir / "splits", "train")}
-    validation_ids = {patient_id(name) for name in read_split_names(run_dir / "splits", "val")}
+    training_ids = {patient_id(name) for name in read_split_names(saved_splits, "train")}
+    validation_ids = {patient_id(name) for name in read_split_names(saved_splits, "val")}
     evaluation_ids = {patient_id(name) for name in read_split_names(list_dir, args.split)}
     forbidden_ids = training_ids | validation_ids if args.split == "test_vol" else training_ids
     overlap = forbidden_ids & evaluation_ids
@@ -96,10 +96,10 @@ def main(argv=None):
             f"Evaluation split overlaps patients used for training/model selection: {sorted(overlap)[:10]}"
         )
 
-    saved_ids = set(read_split_names(run_dir / "splits", args.split))
+    saved_ids = set(read_split_names(saved_splits, args.split))
     if set(read_split_names(list_dir, args.split)) != saved_ids:
         raise ValueError("Evaluation patients must exactly match the saved split; subsets are not a locked benchmark")
-    data_lock = lock_benchmark_data(args.data_root, run_dir / "splits", label_order)
+    data_lock = lock_benchmark_data(args.data_root, saved_splits, label_order)
     if data_lock != checkpoint["benchmark_data"]:
         raise ValueError("Cache bytes or label convention changed since training")
     if output.exists() and any(output.iterdir()):
@@ -112,79 +112,84 @@ def main(argv=None):
         label_order=label_order,
     )
     output.mkdir(parents=True, exist_ok=True)
-    rows, total_seconds, total_slices = [], 0.0, 0
-    for sample in dataset:
-        case = sample["case_name"]
-        images = [sample[k] for k in ("image", "image1", "image2")]
-        if device.type == "cuda":
-            torch.cuda.synchronize(device)
-        started = time.perf_counter()
-        prediction = predict_volume(
-            model,
-            images,
-            checkpoint["args"]["img_size"],
-            args.batch_size,
-            device,
-            amp_dtype,
-        )
-        if device.type == "cuda":
-            torch.cuda.synchronize(device)
-        elapsed = time.perf_counter() - started
-        total_seconds += elapsed
-        total_slices += prediction.shape[2]
-        target = np.asarray(sample["label"])
-        case_rows = benchmark_rows(prediction, target, case)
-        for row in case_rows:
-            row["inference_seconds"] = elapsed
-        rows.extend(case_rows)
-        if args.save_predictions:
-            np.savez_compressed(
-                output / f"{case}_pred.npz",
-                prediction=prediction,
-                class_names=np.asarray(CLASS_NAMES),
-                spacing=np.asarray(sample["spacing"]),
-                affine=np.asarray(sample["affine"]),
-                spacing_unit=sample["spacing_unit"],
-                metric_distance_unit="voxel",
+    with evaluation_logger(output / "test.log") as logger:
+        logger.info("Checkpoint %s | split %s | device %s | AMP %s | output %s",
+                    checkpoint_path, args.split, device, amp_dtype, output)
+        rows, total_seconds, total_slices = [], 0.0, 0
+        for sample in dataset:
+            case = sample["case_name"]
+            images = [sample[k] for k in ("image", "image1", "image2")]
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            started = time.perf_counter()
+            prediction = predict_volume(
+                model,
+                images,
+                checkpoint["args"]["img_size"],
+                args.batch_size,
+                device,
+                amp_dtype,
             )
-            if sample.get("has_affine", False):
-                import nibabel as nib
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            elapsed = time.perf_counter() - started
+            total_seconds += elapsed
+            total_slices += prediction.shape[2]
+            target = np.asarray(sample["label"])
+            case_rows = benchmark_rows(prediction, target, case)
+            for row in case_rows:
+                row["inference_seconds"] = elapsed
+            rows.extend(case_rows)
+            if args.save_predictions:
+                np.savez_compressed(
+                    output / f"{case}_pred.npz",
+                    prediction=prediction,
+                    class_names=np.asarray(CLASS_NAMES),
+                    spacing=np.asarray(sample["spacing"]),
+                    affine=np.asarray(sample["affine"]),
+                    spacing_unit=sample["spacing_unit"],
+                    metric_distance_unit="voxel",
+                )
+                if sample.get("has_affine", False):
+                    import nibabel as nib
 
-                nifti = nib.Nifti1Image(prediction, np.asarray(sample["affine"]))
-                if sample.get("spacing_unit") == "mm":
-                    nifti.header.set_xyzt_units("mm")
-                nib.save(nifti, output / f"{case}_pred.nii.gz")
-        print(
-            f"{case}: {prediction.shape[2]} slices, {elapsed:.3f}s, HD95 unit=voxel",
-            flush=True,
+                    nifti = nib.Nifti1Image(prediction, np.asarray(sample["affine"]))
+                    if sample.get("spacing_unit") == "mm":
+                        nifti.header.set_xyzt_units("mm")
+                    nib.save(nifti, output / f"{case}_pred.nii.gz")
+            logger.info("%s: %d slices, %.3fs, HD95 unit=voxel",
+                        case, prediction.shape[2], elapsed)
+            for row in case_rows:
+                logger.info("%s | %s | Dice=%s IoU=%s Precision=%s Recall=%s HD95=%s ASD=%s",
+                            case, row["region"], row["dice"], row["iou"], row["precision"],
+                            row["recall"], row["hd95_voxel"], row["asd_voxel"])
+        if not rows:
+            raise ValueError("No evaluation cases.")
+        with (output / "per_case.csv").open("w", newline="", encoding="utf-8") as stream:
+            writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
+            writer.writeheader()
+            writer.writerows(rows)
+        summary = summarize_rows(rows)
+        summary.update(
+            checkpoint=str(checkpoint_path),
+            checkpoint_epoch=checkpoint["epoch"] + 1,
+            ablation=config.ablation,
+            architecture=config.get("architecture", "cmspa_net"),
+            split=args.split,
+            case_count=len(dataset),
+            inference_seconds=total_seconds,
+            inference_slices_per_second=total_slices / total_seconds,
+            timing_note="Includes transfer and resizing, excludes disk I/O/metrics; first case includes warmup.",
+            benchmark_protocol=BENCHMARK_PROTOCOL,
+            benchmark_data=data_lock,
+            split_hashes=checkpoint["split_hashes"],
+            hd95_note="All distances are voxel distances (unit grid), never mm. Primary means exclude undefined surfaces; inspect counts. Official reproduction is separately named and retains the upstream empty-mask behavior.",
+            device=str(device),
+            amp_dtype=str(amp_dtype),
         )
-    if not rows:
-        raise ValueError("No evaluation cases.")
-    with (output / "per_case.csv").open("w", newline="", encoding="utf-8") as stream:
-        writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
-        writer.writeheader()
-        writer.writerows(rows)
-    summary = summarize_rows(rows)
-    summary.update(
-        checkpoint=str(checkpoint_path),
-        checkpoint_epoch=checkpoint["epoch"] + 1,
-        ablation=config.ablation,
-        architecture=config.get("architecture", "cmspa_net"),
-        split=args.split,
-        case_count=len(dataset),
-        inference_seconds=total_seconds,
-        inference_slices_per_second=total_slices / total_seconds,
-        timing_note="Includes transfer and resizing, excludes disk I/O/metrics; first case includes warmup.",
-        benchmark_protocol=BENCHMARK_PROTOCOL,
-        benchmark_data=data_lock,
-        split_hashes=checkpoint["split_hashes"],
-        hd95_note="All distances are voxel distances (unit grid), never mm. Primary means exclude undefined surfaces; inspect counts. Official reproduction is separately named and retains the upstream empty-mask behavior.",
-        device=str(device),
-        amp_dtype=str(amp_dtype),
-    )
-    write_json(output / "metrics.json", summary)
-    print(json.dumps(json_safe(summary), indent=2))
-    return summary
+        write_json(output / "metrics.json", summary)
+        logger.info("Summary:\n%s", json.dumps(json_safe(summary), indent=2))
+        return summary
 
 
 if __name__ == "__main__":

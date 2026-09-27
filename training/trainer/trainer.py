@@ -26,10 +26,10 @@ from training.dataset.myops_dataset import (
     ResizeGenerator,
 )
 from training.loss.losses import SegmentationLoss
-from training.loss.dpf_loss import DPFLoss
 from training.metrics.confusion_meter import ConfusionMeter
 from training.dataset.sampler import build_rare_class_sampler
 from training.predict import predict_volume
+from training.run_layout import RunLayout
 from training.metrics.surface_distance import BENCHMARK_PROTOCOL, benchmark_rows, summarize_rows
 
 
@@ -238,7 +238,7 @@ def run_epoch(
             target = batch["label"].to(device, non_blocking=loader.pin_memory)
             batch_count = target.shape[0]
             with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=amp_dtype is not None):
-                output = model(*images, return_aux=True) if getattr(criterion, "requires_aux", False) else model(*images)
+                output = model(*images)
                 losses = criterion(output, target)
                 logits = output["logits"] if isinstance(output, dict) else output
             if not torch.stack([torch.isfinite(v) for v in losses.values()]).all():
@@ -382,14 +382,16 @@ def trainer_Myops(args, model, snapshot_path):
         raise ValueError("Cannot resume a checkpoint selected under an older metric protocol; start a new Phase 1 run.")
     directory = Path(snapshot_path)
     directory.mkdir(parents=True, exist_ok=True)
-    logger = make_logger(directory)
+    layout = (RunLayout.from_checkpoint(args.resume) if args.resume else
+              RunLayout.create(directory, args.model_name, args.seed))
+    logger = make_logger(layout.logs)
     device = resolve_device(args.device)
     amp_dtype = resolve_amp(args.amp, device)
     split_dir = ensure_patient_splits(
         args.list_dir,
         val_fraction=args.val_fraction,
         seed=args.seed,
-        output_dir=directory / "splits",
+        output_dir=layout.logs / "splits",
     )
     split_hashes = {
         name: hashlib.sha256((split_dir / f"{name}.txt").read_bytes()).hexdigest()
@@ -430,8 +432,7 @@ def trainer_Myops(args, model, snapshot_path):
         split_dir, "val_vol", label_order=args.label_order,
     )
     model.to(device)
-    loss_class = DPFLoss if model.config.get("architecture") == "m3_dpf" else SegmentationLoss
-    criterion = loss_class(ce_weight=args.ce_weight, dice_weight=args.dice_weight)
+    criterion = SegmentationLoss(ce_weight=args.ce_weight, dice_weight=args.dice_weight)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.base_lr, weight_decay=args.weight_decay, foreach=False)
     total_updates = args.max_epochs * math.ceil(len(trainloader) / args.accum_steps)
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda step: max(0.0, 1.0 - step / total_updates) ** 0.9)
@@ -520,7 +521,7 @@ def trainer_Myops(args, model, snapshot_path):
         amp_dtype=str(amp_dtype),
         total_optimizer_updates=total_updates,
     )
-    write_json(directory / "config.json", config_record)
+    write_json(layout.logs / "config.json", config_record)
     logger.info(
         "Device %s | AMP %s | parameters %s | train/val slices %d/%d | effective batch <= %d",
         device,
@@ -540,11 +541,11 @@ def trainer_Myops(args, model, snapshot_path):
             from torch.utils.tensorboard import SummaryWriter
 
             writer = SummaryWriter(
-                str(directory / "tensorboard" / "epochs"),
+                str(layout.tensorboard / "epochs"),
                 purge_step=start_epoch + 1 if args.resume else None,
             )
             step_writer = SummaryWriter(
-                str(directory / "tensorboard" / "updates"),
+                str(layout.tensorboard / "updates"),
                 purge_step=global_step + 1 if args.resume else None,
             )
         except ImportError:
@@ -616,10 +617,6 @@ def trainer_Myops(args, model, snapshot_path):
             }
             record.update({f"train/{key}": value for key, value in train_metrics.items()})
             record.update({f"val/{key}": value for key, value in val_metrics.items()})
-            if isinstance(criterion, DPFLoss):
-                record["loss/auxiliary_ramp"] = criterion.ramp
-                record["model/eta_bottleneck"] = float(model.cross_fusion.eta_logit.detach().sigmoid())
-                record["model/eta_skip"] = float(model.feature_fusion[1].eta_logit.detach().sigmoid())
             record["val/avg_pathology_dice"] = score
             for region in ("scar", "edema"):
                 for metric in ("precision", "recall"):
@@ -655,23 +652,23 @@ def trainer_Myops(args, model, snapshot_path):
             )
             checkpoint_started = time.perf_counter()
             if improved:
-                atomic_checkpoint(directory / "best.pth", payload)
+                atomic_checkpoint(layout.checkpoints / "best.pth", payload)
                 logger.info(
                     "New best checkpoint: epoch %d, validation Dice %.5f -> %s",
                     epoch + 1,
                     score,
-                    directory / "best.pth",
+                    layout.checkpoints / "best.pth",
                 )
             # Publish the recovery point after best, so a crash cannot advance
             # the saved best_score while leaving best.pth missing or stale.
-            atomic_checkpoint(directory / "last.pth", payload)
+            atomic_checkpoint(layout.checkpoints / "last.pth", payload)
             if args.save_every and (epoch + 1) % args.save_every == 0:
-                atomic_checkpoint(directory / f"epoch_{epoch + 1:04d}.pth", payload)
+                atomic_checkpoint(layout.checkpoints / f"epoch_{epoch + 1:04d}.pth", payload)
             record["checkpoint_seconds"] = time.perf_counter() - checkpoint_started
             record["epoch_seconds"] = time.perf_counter() - epoch_started
-            with (directory / "metrics.jsonl").open("a", encoding="utf-8") as stream:
+            with (layout.logs / "metrics.jsonl").open("a", encoding="utf-8") as stream:
                 stream.write(json.dumps(json_safe(record), allow_nan=False) + "\n")
-            csv_path = directory / "metrics.csv"
+            csv_path = layout.logs / "metrics.csv"
             append_metrics_csv(csv_path, json_safe(record))
             if writer:
                 for key, value in record.items():
@@ -690,7 +687,7 @@ def trainer_Myops(args, model, snapshot_path):
                 record["epoch_seconds"],
                 train_metrics["gpu_peak_allocated_mb"],
             )
-            write_json(directory / "summary.json", record)
+            write_json(layout.logs / "summary.json", record)
             logger.info("Validation scar P/R %.4f/%.4f | edema P/R %.4f/%.4f (pixel-pooled)",
                         val_metrics["precision/scar"], val_metrics["recall/scar"],
                         val_metrics["precision/edema"], val_metrics["recall/edema"])

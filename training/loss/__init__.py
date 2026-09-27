@@ -3,7 +3,7 @@ from training.loss.losses import DiceLoss, SegmentationLoss
 
 
 def build_loss(loss_name="ce_dice", **kwargs):
-    """Build the M0-M3 compound loss, returning loss and logging components."""
+    """Build the compound loss (M2/M3), returning loss and logging components."""
     if loss_name.lower().replace("-", "_") not in {"ce_dice", "segmentation", "segmentation_loss"}:
         raise ValueError(f"Unknown loss {loss_name!r}; expected 'ce_dice'.")
     if "num_classes" in kwargs:

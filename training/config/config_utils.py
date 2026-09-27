@@ -75,7 +75,6 @@ def flatten_config(config: dict[str, Any], parent_key: str = "", sep: str = ".")
 
 
 MODEL_KEYS = {
-    "model.dpf_bottleneck_width", "model.dpf_skip_width", "model.dpf_loss_version",
     "model.architecture",
     "model.model_name", "model.num_classes", "model.fused_channels",
     "model.cross_attention_heads", "model.resnet.num_layers", "model.resnet.width_factor",
@@ -127,12 +126,12 @@ def generate_run_dir(
     seed: int | str | None = None,
     timestamp: str | None = None,
 ) -> Path:
-    """Generate collision-defended timestamped run directory in <model>_seed<seed>_<HHhMM> format."""
+    """Generate collision-defended timestamped run directory in <model>_seed<seed>_<YYYY-MM-DD_HHhMM> format."""
     run_root = Path(run_root)
     run_root.mkdir(parents=True, exist_ok=True)
     clean_model_name = str(model_name).replace(" ", "-").replace("/", "-")
     if timestamp is None:
-        timestamp = datetime.now().strftime("%Hh%M")
+        timestamp = datetime.now().strftime("%Y-%m-%d_%Hh%M")
 
     if seed is not None:
         seed_str = str(seed).strip()

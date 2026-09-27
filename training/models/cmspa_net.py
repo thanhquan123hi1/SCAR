@@ -1,8 +1,8 @@
 """Prompt-free multi-modal CMR segmentation network (CMSPA-Net).
 
-Supports M0, M1, M2, and M3 ablations.
+Supports M2 and M3 ablations.
 CMSPA-Net uses three independent ResNetV2 encoders (CINE, PSIR/LGE, T2W),
-SSPANet spatial and channel attention, cross-modal strip pathology attention (CMSPA),
+SSPANet spatial and channel attention, cross-modal strip pathology attention (CMSPA) or cross-attention,
 and a single decoder cascade with skip fusion.
 """
 from __future__ import annotations
@@ -19,7 +19,7 @@ from torch import nn
 from training.models.backbones.resnet_v2 import ResNetV2
 from training.models.modules.cmspa import CMSPA_Fusion
 from training.models.modules.decoder import DecoderCup, SegmentationHead
-from training.models.modules.fusion import ConcatFusion, CrossAttention_Fusion, Fusion_Embed
+from training.models.modules.fusion import CrossAttention_Fusion, Fusion_Embed
 from training.models.modules.sspanet import SSPANet_Block
 
 
@@ -46,8 +46,8 @@ def get_r50_b16_config() -> ConfigDict:
 
 def get_config(ablation: str = "M3") -> ConfigDict:
     """Return a fresh production configuration."""
-    if ablation.upper() not in {"M0", "M1", "M2", "M3"}:
-        raise ValueError(f"Unknown ablation {ablation!r}; expected M0, M1, M2 or M3")
+    if ablation.upper() not in {"M2", "M3"}:
+        raise ValueError(f"Unknown ablation {ablation!r}; expected M2 or M3")
     config = get_r50_b16_config()
     config.ablation = ablation.upper()
     return config
@@ -109,8 +109,6 @@ class CMSPANet(nn.Module):
     """Three independent ResNetV2 encoders and one segmentation decoder.
 
     Ablations:
-      M0: Baseline concat
-      M1: SSPANet + concat
       M2: SSPANet + cross-attention
       M3: SSPANet + CMSPA (proposed)
 
@@ -143,8 +141,8 @@ class CMSPANet(nn.Module):
                 self.config[key] = value
 
         self.ablation = (ablation or self.config.get("ablation", "M3")).upper()
-        if self.ablation not in {"M0", "M1", "M2", "M3"}:
-            raise ValueError(f"Unknown ablation: {self.ablation!r}")
+        if self.ablation not in {"M2", "M3"}:
+            raise ValueError(f"Unknown ablation: {self.ablation!r}; expected M2 or M3")
         self.config.ablation = self.ablation
 
         if num_classes is not None:
@@ -168,10 +166,9 @@ class CMSPANet(nn.Module):
         self.transformer2 = Transformer(self.config)
         self.transformer3 = Transformer(self.config)
 
-        attention = SSPANet_Block if self.ablation != "M0" else lambda _: nn.Identity()
-        self.sspanet_cine = attention(channels)
-        self.sspanet_psir = attention(channels)
-        self.sspanet_t2w = attention(channels)
+        self.sspanet_cine = SSPANet_Block(channels)
+        self.sspanet_psir = SSPANet_Block(channels)
+        self.sspanet_t2w = SSPANet_Block(channels)
 
         if self.ablation == "M3":
             self.cross_fusion = CMSPA_Fusion(channels, self.config.fused_channels)
@@ -180,7 +177,7 @@ class CMSPANet(nn.Module):
                 channels, self.config.fused_channels, self.config.cross_attention_heads
             )
         else:
-            self.cross_fusion = ConcatFusion(channels, self.config.fused_channels)
+            raise ValueError(f"Unsupported ablation: {self.ablation!r}")
 
         self.feature_fusion = nn.ModuleList(
             Fusion_Embed(c) for c in expected_skips[:self.config.n_skip]

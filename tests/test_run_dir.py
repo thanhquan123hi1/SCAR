@@ -25,9 +25,7 @@ class RunDirNamingTests(unittest.TestCase):
                 seed=42,
             )
             self.assertTrue(run_dir.name.startswith("M3-DPF_seed42_"))
-            time_part = run_dir.name.split("_")[-1]
-            self.assertIn("h", time_part)
-            self.assertEqual(len(time_part), 5)
+            self.assertRegex(run_dir.name, r"^M3-DPF_seed42_\d{4}-\d{2}-\d{2}_\d{2}h\d{2}$")
 
     def test_run_dir_format_seed_prefixed(self):
         with tempfile.TemporaryDirectory() as tmp_dir:

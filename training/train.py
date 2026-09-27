@@ -1,4 +1,4 @@
-"""Train the prompt-free M0-M3 ablations (hierarchical YAML configuration & CLI)."""
+"""Train the prompt-free M2/M3 ablations (hierarchical YAML configuration & CLI)."""
 from __future__ import annotations
 
 import argparse
@@ -21,6 +21,7 @@ from training.config.config_utils import (
 )
 from training.models.cmspa_net import CONFIGS, CMSPANet
 from training.models import model_from_config
+from training.run_layout import RunLayout
 from training.trainer.trainer import Trainer, seed_everything
 
 
@@ -52,7 +53,7 @@ def build_parser():
     parser.add_argument(
         "--output-dir",
         default=None,
-        help="Output directory; defaults to outputs/runs/{model_name}_seed{seed}_{HHhMM}",
+        help="Output directory; defaults to outputs/runs/{model_name}_seed{seed}_{YYYY-MM-DD_HHhMM}",
     )
     parser.add_argument(
         "--run-root",
@@ -65,7 +66,7 @@ def build_parser():
     parser.add_argument("--sampler", choices=("none", "rare"), default="none")
     parser.add_argument("--rare-boost", type=float, default=2.0)
     parser.add_argument("--foreground-boost", type=float, default=1.3)
-    parser.add_argument("--ablation", choices=["M0", "M1", "M2", "M3"], default="M3")
+    parser.add_argument("--ablation", choices=["M2", "M3"], default="M3")
     parser.add_argument("--epochs", "--max_epochs", dest="max_epochs", type=int, default=300)
     parser.add_argument(
         "--batch-size",
@@ -185,7 +186,7 @@ def main(argv=None):
         if args.run_id:
             output = Path(args.run_root) / args.run_id
         elif args.resume:
-            output = Path(args.resume).resolve().parent
+            output = RunLayout.from_checkpoint(args.resume).root
         else:
             output = generate_run_dir(
                 args.run_root,
@@ -198,16 +199,16 @@ def main(argv=None):
     if not args.resume and output.exists() and any(output.iterdir()):
         raise FileExistsError("Run directory is not empty; choose a new run-id or use --resume")
     if args.resume:
-        if Path(args.resume).resolve().parent != output or Path(args.resume).name != "last.pth":
+        if RunLayout.from_checkpoint(args.resume).root != output or Path(args.resume).name != "last.pth":
             raise ValueError("Resume from last.pth into its original run directory")
     args.output_dir = str(output)
+    args.model_name = merged["model"].get("model_name", "CMSPA-Net")
     section = merged["model"]
     config = copy.deepcopy(CONFIGS["R50-ViT-B_16"])
     config.resnet.num_layers = tuple(section["resnet"]["num_layers"])
     config.resnet.width_factor = float(section["resnet"]["width_factor"])
     config.transformer.dropout_rate = float(section.get("transformer", {}).get("dropout_rate", 0.1))
-    for key in ("decoder_channels", "skip_channels", "fused_channels", "n_skip", "cross_attention_heads", "classifier", "activation",
-                "dpf_bottleneck_width", "dpf_skip_width", "dpf_loss_version"):
+    for key in ("decoder_channels", "skip_channels", "fused_channels", "n_skip", "cross_attention_heads", "classifier", "activation"):
         if key in section:
             config[key] = tuple(section[key]) if key == "decoder_channels" else section[key]
     config.ablation = args.ablation
