@@ -21,6 +21,7 @@ from training.models.cmspa_net import (
 from training.models.modules.cmspa import CMSPA_Fusion
 from training.models.modules.decoder import DecoderCup, SegmentationHead
 from training.models.modules.fusion import ConcatFusion, CrossAttention_Fusion, Fusion_Embed
+from training.models.modules.m2_plus import M2Plus_Fusion
 from training.models.modules.sspanet import SSPANet_Block
 
 MODEL_REGISTRY: dict[str, Callable[..., nn.Module]] = {
@@ -28,6 +29,8 @@ MODEL_REGISTRY: dict[str, Callable[..., nn.Module]] = {
     "cmspa": CMSPANet,
     "vision_transformer": CMSPANet,
     "cross_attn_baseline": partial(CMSPANet, ablation="M2"),
+    "m2_plus": partial(CMSPANet, ablation="M2-PLUS"),
+    "m2plus": partial(CMSPANet, ablation="M2-PLUS"),
 }
 
 
@@ -44,7 +47,7 @@ def build_model(model_name: str, **kwargs) -> nn.Module:
         raise ValueError(
             f"Unknown model '{model_name}'. Available models: {list(MODEL_REGISTRY.keys())}"
         )
-    expected = {"cross_attn_baseline": "M2"}.get(name)
+    expected = {"cross_attn_baseline": "M2", "m2_plus": "M2-PLUS", "m2plus": "M2-PLUS"}.get(name)
     if expected is not None and kwargs.get("ablation", expected).upper() != expected:
         raise ValueError(f"Model {model_name!r} requires ablation {expected}")
     return MODEL_REGISTRY[name](**kwargs)
@@ -68,6 +71,7 @@ __all__ = [
     "CMSPA_Fusion",
     "ConcatFusion",
     "CrossAttention_Fusion",
+    "M2Plus_Fusion",
     "Fusion_Embed",
     "DecoderCup",
     "SegmentationHead",

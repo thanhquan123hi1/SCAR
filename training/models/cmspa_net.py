@@ -1,6 +1,6 @@
 """Prompt-free multi-modal CMR segmentation network (CMSPA-Net).
 
-Supports M2 and M3 ablations.
+Supports M2, M2-Plus, and M3 ablations.
 CMSPA-Net uses three independent ResNetV2 encoders (CINE, PSIR/LGE, T2W),
 SSPANet spatial and channel attention, cross-modal strip pathology attention (CMSPA) or cross-attention,
 and a single decoder cascade with skip fusion.
@@ -20,6 +20,7 @@ from training.models.backbones.resnet_v2 import ResNetV2
 from training.models.modules.cmspa import CMSPA_Fusion
 from training.models.modules.decoder import DecoderCup, SegmentationHead
 from training.models.modules.fusion import CrossAttention_Fusion, Fusion_Embed
+from training.models.modules.m2_plus import M2Plus_Fusion
 from training.models.modules.sspanet import SSPANet_Block
 
 
@@ -46,8 +47,8 @@ def get_r50_b16_config() -> ConfigDict:
 
 def get_config(ablation: str = "M3") -> ConfigDict:
     """Return a fresh production configuration."""
-    if ablation.upper() not in {"M2", "M3"}:
-        raise ValueError(f"Unknown ablation {ablation!r}; expected M2 or M3")
+    if ablation.upper() not in {"M2", "M2-PLUS", "M3"}:
+        raise ValueError(f"Unknown ablation {ablation!r}; expected M2, M2-Plus or M3")
     config = get_r50_b16_config()
     config.ablation = ablation.upper()
     return config
@@ -110,6 +111,7 @@ class CMSPANet(nn.Module):
 
     Ablations:
       M2: SSPANet + cross-attention
+      M2-Plus: SSPANet + separate scar and edema cross-attention
       M3: SSPANet + CMSPA (proposed)
 
     Inputs: aligned floating (B,1,H,W) or (B,3,H,W) tensors in order CINE, PSIR/LGE, T2W.
@@ -141,8 +143,8 @@ class CMSPANet(nn.Module):
                 self.config[key] = value
 
         self.ablation = (ablation or self.config.get("ablation", "M3")).upper()
-        if self.ablation not in {"M2", "M3"}:
-            raise ValueError(f"Unknown ablation: {self.ablation!r}; expected M2 or M3")
+        if self.ablation not in {"M2", "M2-PLUS", "M3"}:
+            raise ValueError(f"Unknown ablation: {self.ablation!r}; expected M2, M2-Plus or M3")
         self.config.ablation = self.ablation
 
         if num_classes is not None:
@@ -172,6 +174,10 @@ class CMSPANet(nn.Module):
 
         if self.ablation == "M3":
             self.cross_fusion = CMSPA_Fusion(channels, self.config.fused_channels)
+        elif self.ablation == "M2-PLUS":
+            self.cross_fusion = M2Plus_Fusion(
+                channels, self.config.fused_channels, self.config.cross_attention_heads
+            )
         elif self.ablation == "M2":
             self.cross_fusion = CrossAttention_Fusion(
                 channels, self.config.fused_channels, self.config.cross_attention_heads

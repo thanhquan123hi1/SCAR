@@ -30,7 +30,7 @@ Mô hình chủ lực **CMSPA-Net (M3)** kết hợp **3 encoder ResNetV2 độc
 ## Mục lục
 - [Chạy nhanh trên Google Colab](#chạy-nhanh-trên-google-colab)
 - [Kiến trúc Mô hình CMSPA-Net (M3)](#kiến-trúc-mô-hình-cmspa-net-m3)
-- [Các cấu hình nghiên cứu (Ablation Studies M2, M3)](#các-cấu-hình-nghiên-cứu-ablation-studies-m2-m3)
+- [Các cấu hình nghiên cứu (Ablation Studies M2, M2-Plus, M3)](#các-cấu-hình-nghiên-cứu-ablation-studies-m2-m2-plus-m3)
 - [Hợp đồng Dữ liệu và Quy ước Nhãn Canonical](#hợp-đồng-dữ-liệu-và-quy-ước-nhãn-canonical)
 - [Cài đặt Môi trường](#cài-đặt-môi-trường)
 - [Huấn luyện Mô hình](#huấn-luyện-mô-hình)
@@ -127,11 +127,12 @@ $g_F$ là Conv 1×1 → BN → ReLU, đầu ra 512 kênh ở cấu hình mặc �
 
 ---
 
-## Các cấu hình nghiên cứu (Ablation Studies M2, M3)
+## Các cấu hình nghiên cứu (Ablation Studies M2, M2-Plus, M3)
 
 | Mã Ablation | Attention từng nhánh | Fusion Bottleneck | File cấu hình YAML |
 |:---:|:---:|:---:|:---:|
 | **M2** | SSPANet | Cross-Attention | [`training/config/models/cross_attn_baseline.yaml`](training/config/models/cross_attn_baseline.yaml) |
+| **M2-Plus** | SSPANet | Hai nhánh Cross-Attention riêng cho sẹo (PSIR/LGE) và phù nề (T2w) | [`training/config/models/m2_plus.yaml`](training/config/models/m2_plus.yaml) |
 | **M3 (Đề xuất)** | **SSPANet** | **CMSPA** | [`training/config/models/cmspa_net.yaml`](training/config/models/cmspa_net.yaml) |
 
 ---
@@ -185,6 +186,12 @@ python run_all.py --run-id m3_run01 --skip-cache --label-order legacy
 ```
 
 ### Cách 2: Huấn luyện chi tiết qua CLI
+Để huấn luyện M2-Plus, chọn cấu hình của nó; file này tự đặt `--ablation M2-Plus`:
+
+```powershell
+python train.py --config training/config/models/m2_plus.yaml --data-root /path/to/Processed_data --list-dir data/processed/splits --run-id m2_plus_run01
+```
+
 ```bash
 python train.py \
     --config training/config/models/cmspa_net.yaml \
@@ -285,7 +292,7 @@ SCAR/
 │   ├── verify.py
 │   └── splits/test_vol.txt      # 76 ca test cố định
 ├── training/                    # Toàn bộ mã nguồn mô hình & huấn luyện cốt lõi
-│   ├── config/                  # base.yaml và cấu hình models/ (M2, M3)
+│   ├── config/                  # base.yaml và cấu hình models/ (M2, M2-Plus, M3)
 │   ├── dataset/                 # Dataset loader, Data Contract, Sampler
 │   ├── loss/                    # DiceLoss, SegmentationLoss (AMP-safe)
 │   ├── metrics/                 # ConfusionMeter, SurfaceDistance (HD95, ASD)

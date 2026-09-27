@@ -11,6 +11,7 @@ from training.models.modules.fusion import (
     CrossAttention_Fusion,
     Fusion_Embed,
 )
+from training.models.modules.m2_plus import M2Plus_Fusion
 from training.models.modules.sspanet import (
     SSPA_BasicConv,
     SSPA_ChannelAttention,
@@ -30,6 +31,7 @@ __all__ = [
     "SegmentationHead",
     "ConcatFusion",
     "CrossAttention_Fusion",
+    "M2Plus_Fusion",
     "Fusion_Embed",
     "SSPA_BasicConv",
     "SSPA_ChannelAttention",
