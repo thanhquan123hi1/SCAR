@@ -5,7 +5,7 @@ import torch
 from torch.utils.data import WeightedRandomSampler
 
 
-def build_rare_class_sampler(dataset, rare_classes=(3,), rare_boost=2.0,
+def build_rare_class_sampler(dataset, rare_classes=(2, 3), rare_boost=2.0,
                              foreground_boost=1.3, generator=None):
     """Inspect unaugmented canonical labels; do not consume augmentation RNG.
 

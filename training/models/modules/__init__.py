@@ -11,7 +11,10 @@ from training.models.modules.fusion import (
     CrossAttention_Fusion,
     Fusion_Embed,
 )
+from training.models.modules.h_cmspa import H_CMSPA_Fusion
 from training.models.modules.m2_plus import M2Plus_Fusion
+from training.models.modules.m2_max import M2Max_Fusion, SkipGateFusion
+from training.models.modules.m2_pro import M2Pro_Fusion
 from training.models.modules.sspanet import (
     SSPA_BasicConv,
     SSPA_ChannelAttention,
@@ -23,6 +26,10 @@ from training.models.modules.sspanet import (
 )
 
 __all__ = [
+    "M2Max_Fusion",
+    "SkipGateFusion",
+    "M2Pro_Fusion",
+    "H_CMSPA_Fusion",
     "CMSPA_Fusion",
     "channel_std",
     "Conv2dReLU",

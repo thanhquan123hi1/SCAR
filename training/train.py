@@ -66,7 +66,7 @@ def build_parser():
     parser.add_argument("--sampler", choices=("none", "rare"), default="none")
     parser.add_argument("--rare-boost", type=float, default=2.0)
     parser.add_argument("--foreground-boost", type=float, default=1.3)
-    parser.add_argument("--ablation", choices=["M2", "M2-Plus", "M2-PLUS", "M3"], default="M3")
+    parser.add_argument("--ablation", choices=["M2", "M2-Plus", "M2-PLUS", "M2-PRO", "M2PRO", "M2-MAX", "M2MAX", "M3", "H-CMSPA", "HCMSPA"], default="M3")
     parser.add_argument("--epochs", "--max_epochs", dest="max_epochs", type=int, default=300)
     parser.add_argument(
         "--batch-size",

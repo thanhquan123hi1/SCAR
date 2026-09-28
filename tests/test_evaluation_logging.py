@@ -23,7 +23,7 @@ class EvaluationLoggingTests(unittest.TestCase):
                           benchmark_data={'source_label_order': resolve_label_order('canonical')},
                           args={'label_order': 'canonical', 'img_size': 32},
                           model_config={'ablation': 'M3'}, model={}, split_hashes={}, epoch=0)
-        def predict(*args):
+        def predict(*args, **kwargs):
             events.append('predict')
             return mask.copy()
         def split_names(directory, split):

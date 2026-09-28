@@ -44,22 +44,45 @@ class DiceLoss(nn.Module):
 
 
 class SegmentationLoss(nn.Module):
-    """Combined Cross-Entropy and Soft Dice loss."""
+    """Combined Cross-Entropy, Soft Dice, and Pathology-Conditional AAR (Edema-Inclusive) Loss."""
 
-    def __init__(self, n_classes=4, ce_weight=0.5, dice_weight=0.5):
+    def __init__(self, n_classes=4, ce_weight=0.5, dice_weight=0.5, aar_weight=0.25):
         super().__init__()
-        if (not all(math.isfinite(w) and w >= 0 for w in (ce_weight, dice_weight))
-                or ce_weight + dice_weight <= 0):
-            raise ValueError("Loss weights must be finite, nonnegative, with positive sum")
         self.ce_weight = ce_weight
         self.dice_weight = dice_weight
+        self.aar_weight = aar_weight
         self.dice = DiceLoss(n_classes)
 
     def forward(self, logits, target):
+        # 1. Standard Unbiased Cross-Entropy
         ce = F.cross_entropy(logits.float(), target.long())
+
+        # 2. Standard Unbiased Multi-Class Soft Dice
         dice = self.dice(logits, target, softmax=True)
+
+        # 3. Conditional Area-at-Risk (AAR / Edema-Inclusive) Auxiliary Dice Loss
+        # Active only on slices containing actual pathology (Scar or Edema)
+        # Uses symmetric linear denominator to balance precision and recall on the edema margin
+        has_patho = ((target == 2) | (target == 3)).flatten(1).any(dim=1)
+        if has_patho.any():
+            probs = logits.float().softmax(1)
+            p_aar = probs[has_patho, 2] + probs[has_patho, 3]
+            y_aar = ((target[has_patho] == 2) | (target[has_patho] == 3)).float()
+            dims = tuple(range(1, p_aar.ndim))
+            inter = 2.0 * (p_aar * y_aar).sum(dims) + 1e-5
+            denom = p_aar.sum(dims) + y_aar.sum(dims) + 1e-5
+            aar_loss = (1.0 - inter / denom).mean()
+        else:
+            aar_loss = torch.tensor(0.0, device=logits.device, dtype=torch.float32)
+
+        total_loss = (
+            self.ce_weight * ce
+            + self.dice_weight * dice
+            + self.aar_weight * aar_loss
+        )
         return {
-            "loss": self.ce_weight * ce + self.dice_weight * dice,
+            "loss": total_loss,
             "ce": ce,
             "dice_loss": dice,
+            "aar_loss": aar_loss,
         }

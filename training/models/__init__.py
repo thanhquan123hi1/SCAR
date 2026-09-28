@@ -31,6 +31,12 @@ MODEL_REGISTRY: dict[str, Callable[..., nn.Module]] = {
     "cross_attn_baseline": partial(CMSPANet, ablation="M2"),
     "m2_plus": partial(CMSPANet, ablation="M2-PLUS"),
     "m2plus": partial(CMSPANet, ablation="M2-PLUS"),
+    "m2_pro": partial(CMSPANet, ablation="M2-PRO"),
+    "m2pro": partial(CMSPANet, ablation="M2-PRO"),
+    "m2_max": partial(CMSPANet, ablation="M2-MAX"),
+    "m2max": partial(CMSPANet, ablation="M2-MAX"),
+    "h_cmspa": partial(CMSPANet, ablation="H-CMSPA"),
+    "hcmspa": partial(CMSPANet, ablation="H-CMSPA"),
 }
 
 

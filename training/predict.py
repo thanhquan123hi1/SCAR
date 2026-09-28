@@ -15,10 +15,11 @@ from torch.nn import functional as F
 
 
 @torch.inference_mode()
-def predict_volume(model, images, img_size=128, batch_size=8, device=None, amp_dtype=None):
+def predict_volume(model, images, img_size=128, batch_size=8, device=None, amp_dtype=None, tta=False):
     """Aligned H,W,D volumes -> H,W,D labels, batching adjacent slices.
 
     Resize images bilinearly to model grid; resize logits back before argmax.
+    When tta=True, averages predictions over spatial flips.
     """
     arrays = [np.asarray(value, dtype=np.float32) for value in images]
     if len(arrays) != 3 or any(a.ndim != 3 for a in arrays) or any(a.shape != arrays[0].shape for a in arrays):
@@ -51,7 +52,18 @@ def predict_volume(model, images, img_size=128, batch_size=8, device=None, amp_d
                 raise FloatingPointError("Non-finite inference logits.")
             if logits.shape[-2:] != (height, width):
                 logits = F.interpolate(logits.float(), (height, width), mode="bilinear", align_corners=False)
-            prediction[:, :, start:stop] = logits.argmax(1).cpu().numpy().transpose(1, 2, 0)
+            probs = logits.softmax(1)
+
+            if tta:
+                for dims in ([-2], [-1], [-2, -1]):
+                    flipped_inputs = [torch.flip(x, dims=dims) for x in inputs]
+                    with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=amp_dtype is not None):
+                        fl_logits = model(*flipped_inputs)
+                    if fl_logits.shape[-2:] != (height, width):
+                        fl_logits = F.interpolate(fl_logits.float(), (height, width), mode="bilinear", align_corners=False)
+                    probs += torch.flip(fl_logits.softmax(1), dims=dims)
+
+            prediction[:, :, start:stop] = probs.argmax(1).cpu().numpy().transpose(1, 2, 0)
     finally:
         model.train(was_training)
     return prediction

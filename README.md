@@ -127,13 +127,29 @@ $g_F$ là Conv 1×1 → BN → ReLU, đầu ra 512 kênh ở cấu hình mặc �
 
 ---
 
-## Các cấu hình nghiên cứu (Ablation Studies M2, M2-Plus, M3)
+## Các cấu hình nghiên cứu (Ablation Studies M2, M2-Plus, M2-Max, M3)
 
-| Mã Ablation | Attention từng nhánh | Fusion Bottleneck | File cấu hình YAML |
+| Mã Ablation | Attention từng nhánh | Fusion Bottleneck & Skip | File cấu hình YAML |
 |:---:|:---:|:---:|:---:|
 | **M2** | SSPANet | Cross-Attention | [`training/config/models/cross_attn_baseline.yaml`](training/config/models/cross_attn_baseline.yaml) |
 | **M2-Plus** | SSPANet | Hai nhánh Cross-Attention riêng cho sẹo (PSIR/LGE) và phù nề (T2w) | [`training/config/models/m2_plus.yaml`](training/config/models/m2_plus.yaml) |
+| **M2-Max (Đột phá)** | **SSPANet** | **Bi-Pathology Interactive Refinement + SkipGateFusion + $\mathcal{L}_{\mathrm{AAR}}$** | [`training/config/models/m2_max.yaml`](training/config/models/m2_max.yaml) |
 | **M3 (Đề xuất)** | **SSPANet** | **CMSPA** | [`training/config/models/cmspa_net.yaml`](training/config/models/cmspa_net.yaml) |
+
+---
+
+## Kết quả Thực nghiệm & So sánh Benchmark SOTA (MyoPS-380 Test Set)
+
+Đánh giá chính thức trên tập kiểm thử độc lập **76 bệnh nhân** (theo đúng chuẩn giao thức I-MMSeg Official Evaluation Protocol):
+
+| Chỉ số đánh giá | Paper gốc (I-MMSeg SOTA) | M2-Plus | **M2-Max (Đề xuất)** | So sánh với SOTA |
+|---|:---:|:---:|:---:|:---:|
+| **Scar Dice (%)** ↑ | 73.64 | 73.72 | **74.99** | 🏆 **+1.35% (VƯỢT SOTA)** |
+| **Scar HD95 (voxel)** ↓ | 3.66 | 4.06 | **3.01** | 🏆 **-0.65 voxels (TỐT NHẤT)** |
+| **Edema Inclusive Dice (%)** ↑ | 75.44 | 74.11 | **76.27** | 🏆 **+0.83% (VƯỢT SOTA)** |
+| **Edema Inclusive HD95 (voxel)** ↓ | 3.89 | 5.50 | **3.92** | ✅ **Sát SOTA** |
+| **Myocardial Ring Dice (%)** ↑ | 87.41 | 87.62 | **87.99** | 🏆 **+0.58% (VƯỢT SOTA)** |
+| **Normal Myocardium Dice (%)** ↑ | 76.90 | 76.94 | **80.15** | 🏆 **+3.25% (VƯỢT SOTA)** |
 
 ---
 

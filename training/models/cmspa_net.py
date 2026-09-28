@@ -20,7 +20,10 @@ from training.models.backbones.resnet_v2 import ResNetV2
 from training.models.modules.cmspa import CMSPA_Fusion
 from training.models.modules.decoder import DecoderCup, SegmentationHead
 from training.models.modules.fusion import CrossAttention_Fusion, Fusion_Embed
+from training.models.modules.h_cmspa import H_CMSPA_Fusion
+from training.models.modules.m2_max import M2Max_Fusion, SkipGateFusion
 from training.models.modules.m2_plus import M2Plus_Fusion
+from training.models.modules.m2_pro import M2Pro_Fusion
 from training.models.modules.sspanet import SSPANet_Block
 
 
@@ -47,8 +50,8 @@ def get_r50_b16_config() -> ConfigDict:
 
 def get_config(ablation: str = "M3") -> ConfigDict:
     """Return a fresh production configuration."""
-    if ablation.upper() not in {"M2", "M2-PLUS", "M3"}:
-        raise ValueError(f"Unknown ablation {ablation!r}; expected M2, M2-Plus or M3")
+    if ablation.upper() not in {"M2", "M2-PLUS", "M2-PRO", "M2PRO", "M2-MAX", "M2MAX", "M3", "H-CMSPA", "HCMSPA"}:
+        raise ValueError(f"Unknown ablation {ablation!r}; expected M2, M2-Plus, M2-Pro, M2-Max, M3 or H-CMSPA")
     config = get_r50_b16_config()
     config.ablation = ablation.upper()
     return config
@@ -143,8 +146,8 @@ class CMSPANet(nn.Module):
                 self.config[key] = value
 
         self.ablation = (ablation or self.config.get("ablation", "M3")).upper()
-        if self.ablation not in {"M2", "M2-PLUS", "M3"}:
-            raise ValueError(f"Unknown ablation: {self.ablation!r}; expected M2, M2-Plus or M3")
+        if self.ablation not in {"M2", "M2-PLUS", "M2-PRO", "M2PRO", "M2-MAX", "M2MAX", "M3", "H-CMSPA", "HCMSPA"}:
+            raise ValueError(f"Unknown ablation: {self.ablation!r}; expected M2, M2-Plus, M2-Pro, M2-Max, M3 or H-CMSPA")
         self.config.ablation = self.ablation
 
         if num_classes is not None:
@@ -174,6 +177,18 @@ class CMSPANet(nn.Module):
 
         if self.ablation == "M3":
             self.cross_fusion = CMSPA_Fusion(channels, self.config.fused_channels)
+        elif self.ablation in {"M2-MAX", "M2MAX"}:
+            self.cross_fusion = M2Max_Fusion(
+                channels, self.config.fused_channels, self.config.cross_attention_heads
+            )
+        elif self.ablation in {"M2-PRO", "M2PRO"}:
+            self.cross_fusion = M2Pro_Fusion(
+                channels, self.config.fused_channels, self.config.cross_attention_heads
+            )
+        elif self.ablation in {"H-CMSPA", "HCMSPA"}:
+            self.cross_fusion = H_CMSPA_Fusion(
+                channels, self.config.fused_channels, self.config.cross_attention_heads
+            )
         elif self.ablation == "M2-PLUS":
             self.cross_fusion = M2Plus_Fusion(
                 channels, self.config.fused_channels, self.config.cross_attention_heads
@@ -185,9 +200,14 @@ class CMSPANet(nn.Module):
         else:
             raise ValueError(f"Unsupported ablation: {self.ablation!r}")
 
-        self.feature_fusion = nn.ModuleList(
-            Fusion_Embed(c) for c in expected_skips[:self.config.n_skip]
-        )
+        if self.ablation in {"M2-MAX", "M2MAX"}:
+            self.feature_fusion = nn.ModuleList(
+                SkipGateFusion(c) for c in expected_skips[:self.config.n_skip]
+            )
+        else:
+            self.feature_fusion = nn.ModuleList(
+                Fusion_Embed(c) for c in expected_skips[:self.config.n_skip]
+            )
         self.decoder = DecoderCup(self.config)
         self.segmentation_head = SegmentationHead(
             self.config.decoder_channels[-1], self.num_classes

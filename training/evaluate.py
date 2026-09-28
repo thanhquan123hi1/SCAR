@@ -51,6 +51,10 @@ def build_parser():
         help="default: checkpoint data convention",
     )
     parser.add_argument("--save-predictions", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--postprocess", action=argparse.BooleanOptionalAction, default=False,
+                        help="Filter isolated islands outside primary myocardial ring")
+    parser.add_argument("--tta", action=argparse.BooleanOptionalAction, default=False,
+                        help="Enable test-time augmentation via multi-axis spatial flipping")
     parser.add_argument("--cpu-threads", type=int, default=4)
     return parser
 
@@ -129,7 +133,19 @@ def main(argv=None):
                 args.batch_size,
                 device,
                 amp_dtype,
+                tta=args.tta,
             )
+            if args.postprocess:
+                from scipy import ndimage as ndi
+                for d in range(prediction.shape[2]):
+                    slice_mask = prediction[:, :, d]
+                    myo = (slice_mask > 0)
+                    if myo.any():
+                        labeled, num_features = ndi.label(myo)
+                        if num_features > 1:
+                            sizes = ndi.sum(myo, labeled, range(1, num_features + 1))
+                            largest = np.argmax(sizes) + 1
+                            prediction[:, :, d][labeled != largest] = 0
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
             elapsed = time.perf_counter() - started

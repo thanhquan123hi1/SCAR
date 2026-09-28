@@ -465,8 +465,6 @@ def trainer_Myops(args, model, snapshot_path):
             "num_workers",
             "deterministic",
             "clip_grad",
-            "patience",
-            "min_delta",
             "ce_weight",
             "dice_weight",
             "sampler",
@@ -493,6 +491,8 @@ def trainer_Myops(args, model, snapshot_path):
             checkpoint["best_epoch"],
             checkpoint["bad_epochs"],
         )
+        if args.patience == 0 or (args.patience and bad_epochs >= args.patience):
+            bad_epochs = 0
         patience_score = checkpoint["patience_score"]
         generator.set_state(checkpoint["loader_rng"])
         restore_rng(checkpoint["rng"])
@@ -551,6 +551,7 @@ def trainer_Myops(args, model, snapshot_path):
         except ImportError:
             logger.warning("TensorBoard unavailable; CSV, JSONL and text logging remain enabled.")
 
+    best_inclusive_score = 0.0
     stop_epoch = min(args.max_epochs, start_epoch + args.epochs_per_run) if args.epochs_per_run else args.max_epochs
     try:
         if args.patience and bad_epochs >= args.patience:
@@ -658,6 +659,16 @@ def trainer_Myops(args, model, snapshot_path):
                     epoch + 1,
                     score,
                     layout.checkpoints / "best.pth",
+                )
+            score_inclusive = (volume_metrics["scar"]["mean_dice"] + volume_metrics["edema_inclusive"]["mean_dice"]) / 2.0
+            if score_inclusive > best_inclusive_score:
+                best_inclusive_score = score_inclusive
+                atomic_checkpoint(layout.checkpoints / "best_inclusive.pth", payload)
+                logger.info(
+                    "New best inclusive checkpoint: epoch %d, (Scar+EdemaInc)/2 %.5f -> %s",
+                    epoch + 1,
+                    score_inclusive,
+                    layout.checkpoints / "best_inclusive.pth",
                 )
             # Publish the recovery point after best, so a crash cannot advance
             # the saved best_score while leaving best.pth missing or stale.

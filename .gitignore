@@ -12,6 +12,7 @@ data/
 # Experiment Outputs & Model Weights
 # ==============================================================================
 outputs/
+runs/
 *.pt
 *.pth
 *.npz
