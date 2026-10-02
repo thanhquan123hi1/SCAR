@@ -52,6 +52,7 @@ model:
 loss:
   ce_weight: 0.5
   dice_weight: 0.5
+  aar_weight: 0.0
 
 outputs:
   run_root: outputs/runs

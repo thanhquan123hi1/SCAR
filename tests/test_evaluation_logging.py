@@ -1,4 +1,5 @@
 import tempfile
+import json
 import unittest
 from pathlib import Path
 from unittest.mock import Mock
@@ -16,8 +17,13 @@ class EvaluationLoggingTests(unittest.TestCase):
         from training.metrics.surface_distance import BENCHMARK_PROTOCOL
         from training.dataset.data_contract import resolve_label_order
         events = []
-        mask = np.arange(8).reshape(2, 2, 2) % 4
-        samples = [dict(case_name=name, image=mask, image1=mask, image2=mask, label=mask)
+        mask = np.zeros((32, 32, 2), dtype=np.uint8)
+        mask[8:24, 8:24] = 1
+        mask[2, 2] = 3
+        mask[29, 29] = 2
+        samples = [dict(case_name=name, image=mask, image1=mask, image2=mask, label=mask,
+                        spacing=np.full(3, np.nan), affine=np.full((4, 4), np.nan),
+                        spacing_unit='unknown')
                    for name in ('case_a', 'case_b')]
         checkpoint = dict(benchmark_protocol=BENCHMARK_PROTOCOL,
                           benchmark_data={'source_label_order': resolve_label_order('canonical')},
@@ -42,13 +48,19 @@ class EvaluationLoggingTests(unittest.TestCase):
                  patch('training.evaluate.MyopsDataset', return_value=samples), \
                  patch('training.evaluate.predict_volume', side_effect=predict):
                 main(['--checkpoint', str(layout.checkpoints / 'best.pth'),
-                      '--data-root', tmp, '--no-save-predictions'])
+                      '--data-root', tmp])
             self.assertEqual(events, ['predict', 'predict'])
             self.assertFalse(layout.tensorboard.exists())
             output = layout.evaluation('test_vol')
             self.assertTrue((output / 'metrics.json').is_file())
             self.assertTrue((output / 'per_case.csv').is_file())
             self.assertIn('Dice=', (output / 'test.log').read_text(encoding='utf-8'))
+            for name in ('case_a', 'case_b'):
+                with np.load(output / f'{name}_pred.npz') as saved:
+                    np.testing.assert_array_equal(saved['prediction'], mask)
+            report = json.loads((output / 'metrics.json').read_text(encoding='utf-8'))
+            self.assertEqual(report['inference_protocol']['id'], 'single_pass_argmax_v1')
+            self.assertEqual(report['inference_protocol']['mask_processing'], 'none')
 
     def test_log_captures_progress_and_failure_and_closes_handlers(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -62,4 +74,3 @@ class EvaluationLoggingTests(unittest.TestCase):
             self.assertIn('Traceback', content)
             self.assertIn('inference failed', content)
             self.assertEqual(logger.handlers, [])
-

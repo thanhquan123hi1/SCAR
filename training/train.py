@@ -63,6 +63,12 @@ def build_parser():
     parser.add_argument("--run-id", default=None, help="Named run directory under --run-root")
     parser.add_argument("--ce-weight", type=float, default=0.5)
     parser.add_argument("--dice-weight", type=float, default=0.5)
+    parser.add_argument(
+        "--aar-weight",
+        type=float,
+        default=0.0,
+        help="Weight for conditional Area-at-Risk (AAR / Edema-Inclusive) auxiliary Dice loss (default: 0.0)",
+    )
     parser.add_argument("--sampler", choices=("none", "rare"), default="none")
     parser.add_argument("--rare-boost", type=float, default=2.0)
     parser.add_argument("--foreground-boost", type=float, default=1.3)
@@ -154,10 +160,10 @@ def parse_args(argv=None):
         parser.error("img_size must be a multiple of 16 and >=32")
     if args.base_lr <= 0 or args.weight_decay < 0 or not 0 < args.val_fraction < 1:
         parser.error("Require lr>0, weight_decay>=0, 0<val_fraction<1")
-    for key in ("base_lr", "weight_decay", "val_fraction", "min_delta", "clip_grad", "ce_weight", "dice_weight"):
+    for key in ("base_lr", "weight_decay", "val_fraction", "min_delta", "clip_grad", "ce_weight", "dice_weight", "aar_weight"):
         if not math.isfinite(getattr(args, key)):
             parser.error(f"{key} must be finite")
-    for key in ("num_workers", "patience", "min_delta", "save_every", "epochs_per_run", "clip_grad", "ce_weight", "dice_weight"):
+    for key in ("num_workers", "patience", "min_delta", "save_every", "epochs_per_run", "clip_grad", "ce_weight", "dice_weight", "aar_weight"):
         if getattr(args, key) < 0:
             parser.error(f"{key} must be nonnegative")
     if args.ce_weight + args.dice_weight <= 0:

@@ -432,7 +432,11 @@ def trainer_Myops(args, model, snapshot_path):
         split_dir, "val_vol", label_order=args.label_order,
     )
     model.to(device)
-    criterion = SegmentationLoss(ce_weight=args.ce_weight, dice_weight=args.dice_weight)
+    criterion = SegmentationLoss(
+        ce_weight=args.ce_weight,
+        dice_weight=args.dice_weight,
+        aar_weight=getattr(args, "aar_weight", 0.0),
+    )
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.base_lr, weight_decay=args.weight_decay, foreach=False)
     total_updates = args.max_epochs * math.ceil(len(trainloader) / args.accum_steps)
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda step: max(0.0, 1.0 - step / total_updates) ** 0.9)
@@ -475,6 +479,10 @@ def trainer_Myops(args, model, snapshot_path):
                 raise ValueError(
                     f"Resume changes {key}: {checkpoint['args'][key]} -> {vars(args)[key]}. Use the original training settings."
                 )
+        if "aar_weight" in checkpoint["args"] and checkpoint["args"]["aar_weight"] != getattr(args, "aar_weight", 0.0):
+            raise ValueError(
+                f"Resume changes aar_weight: {checkpoint['args']['aar_weight']} -> {getattr(args, 'aar_weight', 0.0)}. Use the original training settings."
+            )
         if not _configs_equal(checkpoint["model_config"], model_config) or checkpoint["split_hashes"] != split_hashes:
             raise ValueError("Resume architecture or train/val/test manifests differ from checkpoint.")
         if checkpoint["total_updates"] != total_updates:

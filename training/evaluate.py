@@ -18,10 +18,9 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from training.dataset.data_contract import CLASS_NAMES, patient_id, read_split_names, lock_benchmark_data, resolve_label_order
-from training.dataset.myops_dataset import MyopsDataset, Myops_dataset
+from training.dataset.myops_dataset import MyopsDataset
 from training.predict import predict_volume
 from training.metrics.surface_distance import BENCHMARK_PROTOCOL, benchmark_rows, summarize_rows
-from training.models.cmspa_net import CMSPANet, VisionTransformer
 from training.models import model_from_config
 from training.run_layout import RunLayout
 from training.evaluation_logging import evaluation_logger
@@ -51,10 +50,6 @@ def build_parser():
         help="default: checkpoint data convention",
     )
     parser.add_argument("--save-predictions", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--postprocess", action=argparse.BooleanOptionalAction, default=False,
-                        help="Filter isolated islands outside primary myocardial ring")
-    parser.add_argument("--tta", action=argparse.BooleanOptionalAction, default=False,
-                        help="Enable test-time augmentation via multi-axis spatial flipping")
     parser.add_argument("--cpu-threads", type=int, default=4)
     return parser
 
@@ -119,6 +114,7 @@ def main(argv=None):
     with evaluation_logger(output / "test.log") as logger:
         logger.info("Checkpoint %s | split %s | device %s | AMP %s | output %s",
                     checkpoint_path, args.split, device, amp_dtype, output)
+        logger.info("Inference: one forward pass per batch, argmax logits, no mask filtering")
         rows, total_seconds, total_slices = [], 0.0, 0
         for sample in dataset:
             case = sample["case_name"]
@@ -133,19 +129,7 @@ def main(argv=None):
                 args.batch_size,
                 device,
                 amp_dtype,
-                tta=args.tta,
             )
-            if args.postprocess:
-                from scipy import ndimage as ndi
-                for d in range(prediction.shape[2]):
-                    slice_mask = prediction[:, :, d]
-                    myo = (slice_mask > 0)
-                    if myo.any():
-                        labeled, num_features = ndi.label(myo)
-                        if num_features > 1:
-                            sizes = ndi.sum(myo, labeled, range(1, num_features + 1))
-                            largest = np.argmax(sizes) + 1
-                            prediction[:, :, d][labeled != largest] = 0
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
             elapsed = time.perf_counter() - started
@@ -197,6 +181,15 @@ def main(argv=None):
             inference_slices_per_second=total_slices / total_seconds,
             timing_note="Includes transfer and resizing, excludes disk I/O/metrics; first case includes warmup.",
             benchmark_protocol=BENCHMARK_PROTOCOL,
+            inference_protocol={
+                "id": "single_pass_argmax_v1",
+                "forward_passes_per_batch": 1,
+                "spatial_aggregation": "none",
+                "mask_processing": "none",
+                "image_resize": "bilinear_align_corners_false",
+                "logit_resize": "bilinear_align_corners_false",
+                "prediction_rule": "argmax_logits",
+            },
             benchmark_data=data_lock,
             split_hashes=checkpoint["split_hashes"],
             hd95_note="All distances are voxel distances (unit grid), never mm. Primary means exclude undefined surfaces; inspect counts. Official reproduction is separately named and retains the upstream empty-mask behavior.",

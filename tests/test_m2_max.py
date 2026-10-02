@@ -42,7 +42,7 @@ def test_cmspa_net_m2_max():
 
 
 def test_segmentation_loss_conditional_aar():
-    criterion = SegmentationLoss(n_classes=4)
+    criterion = SegmentationLoss(n_classes=4, aar_weight=0.25)
     logits = torch.randn(2, 4, 32, 32)
     # Target without pathology
     target_clean = torch.randint(0, 2, (2, 32, 32))

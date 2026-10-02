@@ -30,6 +30,7 @@ YAML_KEY_TO_DEST: dict[str, str] = {
     "train.pretrained": "pretrained",
     "loss.ce_weight": "ce_weight",
     "loss.dice_weight": "dice_weight",
+    "loss.aar_weight": "aar_weight",
     "data.data_root": "data_root",
     "data.list_dir": "list_dir",
     "data.val_fraction": "val_fraction",

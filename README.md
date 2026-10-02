@@ -133,23 +133,27 @@ $g_F$ là Conv 1×1 → BN → ReLU, đầu ra 512 kênh ở cấu hình mặc �
 |:---:|:---:|:---:|:---:|
 | **M2** | SSPANet | Cross-Attention | [`training/config/models/cross_attn_baseline.yaml`](training/config/models/cross_attn_baseline.yaml) |
 | **M2-Plus** | SSPANet | Hai nhánh Cross-Attention riêng cho sẹo (PSIR/LGE) và phù nề (T2w) | [`training/config/models/m2_plus.yaml`](training/config/models/m2_plus.yaml) |
-| **M2-Max (Đột phá)** | **SSPANet** | **Bi-Pathology Interactive Refinement + SkipGateFusion + $\mathcal{L}_{\mathrm{AAR}}$** | [`training/config/models/m2_max.yaml`](training/config/models/m2_max.yaml) |
+| **M2-Max** | **SSPANet** | **Bi-Pathology Interactive Refinement + SkipGateFusion** | [`training/config/models/m2_max.yaml`](training/config/models/m2_max.yaml) |
 | **M3 (Đề xuất)** | **SSPANet** | **CMSPA** | [`training/config/models/cmspa_net.yaml`](training/config/models/cmspa_net.yaml) |
 
 ---
 
-## Kết quả Thực nghiệm & So sánh Benchmark SOTA (MyoPS-380 Test Set)
+Loss AAR là một thành phần tùy chọn của `SegmentationLoss`. Hệ số mặc định hiện tại là `aar_weight=0.0`; trainer chưa truyền hệ số AAR từ YAML/CLI. Chọn config M2-Max không tự bật AAR. Cần ghi rõ loss thực tế khi báo cáo đóng góp kiến trúc và loss.
 
-Đánh giá chính thức trên tập kiểm thử độc lập **76 bệnh nhân** (theo đúng chuẩn giao thức I-MMSeg Official Evaluation Protocol):
+## Kết quả lịch sử cần đánh giá lại (MyoPS-380 Test Set)
 
-| Chỉ số đánh giá | Paper gốc (I-MMSeg SOTA) | M2-Plus | **M2-Max (Đề xuất)** | So sánh với SOTA |
-|---|:---:|:---:|:---:|:---:|
-| **Scar Dice (%)** ↑ | 73.64 | 73.72 | **74.99** | 🏆 **+1.35% (VƯỢT SOTA)** |
-| **Scar HD95 (voxel)** ↓ | 3.66 | 4.06 | **3.01** | 🏆 **-0.65 voxels (TỐT NHẤT)** |
-| **Edema Inclusive Dice (%)** ↑ | 75.44 | 74.11 | **76.27** | 🏆 **+0.83% (VƯỢT SOTA)** |
-| **Edema Inclusive HD95 (voxel)** ↓ | 3.89 | 5.50 | **3.92** | ✅ **Sát SOTA** |
-| **Myocardial Ring Dice (%)** ↑ | 87.41 | 87.62 | **87.99** | 🏆 **+0.58% (VƯỢT SOTA)** |
-| **Normal Myocardium Dice (%)** ↑ | 76.90 | 76.94 | **80.15** | 🏆 **+3.25% (VƯỢT SOTA)** |
+Các số M2-Plus/M2-Max dưới đây được lưu từ phiên bản trước. Chưa có báo cáo kèm chế độ inference và checkpoint để xác minh chúng được tạo bằng dự đoán trực tiếp, không TTA/hậu xử lý. **Không dùng bảng này để kết luận vượt SOTA hoặc chứng minh đóng góp kiến trúc/loss.** Cần đánh giá lại checkpoint trên đủ 76 bệnh nhân bằng evaluator hiện tại, lưu `per_case.csv`, `metrics.json` và prediction.
+
+| Chỉ số từng được ghi nhận | M2-Plus (lịch sử) | M2-Max (lịch sử) |
+|---|:---:|:---:|
+| Scar Dice (%) ↑ | 73.72 | 74.99 |
+| Scar HD95 (voxel) ↓ | 4.06 | 3.01 |
+| Edema Inclusive Dice (%) ↑ | 74.11 | 76.27 |
+| Edema Inclusive HD95 (voxel) ↓ | 5.50 | 3.92 |
+| Myocardial Ring Dice (%) ↑ | 87.62 | 87.99 |
+| Normal Myocardium Dice (%) ↑ | 76.94 | 80.15 |
+
+Mốc I-MMSeg trong Table 1 của paper: Scar Dice 73.64 / HD 3.66; Edema Dice 75.44 / HD 3.89; Myocardium Dice 87.41 / HD 1.07. Table 1 không có cột normal-myocardium riêng. Phải đối chiếu ánh xạ region và loại metric trước khi so sánh; không tự gán cột Edema trong paper cho edema-inclusive. Xem [mã nguồn I-MMSeg](https://github.com/zzzzzzl24/I_MMSeg).
 
 ---
 
@@ -275,6 +279,22 @@ Báo cáo kết quả được lưu tại `outputs/runs/m3_run01/logs_CMSPA-Net_
 Đánh giá cũng ghi `test.log` trong thư mục kết quả: tiến độ, metric từng ca/vùng, tổng kết và traceback nếu lỗi trong vòng đánh giá. Các lỗi kiểm tra đầu vào trước khi tạo thư mục kết quả vẫn hiển thị trên terminal.
 
 Test không sử dụng TensorBoard và không cần thư mục `tensorboard/`. Kết quả được lưu bằng `test.log`, `per_case.csv`, `metrics.json` và prediction nếu bật. TensorBoard chỉ dùng cho train. Text log của test được ghi ngoài khoảng đo inference.
+
+### Inference trực tiếp để đánh giá kiến trúc và loss
+
+Train validation, test và prediction dùng chung `predict_volume`: mỗi batch thực hiện đúng một forward pass, resize logits về lưới ảnh đầu vào nếu cần, rồi lấy `argmax`. Mask được chấm điểm và lưu trực tiếp, giữ cả các vùng tổn thương nhỏ hoặc không liên thông. Repo không còn hỗ trợ TTA, ensemble các flip hoặc lọc thành phần liên thông. Các cờ cũ `--tta`, `--no-tta`, `--postprocess`, `--no-postprocess` bị từ chối thay vì âm thầm bỏ qua.
+
+`metrics.json` ghi `inference_protocol.id=single_pass_argmax_v1`, số forward mỗi batch, quy tắc resize/argmax và `mask_processing=none`; `test.log` cũng ghi chế độ inference. Augmentation chỉ áp dụng trên train. SkipGateFusion/SE bên trong M2-Max vẫn là các thành phần được học của kiến trúc.
+
+Logic chọn `best.pth`, `best_inclusive.pth`, resume và early stopping được giữ nguyên. Thay đổi này không sửa lỗi reset điểm inclusive khi resume; cần xử lý riêng trước khi dựa vào checkpoint đó để công bố.
+
+### Điều kiện so sánh với I-MMSeg và nnU-Net
+
+- Dùng đúng 76 bệnh nhân test đã khóa, cùng ground truth và quy ước region; không tune loss, inference hoặc chọn checkpoint bằng test.
+- Để so evaluator I-MMSeg, báo các cột `official_*` cùng các cột metric chính và trạng thái mask rỗng. Không trộn hai bộ metric trong một phép so sánh. HD95 của protocol này có đơn vị voxel, không so trực tiếp với HD95 tính bằng mm.
+- Với nnU-Net, ghi rõ phiên bản, cấu hình 2D/3D, train/validation split, checkpoint, số fold/model và các bước inference. Để so đóng góp model trong chế độ dự đoán trực tiếp, dùng một model/fold, tắt mirroring bằng `--disable_tta`, không áp dụng hậu xử lý của nnU-Net. Nếu báo pipeline đầy đủ có ensemble/hậu xử lý, ghi thành kết quả riêng. Tham khảo [hướng dẫn nnU-Net](https://github.com/MIC-DKFZ/nnUNet/blob/master/documentation/how_to_use_nnunet.md) và [CLI inference](https://github.com/MIC-DKFZ/nnUNet/blob/master/nnunetv2/inference/predict_from_raw_data.py).
+- Đưa prediction của mọi baseline về cùng lưới/nhãn canonical và chấm bằng cùng `benchmark_rows`/`summarize_rows`. Trung bình theo bệnh nhân, kèm số ca metric xác định/không xác định. Không lấy trung bình slice hoặc pixel-pooled để so với patient-mean.
+- Gỡ TTA/hậu xử lý chỉ loại hai yếu tố inference. Kết quả còn phụ thuộc dữ liệu, pretraining, augmentation, optimizer và ngân sách train. Cần ablation kiến trúc × loss với các yếu tố này được kiểm soát; các số trích từ paper phải được ghi rõ là tham khảo, không phải baseline đã tái lập.
 
 ---
 
