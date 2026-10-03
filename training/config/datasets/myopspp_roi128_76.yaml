@@ -1,0 +1,9 @@
+data:
+  dataset_id: myopspp_roi128_76
+  data_root: data/myopspp_roi128_76/cache
+  list_dir: data/myopspp_roi128_76/cache/lists
+  label_order: canonical
+loss:
+  pathology_reduction: sample
+outputs:
+  run_root: outputs/myopspp_roi128_76/runs

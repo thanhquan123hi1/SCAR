@@ -21,6 +21,7 @@ from training.config.config_utils import (
 )
 from training.models.cmspa_net import CONFIGS, CMSPANet
 from training.models import model_from_config
+from training.dataset.benchmark_profiles import DATASET_IDS
 from training.run_layout import RunLayout
 from training.trainer.trainer import Trainer, load_checkpoint, seed_everything
 
@@ -62,6 +63,8 @@ def build_parser():
     )
     parser.add_argument("--run-id", default=None, help="Named run directory under --run-root")
     parser.add_argument("--ce-weight", type=float, default=0.5)
+    parser.add_argument("--pathology-reduction", choices=("positive", "sample"), default="positive",
+                        help="Conditional AAR/scar mean: legacy positive slices, or all samples for stable accumulation")
     parser.add_argument("--dice-weight", type=float, default=0.5)
     parser.add_argument(
         "--aar-weight",
@@ -139,7 +142,7 @@ def build_parser():
         help="held-out TRAIN patients if val.txt is absent",
     )
     parser.add_argument("--label-order", choices=["legacy", "canonical"], default="legacy")
-    parser.add_argument("--dataset", dest="dataset_id", choices=["myops380", "myopspp_bc80"], default="myops380",
+    parser.add_argument("--dataset", dest="dataset_id", choices=DATASET_IDS, default="myops380",
                         help="Named benchmark; MyoPS++ selects separate cache/lists/output defaults")
     parser.add_argument(
         "--patience",
@@ -177,7 +180,7 @@ def parse_args(argv=None):
     pre_parser = argparse.ArgumentParser(add_help=False)
     pre_parser.add_argument("--config", default="training/config/models/cmspa_net.yaml")
     pre_parser.add_argument("--base-config", default=str(PROJECT_ROOT / "training/config/base.yaml"))
-    pre_parser.add_argument("--dataset", dest="dataset_id", choices=["myops380", "myopspp_bc80"], default=None)
+    pre_parser.add_argument("--dataset", dest="dataset_id", choices=DATASET_IDS, default=None)
     pre_args, _ = pre_parser.parse_known_args(argv)
     config_name = pre_args.config
     if config_name in CONFIGS:
@@ -233,6 +236,9 @@ def _load_initial_weights(model, path):
     if hasattr(model.segmentation_head, "base_head") and "segmentation_head.0.weight" in state:
         state["segmentation_head.base_head.weight"] = state.pop("segmentation_head.0.weight")
         state["segmentation_head.base_head.bias"] = state.pop("segmentation_head.0.bias")
+    elif not hasattr(model.segmentation_head, "base_head") and "segmentation_head.base_head.weight" in state:
+        state["segmentation_head.0.weight"] = state.pop("segmentation_head.base_head.weight")
+        state["segmentation_head.0.bias"] = state.pop("segmentation_head.base_head.bias")
     missing, unexpected = model.load_state_dict(state, strict=False)
     print(f"Initialized from {path}: {len(model.state_dict()) - len(missing)} tensors loaded, "
           f"{len(missing)} new/missing, {len(unexpected)} unused source tensors")

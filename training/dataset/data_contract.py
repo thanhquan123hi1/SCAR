@@ -28,8 +28,9 @@ def lock_benchmark_data(data_root, list_dir, label_order, dataset_id="myops380")
     Persist the returned record in the run/checkpoint. Resume/evaluation compare
     this record, so changing files in place cannot silently change a benchmark.
     """
-    if dataset_id == "myopspp_bc80":
-        return _lock_myopspp_data(data_root, list_dir, label_order)
+    from training.dataset.benchmark_profiles import ROI_PROFILES
+    if dataset_id == "myopspp_bc80" or dataset_id in ROI_PROFILES:
+        return _lock_myopspp_data(data_root, list_dir, label_order, dataset_id)
     if dataset_id != "myops380":
         raise ValueError(f"Unknown benchmark dataset: {dataset_id}")
     if label_order == "auto":
@@ -75,21 +76,31 @@ def lock_benchmark_data(data_root, list_dir, label_order, dataset_id="myops380")
             "patient_counts": {s: len(ids) for s, ids in patients.items()}}
 
 
-def _lock_myopspp_data(data_root, list_dir, label_order):
-    from training.dataset.benchmark_profiles import fixed_myopspp_splits, MYOPSPP_IDS
+def _lock_myopspp_data(data_root, list_dir, label_order, dataset_id="myopspp_bc80"):
+    from training.dataset.benchmark_profiles import fixed_myopspp_splits, MYOPSPP_IDS, ROI_PROFILES, fixed_roi_splits
 
     if label_order == "auto" or resolve_label_order(label_order) != CANONICAL_LABEL_ORDER:
-        raise ValueError("myopspp_bc80 requires explicit canonical labels")
+        raise ValueError(f"{dataset_id} requires explicit canonical labels")
     root = Path(data_root)
     metadata = root / "dataset_metadata.json"
     info = json.loads(metadata.read_text(encoding="utf-8"))
-    if info.get("dataset_id") != "myopspp_bc80" or info.get("label_order") != CANONICAL_LABEL_ORDER:
+    if info.get("dataset_id") != dataset_id or info.get("label_order") != CANONICAL_LABEL_ORDER:
         raise ValueError("Cache belongs to a different dataset/profile or label convention")
-    if info.get("normalization") != "percentile" or info.get("spacing_unit") != "mm":
-        raise ValueError("myopspp_bc80 requires percentile normalization and mm geometry")
-    fixed = fixed_myopspp_splits()
-    if info.get("patients") != fixed or set(info.get("case_shapes", {})) != MYOPSPP_IDS:
+    roi = ROI_PROFILES.get(dataset_id)
+    normalization = "export_percentile_preserved" if roi else "percentile"
+    if info.get("normalization") != normalization or info.get("spacing_unit") != "mm":
+        raise ValueError(f"{dataset_id} requires {normalization} normalization and mm geometry")
+    fixed = fixed_roi_splits(dataset_id) if roi else fixed_myopspp_splits()
+    cohort = set(c for cases in fixed.values() for c in cases) if roi else MYOPSPP_IDS
+    if info.get("patients") != fixed or set(info.get("case_shapes", {})) != cohort:
         raise ValueError("Cache cohort/splits differ from the fixed MyoPS++ benchmark")
+    if roi:
+        from training.metrics.surface_distance import protocol_for_dataset
+        if info.get("benchmark_protocol") != protocol_for_dataset(dataset_id):
+            raise ValueError("ROI cache preprocessing/evaluation protocol differs from the selected profile")
+        for case, shape in info["case_shapes"].items():
+            if len(shape) != 3 or shape[:2] != [128, 128] or type(shape[2]) is not int or shape[2] <= 0:
+                raise ValueError(f"{case}: ROI requires 128x128xD")
     splits = {s: read_split_names(list_dir, s) for s in ("train", "val", "val_vol", "test_vol")}
     patients = validate_patient_splits({s: splits[s] for s in ("train", "val", "test_vol")})
     for split in ("train", "val"):
@@ -119,7 +130,7 @@ def _lock_myopspp_data(data_root, list_dir, label_order):
         with path.open("rb") as stream:
             file_hash = hashlib.file_digest(stream, "sha256").hexdigest()
         digest.update(f"{path.relative_to(root).as_posix()}\0{file_hash}\n".encode())
-    return {"schema_version": 1, "dataset_id": "myopspp_bc80", "source_label_order": CANONICAL_LABEL_ORDER,
+    return {"schema_version": 1, "dataset_id": dataset_id, "source_label_order": CANONICAL_LABEL_ORDER,
             "canonical_class_names": list(CLASS_NAMES), "cache_sha256": digest.hexdigest(),
             "cache_files": len(files), "patient_counts": {s: len(ids) for s, ids in patients.items()},
             "split_ids_sha256": {s: hashlib.sha256(("\n".join(sorted(names)) + "\n").encode()).hexdigest()

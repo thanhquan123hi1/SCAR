@@ -60,8 +60,12 @@ class SegmentationLoss(nn.Module):
         inclusion_weight=0.0,
         dice_class_weights=None,
         ce_class_weights=None,
+        pathology_reduction="positive",
     ):
         super().__init__()
+        if pathology_reduction not in ("positive", "sample"):
+            raise ValueError("pathology_reduction must be positive or sample")
+        self.pathology_reduction = pathology_reduction
         for name, value in (("ce_weight", ce_weight), ("dice_weight", dice_weight),
                             ("aar_weight", aar_weight), ("scar_weight", scar_weight),
                             ("wall_weight", wall_weight), ("inclusion_weight", inclusion_weight)):
@@ -123,6 +127,8 @@ class SegmentationLoss(nn.Module):
                 inter = 2.0 * (p_aar * y_aar).sum(dims) + 1e-5
                 denom = p_aar.sum(dims) + y_aar.sum(dims) + 1e-5
                 aar_loss = (1.0 - inter / denom).mean()
+                if self.pathology_reduction == "sample":
+                    aar_loss = aar_loss * has_patho.float().mean()
             else:
                 aar_loss = torch.tensor(0.0, device=logits.device, dtype=torch.float32)
 
@@ -150,6 +156,8 @@ class SegmentationLoss(nn.Module):
                 inter_s = 2.0 * (p_scar * y_scar).sum(dims) + 1e-5
                 denom_s = p_scar.sum(dims) + y_scar.sum(dims) + 1e-5
                 scar_loss = (1.0 - inter_s / denom_s).mean()
+                if self.pathology_reduction == "sample":
+                    scar_loss = scar_loss * has_scar.float().mean()
             else:
                 scar_loss = torch.tensor(0.0, device=logits.device, dtype=torch.float32)
         else:

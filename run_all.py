@@ -29,7 +29,8 @@ def project_path(value: str | Path) -> Path:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="training/config/models/cmspa_net.yaml")
-    parser.add_argument("--dataset", choices=["myops380", "myopspp_bc80"], default=None,
+    from training.dataset.benchmark_profiles import DATASET_IDS
+    parser.add_argument("--dataset", choices=DATASET_IDS, default=None,
                         help="CLI > YAML data.dataset_id > myops380")
     parser.add_argument("--run-id", default=None)
     parser.add_argument("--data-root", help="Processed cache, containing bSSFP/LGE/T2w")
@@ -67,10 +68,13 @@ def main(argv=None) -> Path:
     with (ROOT / "preprocessing/config.yaml").open(encoding="utf-8") as stream:
         prep_config = yaml.safe_load(stream)
     data_root = project_path(args.data_root or config["data"]["data_root"])
-    list_default = (data_root / "lists" if args.dataset == "myopspp_bc80" and args.data_root is not None
+    list_default = (data_root / "lists" if args.dataset != "myops380" and args.data_root is not None
                     else config["data"]["list_dir"])
     list_dir = project_path(args.list_dir or list_default)
     raw_default = "E:/STUDY/DATASET/Myo_train" if args.dataset == "myopspp_bc80" else prep_config["data"]["raw_root"]
+    from training.dataset.benchmark_profiles import ROI_PROFILES
+    if args.dataset in ROI_PROFILES:
+        raw_default = ROOT.parent / "MyoPSpp_preprocessed_2026-10-03" / ROI_PROFILES[args.dataset]["export_id"]
     raw_root = project_path(args.raw_root or raw_default)
     test_list = project_path(args.test_list)
     run_root = project_path(args.run_root or config["outputs"]["run_root"])
@@ -97,7 +101,15 @@ def main(argv=None) -> Path:
                         for modality in ("bSSFP", "LGE", "T2w"))
     if args.skip_cache and not cache_present:
         parser.error(f"--skip-cache requires an existing three-modality cache: {data_root}")
-    if args.dataset == "myopspp_bc80":
+    if args.dataset in ROI_PROFILES:
+        if args.label_order not in (None, "canonical") or args.normalization is not None:
+            parser.error("ROI exports require canonical cache labels and preserve their existing normalization; omit --normalization")
+        if list_dir != data_root / "lists" and not cache_present:
+            parser.error("New ROI caches package manifests at --data-root/lists")
+        if not cache_present:
+            run_command([python, "-m", "preprocessing.myopspp_roi", "--dataset", args.dataset,
+                         "--src-path", str(raw_root), "--dst-path", str(data_root)], "1/4: Adapt exported cardiac ROIs")
+    elif args.dataset == "myopspp_bc80":
         if args.label_order not in (None, "canonical") or args.normalization not in (None, "percentile"):
             parser.error("myopspp_bc80 requires canonical cache labels and percentile normalization")
         if list_dir != data_root / "lists" and not cache_present:

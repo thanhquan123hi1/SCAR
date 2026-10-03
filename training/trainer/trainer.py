@@ -37,7 +37,7 @@ def validate_volumes(model, dataset, img_size, batch_size, device, amp_dtype, da
     """Selection uses native-grid full patients, never pixel-pooled slice scores."""
     rows = []
     for sample in dataset:
-        if dataset_id == "myopspp_bc80" and not sample["has_geometry"]:
+        if dataset_id != "myops380" and not sample["has_geometry"]:
             raise ValueError("MyoPS++ validation requires native mm geometry")
         prediction = predict_volume(model, [sample[k] for k in ("image", "image1", "image2")],
                                     img_size, batch_size, device, amp_dtype)
@@ -202,6 +202,10 @@ def append_metrics_csv(path, record):
 
 def _validate_resume_loss_config(saved_args: dict, args, saved_version: int | None = None) -> None:
     """Missing auxiliary settings in older checkpoints mean disabled/default."""
+    previous = saved_args.get("pathology_reduction", "positive")
+    current = getattr(args, "pathology_reduction", "positive")
+    if previous != current:
+        raise ValueError(f"Resume changes pathology_reduction: {previous} -> {current}")
     for key in ("aar_weight", "scar_weight", "wall_weight", "inclusion_weight",
                 "dice_class_weights", "ce_class_weights"):
         default = None if key.endswith("class_weights") else 0.0
@@ -470,6 +474,7 @@ def trainer_Myops(args, model, snapshot_path):
         inclusion_weight=getattr(args, "inclusion_weight", 0.0),
         dice_class_weights=getattr(args, "dice_class_weights", None),
         ce_class_weights=getattr(args, "ce_class_weights", None),
+        pathology_reduction=getattr(args, "pathology_reduction", "positive"),
     )
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.base_lr, weight_decay=args.weight_decay, foreach=False)
     total_updates = args.max_epochs * math.ceil(len(trainloader) / args.accum_steps)

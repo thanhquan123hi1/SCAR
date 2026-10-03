@@ -86,9 +86,13 @@ def main(argv=None):
         parser.error("output must end in .nii or .nii.gz")
     if output.exists():
         raise FileExistsError(f"Output already exists: {output}")
+    checkpoint = load_checkpoint(args.checkpoint)
+    from training.dataset.benchmark_profiles import ROI_PROFILES
+    if checkpoint["args"].get("dataset_id", "myops380") in ROI_PROFILES:
+        raise ValueError("ROI checkpoint requires already preprocessed cardiac ROIs. Use training/evaluate.py "
+                         "with its ROI cache; raw prediction needs a separate automatic localizer.")
     paths = dict(zip(MODALITIES, (args.cine, args.lge, args.t2w)))
     images, spacing, affine, unit = load_aligned_images(paths, args.normalization)
-    checkpoint = load_checkpoint(args.checkpoint)
     recorded = checkpoint.get("data_provenance", {}).get("metadata", {}).get("normalization")
     if recorded and recorded != args.normalization:
         raise ValueError(f"Normalization differs from training: {recorded}")

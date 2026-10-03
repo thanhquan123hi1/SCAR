@@ -29,6 +29,7 @@ Mô hình chủ lực **CMSPA-Net (M3)** kết hợp **3 encoder ResNetV2 độc
 
 ## Mục lục
 - [Benchmark MyoPS++ riêng](preprocessing/MYOPSPP.md)
+- [Train hai bộ MyoPS++ ROI 128 mm và 160 mm](docs/myopspp_roi_training.md)
 - [Chạy nhanh trên Google Colab](#chạy-nhanh-trên-google-colab)
 - [Kiến trúc Mô hình CMSPA-Net (M3)](#kiến-trúc-mô-hình-cmspa-net-m3)
 - [Các cấu hình nghiên cứu (Ablation Studies M2, M2-Plus, M3)](#các-cấu-hình-nghiên-cứu-ablation-studies-m2-m2-plus-m3)
@@ -48,6 +49,12 @@ C0/LGE/T2, split patient-level **51 train / 13 val / 16 test**. Xem
 [chuẩn bị dữ liệu, train, resume và test](preprocessing/MYOPSPP.md).
 Dùng `python train.py --dataset myopspp_bc80` để chọn cache/config/output riêng.
 MyoPS380 và notebook Colab hiện có tiếp tục dùng protocol mặc định.
+
+**Hai bộ MyoPS++ ROI mới:** chọn `--dataset myopspp_roi128_76` (48/13/15 bệnh nhân,
+spacing XY 1 mm) hoặc `--dataset myopspp_roi160_80` (51/13/16, spacing XY 1.25 mm).
+Các cache giữ nguyên ảnh [0,1] đã xuất và nhãn canonical; đánh giá trên ROI định vị
+bằng GT, có ghi rõ protocol trong checkpoint/kết quả. Xem
+[hướng dẫn tạo cache, train, resume và evaluate](docs/myopspp_roi_training.md).
 
 Bạn có thể chạy toàn bộ quy trình từ tải dữ liệu, tiền xử lý, huấn luyện M3 đến đánh giá volume 3D chỉ với một cú nhấp chuột:
 

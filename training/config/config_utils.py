@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from training.dataset.benchmark_profiles import DATASET_IDS
 
 YAML_KEY_TO_DEST: dict[str, str] = {
     "data.sampler": "sampler",
@@ -30,6 +31,7 @@ YAML_KEY_TO_DEST: dict[str, str] = {
     "train.pretrained": "pretrained",
     "train.init_weights": "init_weights",
     "loss.ce_weight": "ce_weight",
+    "loss.pathology_reduction": "pathology_reduction",
     "loss.dice_weight": "dice_weight",
     "loss.aar_weight": "aar_weight",
     "loss.scar_weight": "scar_weight",
@@ -220,14 +222,14 @@ def load_merged_config(config_path: str | Path | None = None, base_path: str | P
     # Resolve identity before applying defaults: explicit CLI > model YAML > base > default.
     selected = dataset_id if dataset_id is not None else model_cfg.get("data", {}).get(
         "dataset_id", base_cfg.get("data", {}).get("dataset_id", "myops380"))
-    if selected not in ("myops380", "myopspp_bc80"):
+    if selected not in DATASET_IDS:
         raise ValueError(f"Unknown dataset profile: {selected}")
-    if selected == "myopspp_bc80":
-        profile = Path(__file__).resolve().parent / "datasets/myopspp_bc80.yaml"
+    if selected != "myops380":
+        profile = Path(__file__).resolve().parent / f"datasets/{selected}.yaml"
         with profile.open(encoding="utf-8") as stream:
             base_cfg = deep_merge(base_cfg, yaml.safe_load(stream))
     merged = deep_merge(base_cfg, model_cfg)
     merged.setdefault("data", {})["dataset_id"] = selected
-    if selected == "myopspp_bc80" and "data_root" in model_cfg.get("data", {}) and "list_dir" not in model_cfg["data"]:
+    if selected != "myops380" and "data_root" in model_cfg.get("data", {}) and "list_dir" not in model_cfg["data"]:
         merged["data"]["list_dir"] = str(Path(merged["data"]["data_root"]) / "lists")
     return merged

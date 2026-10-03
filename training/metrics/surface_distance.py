@@ -24,8 +24,17 @@ BENCHMARK_PROTOCOL = {
 
 
 def protocol_for_dataset(dataset_id="myops380"):
+    from training.dataset.benchmark_profiles import ROI_PROFILES
     if dataset_id == "myops380":
         return BENCHMARK_PROTOCOL
+    if dataset_id in ROI_PROFILES:
+        profile = ROI_PROFILES[dataset_id]
+        return {k: v for k, v in dict(BENCHMARK_PROTOCOL,
+                id=f"{dataset_id}_roi_mm_v1", distance_unit="mm",
+                voxelspacing="preprocessed ROI NIfTI spacing in mm, orthogonal grid",
+                evaluation_grid="preprocessed_roi", localization="oracle_gt_bbox",
+                crop_mm=profile["crop_mm"], model_hw=[128, 128],
+                spacing_xy_mm=profile["spacing_xy"]).items() if not k.startswith("official_")}
     if dataset_id != "myopspp_bc80":
         raise ValueError(f"Unknown metric dataset profile: {dataset_id}")
     return {k: v for k, v in dict(BENCHMARK_PROTOCOL,
@@ -39,7 +48,7 @@ def dataset_rows(prediction, target, case, compute_distance=True, dataset_id="my
     protocol = protocol_for_dataset(dataset_id)
     spacing = np.asarray(spacing, dtype=float)
     if spacing.shape != (3,) or not np.isfinite(spacing).all() or (spacing <= 0).any():
-        raise ValueError("MyoPS++ metrics require native positive mm spacing")
+        raise ValueError("MyoPS++ metrics require positive mm spacing of the evaluation grid")
     # Reuse canonical validation and overlap definitions, without importing the
     # MyoPS380 author-specific empty-mask metrics into the new benchmark.
     rows = benchmark_rows(prediction, target, case, compute_distance=False)

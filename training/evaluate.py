@@ -51,7 +51,8 @@ def build_parser():
     )
     parser.add_argument("--save-predictions", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--cpu-threads", type=int, default=4)
-    parser.add_argument("--dataset", choices=["myops380", "myopspp_bc80"], default=None,
+    from training.dataset.benchmark_profiles import DATASET_IDS
+    parser.add_argument("--dataset", choices=DATASET_IDS, default=None,
                         help="Optional identity check; defaults to checkpoint dataset")
     return parser
 
@@ -125,8 +126,8 @@ def main(argv=None):
         rows, total_seconds, total_slices = [], 0.0, 0
         for sample in dataset:
             case = sample["case_name"]
-            if dataset_id == "myopspp_bc80" and not sample["has_geometry"]:
-                raise ValueError(f"{case}: MyoPS++ evaluation requires native mm geometry")
+            if dataset_id != "myops380" and not sample["has_geometry"]:
+                raise ValueError(f"{case}: MyoPS++ evaluation requires mm geometry of the evaluation grid")
             images = [sample[k] for k in ("image", "image1", "image2")]
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
@@ -204,7 +205,10 @@ def main(argv=None):
             split_hashes=checkpoint["split_hashes"],
             hd95_note=("All distances are voxel distances (unit grid), never mm. Primary means exclude undefined surfaces; inspect counts. Official reproduction is separately named and retains the upstream empty-mask behavior."
                        if distance_unit == "voxel" else
-                       "Distances use native orthogonal-grid spacing in mm. Means exclude undefined surfaces; inspect defined/undefined counts. No author-specific empty-mask reproduction metric."),
+                       ("Distances use preprocessed oracle ROI grid spacing in mm; GT is evaluated on that ROI, without native restoration. "
+                        if benchmark_protocol.get("evaluation_grid") == "preprocessed_roi" else
+                        "Distances use native orthogonal-grid spacing in mm. ") +
+                       "Means exclude undefined surfaces; inspect defined/undefined counts. No author-specific empty-mask reproduction metric."),
             device=str(device),
             amp_dtype=str(amp_dtype),
         )
