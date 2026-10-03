@@ -14,6 +14,12 @@ from training.models.modules.fusion import (
 from training.models.modules.h_cmspa import H_CMSPA_Fusion
 from training.models.modules.m2_plus import M2Plus_Fusion
 from training.models.modules.m2_max import M2Max_Fusion, SkipGateFusion
+from training.models.modules.m2_max_pro import M2MaxPro_Fusion
+from training.models.modules.m2_max_v2 import M2MaxV2_Fusion
+from training.models.modules.m2_max_v4 import M2MaxV4_Fusion, SpatialSkipGateFusion
+from training.models.modules.m2_max_v5 import M2MaxV5_Fusion, AdaptiveSkipGateFusion
+from training.models.modules.m2_max_v6 import M2MaxV6_Fusion, BoundaryAwareSkipGateFusion, HierarchicalAnatomicalHead
+from training.models.modules.m2_max_v7 import M2MaxV7_Fusion, TriStreamHierarchicalHead
 from training.models.modules.m2_pro import M2Pro_Fusion
 from training.models.modules.sspanet import (
     SSPA_BasicConv,
@@ -27,7 +33,18 @@ from training.models.modules.sspanet import (
 
 __all__ = [
     "M2Max_Fusion",
+    "M2MaxPro_Fusion",
+    "M2MaxV2_Fusion",
+    "M2MaxV4_Fusion",
+    "M2MaxV5_Fusion",
+    "M2MaxV6_Fusion",
+    "M2MaxV7_Fusion",
     "SkipGateFusion",
+    "SpatialSkipGateFusion",
+    "AdaptiveSkipGateFusion",
+    "BoundaryAwareSkipGateFusion",
+    "HierarchicalAnatomicalHead",
+    "TriStreamHierarchicalHead",
     "M2Pro_Fusion",
     "H_CMSPA_Fusion",
     "CMSPA_Fusion",
@@ -48,3 +65,4 @@ __all__ = [
     "_statistics_input",
     "strip_rms",
 ]
+

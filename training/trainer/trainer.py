@@ -436,6 +436,11 @@ def trainer_Myops(args, model, snapshot_path):
         ce_weight=args.ce_weight,
         dice_weight=args.dice_weight,
         aar_weight=getattr(args, "aar_weight", 0.0),
+        scar_weight=getattr(args, "scar_weight", 0.0),
+        wall_weight=getattr(args, "wall_weight", 0.0),
+        inclusion_weight=getattr(args, "inclusion_weight", 0.0),
+        dice_class_weights=getattr(args, "dice_class_weights", None),
+        ce_class_weights=getattr(args, "ce_class_weights", None),
     )
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.base_lr, weight_decay=args.weight_decay, foreach=False)
     total_updates = args.max_epochs * math.ceil(len(trainloader) / args.accum_steps)

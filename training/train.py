@@ -69,10 +69,42 @@ def build_parser():
         default=0.0,
         help="Weight for conditional Area-at-Risk (AAR / Edema-Inclusive) auxiliary Dice loss (default: 0.0)",
     )
+    parser.add_argument(
+        "--scar-weight",
+        type=float,
+        default=0.0,
+        help="Weight for conditional Scar auxiliary Dice loss (default: 0.0)",
+    )
+    parser.add_argument(
+        "--wall-weight",
+        type=float,
+        default=0.0,
+        help="Weight for conditional myocardial wall auxiliary loss (default: 0.0)",
+    )
+    parser.add_argument(
+        "--inclusion-weight",
+        type=float,
+        default=0.0,
+        help="Weight for hierarchical pathology inclusion loss (Scar in AAR) (default: 0.0)",
+    )
+    parser.add_argument(
+        "--dice-class-weights",
+        nargs="+",
+        type=float,
+        default=None,
+        help="Class weights for Dice loss, e.g. 0.0 1.0 2.0 2.0 (default: equal weights)",
+    )
+    parser.add_argument(
+        "--ce-class-weights",
+        nargs="+",
+        type=float,
+        default=None,
+        help="Class weights for Cross-Entropy loss, e.g. 0.2 1.0 2.0 2.0 (default: equal weights)",
+    )
     parser.add_argument("--sampler", choices=("none", "rare"), default="none")
     parser.add_argument("--rare-boost", type=float, default=2.0)
     parser.add_argument("--foreground-boost", type=float, default=1.3)
-    parser.add_argument("--ablation", choices=["M2", "M2-Plus", "M2-PLUS", "M2-PRO", "M2PRO", "M2-MAX", "M2MAX", "M3", "H-CMSPA", "HCMSPA"], default="M3")
+    parser.add_argument("--ablation", choices=["M2", "M2-Plus", "M2-PLUS", "M2-PRO", "M2PRO", "M2-MAX", "M2MAX", "M2-MAX-PRO", "M2MAXPRO", "M2-MAX-V2", "M2MAXV2", "M2-MAX-V4", "M2MAXV4", "M2-MAX-V5", "M2MAXV5", "M2-MAX-V6", "M2MAXV6", "M2-MAX-V7", "M2MAXV7", "M3", "H-CMSPA", "HCMSPA"], default="M3")
     parser.add_argument("--epochs", "--max_epochs", dest="max_epochs", type=int, default=300)
     parser.add_argument(
         "--batch-size",
@@ -128,6 +160,7 @@ def build_parser():
         help="complete state from this pipeline; keep original training settings",
     )
     parser.add_argument("--pretrained", default=None, help="explicit R50-ViT-B_16.npz encoder initialization")
+    parser.add_argument("--init-weights", default=None, help="checkpoint path to initialize full model weights before training")
     parser.add_argument(
         "--epochs-per-run",
         type=int,
@@ -160,10 +193,10 @@ def parse_args(argv=None):
         parser.error("img_size must be a multiple of 16 and >=32")
     if args.base_lr <= 0 or args.weight_decay < 0 or not 0 < args.val_fraction < 1:
         parser.error("Require lr>0, weight_decay>=0, 0<val_fraction<1")
-    for key in ("base_lr", "weight_decay", "val_fraction", "min_delta", "clip_grad", "ce_weight", "dice_weight", "aar_weight"):
+    for key in ("base_lr", "weight_decay", "val_fraction", "min_delta", "clip_grad", "ce_weight", "dice_weight", "aar_weight", "scar_weight"):
         if not math.isfinite(getattr(args, key)):
             parser.error(f"{key} must be finite")
-    for key in ("num_workers", "patience", "min_delta", "save_every", "epochs_per_run", "clip_grad", "ce_weight", "dice_weight", "aar_weight"):
+    for key in ("num_workers", "patience", "min_delta", "save_every", "epochs_per_run", "clip_grad", "ce_weight", "dice_weight", "aar_weight", "scar_weight"):
         if getattr(args, key) < 0:
             parser.error(f"{key} must be nonnegative")
     if args.ce_weight + args.dice_weight <= 0:
@@ -227,6 +260,14 @@ def main(argv=None):
     model = model_from_config(config, img_size=args.img_size, num_classes=4, ablation=args.ablation)
     if args.pretrained:
         model.load_pretrained_encoders(args.pretrained)
+    elif getattr(args, "init_weights", None):
+        ckpt = torch.load(args.init_weights, map_location="cpu", weights_only=False)
+        sd = ckpt["model"]
+        if hasattr(model.segmentation_head, "base_head") and "segmentation_head.0.weight" in sd:
+            sd["segmentation_head.base_head.weight"] = sd.pop("segmentation_head.0.weight")
+            sd["segmentation_head.base_head.bias"] = sd.pop("segmentation_head.0.bias")
+        missing, unexpected = model.load_state_dict(sd, strict=False)
+        print(f"Successfully loaded initial model weights from {args.init_weights} (missing: {len(missing)}, unexpected: {len(unexpected)})")
     return Trainer(model, args, output).fit()
 
 
