@@ -22,12 +22,16 @@ LABEL_ORDERS = {
 OFFICIAL_TEST_IDS_SHA256 = "3237b31411833cedcb3ecd86d36edae356bd3f880d3fcfd915066f1c850d9cbc"
 
 
-def lock_benchmark_data(data_root, list_dir, label_order):
+def lock_benchmark_data(data_root, list_dir, label_order, dataset_id="myops380"):
     """Validate MyoPS380 cohort and fingerprint cache bytes without changing data.
 
     Persist the returned record in the run/checkpoint. Resume/evaluation compare
     this record, so changing files in place cannot silently change a benchmark.
     """
+    if dataset_id == "myopspp_bc80":
+        return _lock_myopspp_data(data_root, list_dir, label_order)
+    if dataset_id != "myops380":
+        raise ValueError(f"Unknown benchmark dataset: {dataset_id}")
     if label_order == "auto":
         raise ValueError("Locked benchmark requires explicit legacy or canonical label order")
     order = resolve_label_order(label_order)
@@ -69,6 +73,57 @@ def lock_benchmark_data(data_root, list_dir, label_order):
             "canonical_class_names": list(CLASS_NAMES), "cache_sha256": digest.hexdigest(),
             "cache_files": len(files), "official_test_ids_sha256": fixed_hash,
             "patient_counts": {s: len(ids) for s, ids in patients.items()}}
+
+
+def _lock_myopspp_data(data_root, list_dir, label_order):
+    from training.dataset.benchmark_profiles import fixed_myopspp_splits, MYOPSPP_IDS
+
+    if label_order == "auto" or resolve_label_order(label_order) != CANONICAL_LABEL_ORDER:
+        raise ValueError("myopspp_bc80 requires explicit canonical labels")
+    root = Path(data_root)
+    metadata = root / "dataset_metadata.json"
+    info = json.loads(metadata.read_text(encoding="utf-8"))
+    if info.get("dataset_id") != "myopspp_bc80" or info.get("label_order") != CANONICAL_LABEL_ORDER:
+        raise ValueError("Cache belongs to a different dataset/profile or label convention")
+    if info.get("normalization") != "percentile" or info.get("spacing_unit") != "mm":
+        raise ValueError("myopspp_bc80 requires percentile normalization and mm geometry")
+    fixed = fixed_myopspp_splits()
+    if info.get("patients") != fixed or set(info.get("case_shapes", {})) != MYOPSPP_IDS:
+        raise ValueError("Cache cohort/splits differ from the fixed MyoPS++ benchmark")
+    splits = {s: read_split_names(list_dir, s) for s in ("train", "val", "val_vol", "test_vol")}
+    patients = validate_patient_splits({s: splits[s] for s in ("train", "val", "test_vol")})
+    for split in ("train", "val"):
+        expected = set()
+        for case in fixed[split]:
+            shape = info["case_shapes"][case]
+            if len(shape) != 3 or any(type(v) is not int or v <= 0 for v in shape):
+                raise ValueError(f"Invalid native shape for {case}")
+            expected.update(f"{case}_slice{i:03d}" for i in range(shape[2]))
+        if set(splits[split]) != expected:
+            raise ValueError(f"Incomplete or changed {split} slices for the fixed MyoPS++ patients")
+    if set(splits["val_vol"]) != set(fixed["val"]) or set(splits["test_vol"]) != set(fixed["test_vol"]):
+        raise ValueError("Validation/test patients differ from the fixed MyoPS++ manifests")
+    files = [metadata]
+    for modality in ("bSSFP", "LGE", "T2w"):
+        for folder, suffix, expected in (
+            ("train_npz", ".npz", set(splits["train"] + splits["val"])),
+            ("val_vol_h5", ".npy.h5", set(fixed["val"])),
+            ("test_vol_h5", ".npy.h5", set(fixed["test_vol"])),
+        ):
+            paths = list((root / modality / folder).glob("*" + suffix))
+            if {p.name[:-len(suffix)] for p in paths} != expected:
+                raise ValueError(f"Cache inventory differs from MyoPS++ manifests: {modality}/{folder}")
+            files.extend(paths)
+    digest = hashlib.sha256()
+    for path in sorted(files, key=lambda p: p.relative_to(root).as_posix()):
+        with path.open("rb") as stream:
+            file_hash = hashlib.file_digest(stream, "sha256").hexdigest()
+        digest.update(f"{path.relative_to(root).as_posix()}\0{file_hash}\n".encode())
+    return {"schema_version": 1, "dataset_id": "myopspp_bc80", "source_label_order": CANONICAL_LABEL_ORDER,
+            "canonical_class_names": list(CLASS_NAMES), "cache_sha256": digest.hexdigest(),
+            "cache_files": len(files), "patient_counts": {s: len(ids) for s, ids in patients.items()},
+            "split_ids_sha256": {s: hashlib.sha256(("\n".join(sorted(names)) + "\n").encode()).hexdigest()
+                                 for s, names in splits.items()}}
 
 
 def resolve_label_order(value):

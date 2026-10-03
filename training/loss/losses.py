@@ -7,6 +7,9 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+# Version 2 fixes weighted CE reduction and independent-stream inclusion semantics.
+LOSS_PROTOCOL_VERSION = 2
+
 
 class DiceLoss(nn.Module):
     """Per-image equally weighted class Dice with squared denominator.
@@ -59,6 +62,17 @@ class SegmentationLoss(nn.Module):
         ce_class_weights=None,
     ):
         super().__init__()
+        for name, value in (("ce_weight", ce_weight), ("dice_weight", dice_weight),
+                            ("aar_weight", aar_weight), ("scar_weight", scar_weight),
+                            ("wall_weight", wall_weight), ("inclusion_weight", inclusion_weight)):
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(f"{name} must be finite and nonnegative")
+        for name, values in (("dice_class_weights", dice_class_weights), ("ce_class_weights", ce_class_weights)):
+            if values is not None:
+                weights = torch.as_tensor(values, dtype=torch.float32)
+                if (weights.shape != (n_classes,) or not torch.isfinite(weights).all()
+                        or (weights < 0).any() or not torch.isfinite(weights.sum()) or weights.sum() <= 0):
+                    raise ValueError(f"{name} must have {n_classes} finite nonnegative weights with positive sum")
         self.ce_weight = ce_weight
         self.dice_weight = dice_weight
         self.aar_weight = aar_weight
@@ -77,11 +91,21 @@ class SegmentationLoss(nn.Module):
         else:
             wall_logits = None
             aar_stream_logits = None
+        if (self.wall_weight > 0 or self.inclusion_weight > 0) and wall_logits is None:
+            raise ValueError("Wall/inclusion auxiliary loss requires independent wall_logits (M2-Max V6/V7)")
+        # Keep auxiliary BCE, sigmoid and spatial reductions in float32 under AMP.
+        wall_logits = wall_logits.float() if wall_logits is not None else None
+        aar_stream_logits = aar_stream_logits.float() if aar_stream_logits is not None else None
 
         # 1. Cross-Entropy (with optional class weights)
         if self.ce_class_weights is not None:
             ce_w = torch.as_tensor(self.ce_class_weights, device=logits.device, dtype=torch.float32)
-            ce = F.cross_entropy(logits.float(), target.long(), weight=ce_w)
+            pixel_loss = F.cross_entropy(logits.float(), target.long(), weight=ce_w, reduction="none")
+            numerator = pixel_loss.flatten(1).sum(1)
+            denominator = ce_w[target.long()].flatten(1).sum(1)
+            # Per-image reduction preserves the trainer's sample-weighted accumulation.
+            # A slice containing only ignored (zero-weight) classes contributes zero CE.
+            ce = (numerator / denominator.masked_fill(denominator == 0, 1)).mean()
         else:
             ce = F.cross_entropy(logits.float(), target.long())
 
@@ -148,9 +172,11 @@ class SegmentationLoss(nn.Module):
         if self.inclusion_weight > 0.0:
             probs = logits.float().softmax(1)
             p_scar = probs[:, 3]
-            p_aar = probs[:, 2] + probs[:, 3]
-            p_myo = probs[:, 1] + p_aar
-            # Scar cannot exceed AAR, AAR cannot exceed Myocardium
+            p_aar = (aar_stream_logits.sigmoid()[:, 0] if aar_stream_logits is not None
+                     else probs[:, 2] + probs[:, 3])
+            p_myo = wall_logits.sigmoid()[:, 0]
+            # Independent anatomy/AAR streams can disagree with multiclass pathology.
+            # Summing nested classes alone would make this penalty identically zero.
             violation = F.relu(p_scar - p_aar) + 0.5 * F.relu(p_aar - p_myo)
             inclusion_loss = violation.mean()
         else:

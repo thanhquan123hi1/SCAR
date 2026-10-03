@@ -23,6 +23,64 @@ BENCHMARK_PROTOCOL = {
 }
 
 
+def protocol_for_dataset(dataset_id="myops380"):
+    if dataset_id == "myops380":
+        return BENCHMARK_PROTOCOL
+    if dataset_id != "myopspp_bc80":
+        raise ValueError(f"Unknown metric dataset profile: {dataset_id}")
+    return {k: v for k, v in dict(BENCHMARK_PROTOCOL,
+            id="myopspp_bc80_mm_v1", distance_unit="mm",
+            voxelspacing="native NIfTI spacing in mm, orthogonal grid").items() if not k.startswith("official_")}
+
+
+def dataset_rows(prediction, target, case, compute_distance=True, dataset_id="myops380", spacing=None):
+    if dataset_id == "myops380":
+        return benchmark_rows(prediction, target, case, compute_distance=compute_distance)
+    protocol = protocol_for_dataset(dataset_id)
+    spacing = np.asarray(spacing, dtype=float)
+    if spacing.shape != (3,) or not np.isfinite(spacing).all() or (spacing <= 0).any():
+        raise ValueError("MyoPS++ metrics require native positive mm spacing")
+    # Reuse canonical validation and overlap definitions, without importing the
+    # MyoPS380 author-specific empty-mask metrics into the new benchmark.
+    rows = benchmark_rows(prediction, target, case, compute_distance=False)
+    for row in rows:
+        ids = protocol["regions"][row["region"]]
+        physical = binary_metrics(np.isin(prediction, ids), np.isin(target, ids), spacing=spacing,
+                                  compute_distance=compute_distance)
+        for key in ("hd95_voxel", "asd_voxel", "official_dice", "official_hd95_voxel"):
+            row.pop(key)
+        row.update(physical, hd95_unit="mm", hd95_mm=physical["hd95"], asd_mm=physical["asd"])
+    return rows
+
+
+def summarize_dataset_rows(rows, dataset_id="myops380"):
+    if dataset_id == "myops380":
+        return summarize_rows(rows)
+    protocol = protocol_for_dataset(dataset_id)
+    identities = [(r["case"], r["region"]) for r in rows]
+    if len(identities) != len(set(identities)):
+        raise ValueError("Duplicate case/region rows would bias patient means")
+    for case in {r["case"] for r in rows}:
+        if {r["region"] for r in rows if r["case"] == case} != set(protocol["regions"]):
+            raise ValueError(f"Incomplete benchmark regions for {case}")
+    summary = {}
+    for name in protocol["regions"]:
+        subset = [r for r in rows if r["region"] == name]
+        region = {"cases": len(subset), "status_counts": dict(Counter(r["status"] for r in subset))}
+        for metric in ("dice", "iou", "precision", "recall", "hd95_mm", "asd_mm"):
+            values = [r[metric] for r in subset if r[metric] is not None]
+            if not all(np.isfinite(v) for v in values):
+                raise ValueError(f"Non-finite {metric}")
+            region[f"mean_{metric}"] = float(np.mean(values)) if values else None
+            region[f"{metric}_defined_cases"] = len(values)
+            region[f"{metric}_undefined_cases"] = len(subset) - len(values)
+        summary[name] = region
+    for metric in ("dice", "iou", "hd95_mm"):
+        values = [summary[name][f"mean_{metric}"] for name in ("scar", "edema")]
+        summary[f"avg_pathology_{metric}"] = float(np.mean(values)) if all(v is not None for v in values) else None
+    return summary
+
+
 def benchmark_rows(prediction, target, case, compute_distance=True):
     """Two evaluators on identical canonical HWD predictions; never mutate masks."""
     prediction, target = np.asarray(prediction), np.asarray(target)

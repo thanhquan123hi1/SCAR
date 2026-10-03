@@ -273,8 +273,8 @@ class CMSPANet(nn.Module):
 
         if zero_head:
             if hasattr(self.segmentation_head, "base_head"):
-                nn.init.zeros_(self.segmentation_head.base_head[-1].weight)
-                nn.init.zeros_(self.segmentation_head.base_head[-1].bias)
+                nn.init.zeros_(self.segmentation_head.base_head.weight)
+                nn.init.zeros_(self.segmentation_head.base_head.bias)
             else:
                 nn.init.zeros_(self.segmentation_head[0].weight)
                 nn.init.zeros_(self.segmentation_head[0].bias)
@@ -325,7 +325,12 @@ class CMSPANet(nn.Module):
         if any(size < 32 or size % 16 for size in cine.shape[2:]):
             raise ValueError("Input H and W must be >=32 and divisible by 16")
 
-    def forward(self, cine: torch.Tensor, psir: torch.Tensor, t2w: torch.Tensor) -> torch.Tensor:
+    def forward_for_loss(self, cine: torch.Tensor, psir: torch.Tensor, t2w: torch.Tensor):
+        """Expose auxiliary streams for loss in train/eval without changing module mode."""
+        return self(cine, psir, t2w, return_aux=True)
+
+    def forward(self, cine: torch.Tensor, psir: torch.Tensor, t2w: torch.Tensor,
+                return_aux: bool = False) -> torch.Tensor | dict[str, torch.Tensor]:
         self._validate_inputs(cine, psir, t2w)
         images = [image.repeat(1, 3, 1, 1) if image.shape[1] == 1 else image
                   for image in (cine, psir, t2w)]
@@ -345,12 +350,12 @@ class CMSPANet(nn.Module):
         dec_out = self.decoder(fused, skips)
         if self.ablation in {"M2-MAX-V7", "M2MAXV7"}:
             coupled_logits, wall_logits, aar_logits = self.segmentation_head(dec_out)
-            if self.training:
+            if self.training or return_aux:
                 return {"logits": coupled_logits, "wall_logits": wall_logits, "aar_logits": aar_logits}
             return coupled_logits
         elif self.ablation in {"M2-MAX-V6", "M2MAXV6"}:
             coupled_logits, wall_logits = self.segmentation_head(dec_out)
-            if self.training:
+            if self.training or return_aux:
                 return {"logits": coupled_logits, "wall_logits": wall_logits}
             return coupled_logits
         return self.segmentation_head(dec_out)

@@ -25,22 +25,35 @@ from training.dataset.myops_dataset import (
     RandomGenerator,
     ResizeGenerator,
 )
-from training.loss.losses import SegmentationLoss
+from training.loss.losses import LOSS_PROTOCOL_VERSION, SegmentationLoss
 from training.metrics.confusion_meter import ConfusionMeter
 from training.dataset.sampler import build_rare_class_sampler
 from training.predict import predict_volume
 from training.run_layout import RunLayout
-from training.metrics.surface_distance import BENCHMARK_PROTOCOL, benchmark_rows, summarize_rows
+from training.metrics.surface_distance import protocol_for_dataset, dataset_rows, summarize_dataset_rows
 
 
-def validate_volumes(model, dataset, img_size, batch_size, device, amp_dtype):
+def validate_volumes(model, dataset, img_size, batch_size, device, amp_dtype, dataset_id="myops380"):
     """Selection uses native-grid full patients, never pixel-pooled slice scores."""
     rows = []
     for sample in dataset:
+        if dataset_id == "myopspp_bc80" and not sample["has_geometry"]:
+            raise ValueError("MyoPS++ validation requires native mm geometry")
         prediction = predict_volume(model, [sample[k] for k in ("image", "image1", "image2")],
                                     img_size, batch_size, device, amp_dtype)
-        rows.extend(benchmark_rows(prediction, sample["label"], sample["case_name"], compute_distance=False))
-    return summarize_rows(rows)
+        rows.extend(dataset_rows(prediction, sample["label"], sample["case_name"], compute_distance=False,
+                                 dataset_id=dataset_id, spacing=sample.get("spacing")))
+    return summarize_dataset_rows(rows, dataset_id=dataset_id)
+
+
+def inclusive_validation_score(metrics):
+    values = [metrics.get(region, {}).get("mean_dice") for region in ("scar", "edema_inclusive")]
+    if any(value is None for value in values):
+        return None
+    score = float(np.mean(values))
+    if not math.isfinite(score) or not 0 <= score <= 1:
+        raise ValueError("Invalid inclusive validation Dice")
+    return score
 
 
 def seed_everything(seed: int, deterministic: bool = True):
@@ -187,6 +200,20 @@ def append_metrics_csv(path, record):
         writer.writerow(record)
 
 
+def _validate_resume_loss_config(saved_args: dict, args, saved_version: int | None = None) -> None:
+    """Missing auxiliary settings in older checkpoints mean disabled/default."""
+    for key in ("aar_weight", "scar_weight", "wall_weight", "inclusion_weight",
+                "dice_class_weights", "ce_class_weights"):
+        default = None if key.endswith("class_weights") else 0.0
+        previous, current = saved_args.get(key, default), getattr(args, key, default)
+        if previous != current:
+            raise ValueError(f"Resume changes {key}: {previous} -> {current}. Use the original training settings.")
+    if saved_version is not None and saved_version != LOSS_PROTOCOL_VERSION:
+        if getattr(args, "inclusion_weight", 0.0) > 0 or getattr(args, "ce_class_weights", None) is not None:
+            raise ValueError("Resume loss protocol differs: weighted CE/inclusion semantics were corrected. "
+                             "Start a new run with --init-weights to use the updated objective.")
+
+
 def _configs_equal(c1: Any, c2: Any) -> bool:
     """Recursively compare configurations normalizing sequences (tuples and lists)."""
     if isinstance(c1, dict) and isinstance(c2, dict):
@@ -238,7 +265,7 @@ def run_epoch(
             target = batch["label"].to(device, non_blocking=loader.pin_memory)
             batch_count = target.shape[0]
             with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=amp_dtype is not None):
-                output = model(*images)
+                output = getattr(model, "forward_for_loss", model)(*images)
                 losses = criterion(output, target)
                 logits = output["logits"] if isinstance(output, dict) else output
             if not torch.stack([torch.isfinite(v) for v in losses.values()]).all():
@@ -377,9 +404,11 @@ class Trainer:
 
 
 def trainer_Myops(args, model, snapshot_path):
+    dataset_id = getattr(args, "dataset_id", "myops380")
+    benchmark_protocol = protocol_for_dataset(dataset_id)
     resume_checkpoint = load_checkpoint(args.resume) if args.resume else None
-    if resume_checkpoint is not None and resume_checkpoint.get("benchmark_protocol") != BENCHMARK_PROTOCOL:
-        raise ValueError("Cannot resume a checkpoint selected under an older metric protocol; start a new Phase 1 run.")
+    if resume_checkpoint is not None and resume_checkpoint.get("benchmark_protocol") != benchmark_protocol:
+        raise ValueError("Cannot resume a checkpoint from a different dataset/metric protocol")
     directory = Path(snapshot_path)
     directory.mkdir(parents=True, exist_ok=True)
     layout = (RunLayout.from_checkpoint(args.resume) if args.resume else
@@ -398,7 +427,7 @@ def trainer_Myops(args, model, snapshot_path):
         for name in ("train", "val", "val_vol", "test_vol")
         if (split_dir / f"{name}.txt").is_file()
     }
-    benchmark_data = lock_benchmark_data(args.data_root, split_dir, args.label_order)
+    benchmark_data = lock_benchmark_data(args.data_root, split_dir, args.label_order, dataset_id=dataset_id)
     roots = [str(Path(args.data_root) / modality / "train_npz") for modality in ("bSSFP", "LGE", "T2w")]
     datasets = [
         MyopsDataset(
@@ -448,6 +477,7 @@ def trainer_Myops(args, model, snapshot_path):
     scaler = torch.amp.GradScaler("cuda", enabled=amp_dtype == torch.float16)
     start_epoch, global_step, best_score, best_epoch, bad_epochs = 0, 0, -float("inf"), -1, 0
     patience_score = -float("inf")
+    best_inclusive_score = -float("inf")
     model_config = model.config.to_dict()
     metadata_path = Path(args.data_root) / "dataset_metadata.json"
     data_provenance = {}
@@ -484,10 +514,7 @@ def trainer_Myops(args, model, snapshot_path):
                 raise ValueError(
                     f"Resume changes {key}: {checkpoint['args'][key]} -> {vars(args)[key]}. Use the original training settings."
                 )
-        if "aar_weight" in checkpoint["args"] and checkpoint["args"]["aar_weight"] != getattr(args, "aar_weight", 0.0):
-            raise ValueError(
-                f"Resume changes aar_weight: {checkpoint['args']['aar_weight']} -> {getattr(args, 'aar_weight', 0.0)}. Use the original training settings."
-            )
+        _validate_resume_loss_config(checkpoint["args"], args, checkpoint.get("loss_protocol_version", 1))
         if not _configs_equal(checkpoint["model_config"], model_config) or checkpoint["split_hashes"] != split_hashes:
             raise ValueError("Resume architecture or train/val/test manifests differ from checkpoint.")
         if checkpoint["total_updates"] != total_updates:
@@ -504,8 +531,25 @@ def trainer_Myops(args, model, snapshot_path):
             checkpoint["best_epoch"],
             checkpoint["bad_epochs"],
         )
-        if args.patience == 0 or (args.patience and bad_epochs >= args.patience):
+        if args.patience == 0:
             bad_epochs = 0
+        stored_inclusive = checkpoint.get("best_inclusive_score")
+        if stored_inclusive is not None:
+            if not math.isfinite(stored_inclusive) or not 0 <= stored_inclusive <= 1:
+                raise ValueError("Invalid saved best inclusive score")
+            best_inclusive_score = stored_inclusive
+        else:
+            # Backward compatibility: old checkpoints did not persist this monitor.
+            inclusive_path = layout.checkpoints / "best_inclusive.pth"
+            if inclusive_path.is_file():
+                inclusive_checkpoint = load_checkpoint(inclusive_path)
+                if (inclusive_checkpoint.get("benchmark_data") != benchmark_data or
+                        inclusive_checkpoint.get("benchmark_protocol") != benchmark_protocol):
+                    raise ValueError("Best inclusive checkpoint belongs to a different benchmark")
+                recovered = inclusive_validation_score(inclusive_checkpoint.get("validation_volume_metrics", {}))
+                if recovered is not None:
+                    best_inclusive_score = recovered
+                del inclusive_checkpoint
         patience_score = checkpoint["patience_score"]
         generator.set_state(checkpoint["loader_rng"])
         restore_rng(checkpoint["rng"])
@@ -514,7 +558,8 @@ def trainer_Myops(args, model, snapshot_path):
         del resume_checkpoint
 
     config_record = dict(
-        benchmark_protocol=BENCHMARK_PROTOCOL,
+        loss_protocol_version=LOSS_PROTOCOL_VERSION,
+        benchmark_protocol=benchmark_protocol,
         benchmark_data=benchmark_data,
         args=vars(args),
         model_config=model_config,
@@ -564,7 +609,6 @@ def trainer_Myops(args, model, snapshot_path):
         except ImportError:
             logger.warning("TensorBoard unavailable; CSV, JSONL and text logging remain enabled.")
 
-    best_inclusive_score = 0.0
     stop_epoch = min(args.max_epochs, start_epoch + args.epochs_per_run) if args.epochs_per_run else args.max_epochs
     try:
         if args.patience and bad_epochs >= args.patience:
@@ -602,7 +646,7 @@ def trainer_Myops(args, model, snapshot_path):
             )
             volume_started = time.perf_counter()
             volume_metrics = validate_volumes(model, validation_volumes, args.img_size,
-                                               args.batch_size, device, amp_dtype)
+                                               args.batch_size, device, amp_dtype, dataset_id=dataset_id)
             volume_seconds = time.perf_counter() - volume_started
             score = volume_metrics["avg_pathology_dice"]
             if score is None:
@@ -616,6 +660,10 @@ def trainer_Myops(args, model, snapshot_path):
                 patience_score = score
             if improved:
                 best_score, best_epoch = score, epoch
+            score_inclusive = inclusive_validation_score(volume_metrics)
+            inclusive_improved = score_inclusive is not None and score_inclusive > best_inclusive_score
+            if inclusive_improved:
+                best_inclusive_score = score_inclusive
             early_stop = bool(args.patience and bad_epochs >= args.patience)
             record = {
                 "epoch": epoch + 1,
@@ -628,6 +676,7 @@ def trainer_Myops(args, model, snapshot_path):
                 "early_stop": early_stop,
                 "epoch_compute_seconds": time.perf_counter() - epoch_started,
                 "val/volume_seconds": volume_seconds,
+                "val/avg_pathology_inclusive_dice": score_inclusive,
             }
             record.update({f"train/{key}": value for key, value in train_metrics.items()})
             record.update({f"val/{key}": value for key, value in val_metrics.items()})
@@ -641,7 +690,8 @@ def trainer_Myops(args, model, snapshot_path):
                 record[f"val/defined_cases/{region}"] = volume_metrics[region]["dice_defined_cases"]
                 record[f"val/undefined_cases/{region}"] = volume_metrics[region]["dice_undefined_cases"]
             payload = dict(
-                benchmark_protocol=BENCHMARK_PROTOCOL,
+                loss_protocol_version=LOSS_PROTOCOL_VERSION,
+                benchmark_protocol=benchmark_protocol,
                 benchmark_data=benchmark_data,
                 validation_volume_metrics=volume_metrics,
                 format_version=1,
@@ -656,6 +706,7 @@ def trainer_Myops(args, model, snapshot_path):
                 total_updates=total_updates,
                 best_score=best_score,
                 best_epoch=best_epoch,
+                best_inclusive_score=best_inclusive_score if math.isfinite(best_inclusive_score) else None,
                 bad_epochs=bad_epochs,
                 patience_score=patience_score,
                 args=vars(args),
@@ -673,9 +724,7 @@ def trainer_Myops(args, model, snapshot_path):
                     score,
                     layout.checkpoints / "best.pth",
                 )
-            score_inclusive = (volume_metrics["scar"]["mean_dice"] + volume_metrics["edema_inclusive"]["mean_dice"]) / 2.0
-            if score_inclusive > best_inclusive_score:
-                best_inclusive_score = score_inclusive
+            if inclusive_improved:
                 atomic_checkpoint(layout.checkpoints / "best_inclusive.pth", payload)
                 logger.info(
                     "New best inclusive checkpoint: epoch %d, (Scar+EdemaInc)/2 %.5f -> %s",

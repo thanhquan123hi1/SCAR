@@ -22,7 +22,7 @@ from training.config.config_utils import (
 from training.models.cmspa_net import CONFIGS, CMSPANet
 from training.models import model_from_config
 from training.run_layout import RunLayout
-from training.trainer.trainer import Trainer, seed_everything
+from training.trainer.trainer import Trainer, load_checkpoint, seed_everything
 
 
 def build_parser():
@@ -139,6 +139,8 @@ def build_parser():
         help="held-out TRAIN patients if val.txt is absent",
     )
     parser.add_argument("--label-order", choices=["legacy", "canonical"], default="legacy")
+    parser.add_argument("--dataset", dest="dataset_id", choices=["myops380", "myopspp_bc80"], default="myops380",
+                        help="Named benchmark; MyoPS++ selects separate cache/lists/output defaults")
     parser.add_argument(
         "--patience",
         type=int,
@@ -175,6 +177,7 @@ def parse_args(argv=None):
     pre_parser = argparse.ArgumentParser(add_help=False)
     pre_parser.add_argument("--config", default="training/config/models/cmspa_net.yaml")
     pre_parser.add_argument("--base-config", default=str(PROJECT_ROOT / "training/config/base.yaml"))
+    pre_parser.add_argument("--dataset", dest="dataset_id", choices=["myops380", "myopspp_bc80"], default=None)
     pre_args, _ = pre_parser.parse_known_args(argv)
     config_name = pre_args.config
     if config_name in CONFIGS:
@@ -182,7 +185,7 @@ def parse_args(argv=None):
     config_path = Path(config_name)
     if not config_path.is_absolute() and (PROJECT_ROOT / config_path).is_file():
         config_path = PROJECT_ROOT / config_path
-    merged = load_merged_config(config_path, pre_args.base_config)
+    merged = load_merged_config(config_path, pre_args.base_config, dataset_id=pre_args.dataset_id)
     parser = build_parser()
     parser.set_defaults(**coerce_config_to_parser_types(flatten_config(merged), parser))
     args = parser.parse_args(argv)
@@ -193,18 +196,27 @@ def parse_args(argv=None):
         parser.error("img_size must be a multiple of 16 and >=32")
     if args.base_lr <= 0 or args.weight_decay < 0 or not 0 < args.val_fraction < 1:
         parser.error("Require lr>0, weight_decay>=0, 0<val_fraction<1")
-    for key in ("base_lr", "weight_decay", "val_fraction", "min_delta", "clip_grad", "ce_weight", "dice_weight", "aar_weight", "scar_weight"):
+    for key in ("base_lr", "weight_decay", "val_fraction", "min_delta", "clip_grad", "ce_weight", "dice_weight", "aar_weight", "scar_weight", "wall_weight", "inclusion_weight"):
         if not math.isfinite(getattr(args, key)):
             parser.error(f"{key} must be finite")
-    for key in ("num_workers", "patience", "min_delta", "save_every", "epochs_per_run", "clip_grad", "ce_weight", "dice_weight", "aar_weight", "scar_weight"):
+    for key in ("num_workers", "patience", "min_delta", "save_every", "epochs_per_run", "clip_grad", "ce_weight", "dice_weight", "aar_weight", "scar_weight", "wall_weight", "inclusion_weight"):
         if getattr(args, key) < 0:
             parser.error(f"{key} must be nonnegative")
     if args.ce_weight + args.dice_weight <= 0:
         parser.error("At least one loss weight must be positive")
+    if (args.wall_weight > 0 or args.inclusion_weight > 0) and args.ablation.upper() not in {
+        "M2-MAX-V6", "M2MAXV6", "M2-MAX-V7", "M2MAXV7"
+    }:
+        parser.error("Wall/inclusion loss requires M2-Max V6 or V7 with an independent anatomy head")
+    for key in ("dice_class_weights", "ce_class_weights"):
+        weights = getattr(args, key)
+        if weights is not None and (len(weights) != 4 or any(not math.isfinite(v) or v < 0 for v in weights)
+                                    or not math.isfinite(sum(weights)) or sum(weights) <= 0):
+            parser.error(f"{key} requires four finite nonnegative weights with positive sum")
     if any(not math.isfinite(v) or v <= 0 for v in (args.rare_boost, args.foreground_boost)):
         parser.error("Sampler weights must be finite and positive")
-    if args.resume and args.pretrained:
-        parser.error("--resume and --pretrained are mutually exclusive")
+    if sum(bool(v) for v in (args.resume, args.pretrained, args.init_weights)) > 1:
+        parser.error("--resume, --pretrained and --init-weights are mutually exclusive")
     if args.run_id and (args.run_id in {".", ".."} or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-" for c in args.run_id)):
         parser.error("run-id may contain only letters, digits, dots, underscores, and hyphens")
     if args.run_id and args.output_dir not in (None, "auto"):
@@ -212,6 +224,19 @@ def parse_args(argv=None):
     if merged["model"].get("num_classes", 4) != 4:
         parser.error("This data contract requires four canonical classes")
     return args, merged
+
+
+def _load_initial_weights(model, path):
+    """Warm-start a compatible SCAR checkpoint with canonical output semantics."""
+    checkpoint = load_checkpoint(path)
+    state = dict(checkpoint["model"])
+    if hasattr(model.segmentation_head, "base_head") and "segmentation_head.0.weight" in state:
+        state["segmentation_head.base_head.weight"] = state.pop("segmentation_head.0.weight")
+        state["segmentation_head.base_head.bias"] = state.pop("segmentation_head.0.bias")
+    missing, unexpected = model.load_state_dict(state, strict=False)
+    print(f"Initialized from {path}: {len(model.state_dict()) - len(missing)} tensors loaded, "
+          f"{len(missing)} new/missing, {len(unexpected)} unused source tensors")
+    return missing, unexpected
 
 
 def main(argv=None):
@@ -261,13 +286,7 @@ def main(argv=None):
     if args.pretrained:
         model.load_pretrained_encoders(args.pretrained)
     elif getattr(args, "init_weights", None):
-        ckpt = torch.load(args.init_weights, map_location="cpu", weights_only=False)
-        sd = ckpt["model"]
-        if hasattr(model.segmentation_head, "base_head") and "segmentation_head.0.weight" in sd:
-            sd["segmentation_head.base_head.weight"] = sd.pop("segmentation_head.0.weight")
-            sd["segmentation_head.base_head.bias"] = sd.pop("segmentation_head.0.bias")
-        missing, unexpected = model.load_state_dict(sd, strict=False)
-        print(f"Successfully loaded initial model weights from {args.init_weights} (missing: {len(missing)}, unexpected: {len(unexpected)})")
+        _load_initial_weights(model, args.init_weights)
     return Trainer(model, args, output).fit()
 
 

@@ -28,6 +28,7 @@ Mô hình chủ lực **CMSPA-Net (M3)** kết hợp **3 encoder ResNetV2 độc
 ---
 
 ## Mục lục
+- [Benchmark MyoPS++ riêng](preprocessing/MYOPSPP.md)
 - [Chạy nhanh trên Google Colab](#chạy-nhanh-trên-google-colab)
 - [Kiến trúc Mô hình CMSPA-Net (M3)](#kiến-trúc-mô-hình-cmspa-net-m3)
 - [Các cấu hình nghiên cứu (Ablation Studies M2, M2-Plus, M3)](#các-cấu-hình-nghiên-cứu-ablation-studies-m2-m2-plus-m3)
@@ -41,6 +42,12 @@ Mô hình chủ lực **CMSPA-Net (M3)** kết hợp **3 encoder ResNetV2 độc
 ---
 
 ## Chạy nhanh trên Google Colab
+
+**MyoPS++:** repo hỗ trợ benchmark riêng `myopspp_bc80` với 80 ca CenterB/CenterC đủ
+C0/LGE/T2, split patient-level **51 train / 13 val / 16 test**. Xem
+[chuẩn bị dữ liệu, train, resume và test](preprocessing/MYOPSPP.md).
+Dùng `python train.py --dataset myopspp_bc80` để chọn cache/config/output riêng.
+MyoPS380 và notebook Colab hiện có tiếp tục dùng protocol mặc định.
 
 Bạn có thể chạy toàn bộ quy trình từ tải dữ liệu, tiền xử lý, huấn luyện M3 đến đánh giá volume 3D chỉ với một cú nhấp chuột:
 
@@ -138,7 +145,11 @@ $g_F$ là Conv 1×1 → BN → ReLU, đầu ra 512 kênh ở cấu hình mặc �
 
 ---
 
-Loss AAR là một thành phần tùy chọn của `SegmentationLoss`. Hệ số mặc định hiện tại là `aar_weight=0.0`; trainer chưa truyền hệ số AAR từ YAML/CLI. Chọn config M2-Max không tự bật AAR. Cần ghi rõ loss thực tế khi báo cáo đóng góp kiến trúc và loss.
+Repo hỗ trợ thêm các config `m2_max_pro.yaml`, `m2_max_v2.yaml` đến `m2_max_v7.yaml`; config V3 dùng kiến trúc V2. Các config model dùng chung pipeline với MyoPS380 hoặc `--dataset myopspp_bc80`.
+
+Loss phụ AAR, scar, wall và inclusion mặc định đều có hệ số `0.0`. Có thể đặt qua CLI (`--aar-weight`, `--scar-weight`, `--wall-weight`, `--inclusion-weight`) hoặc YAML (`loss.aar_weight`, `loss.scar_weight`, `loss.wall_weight`, `loss.inclusion_weight`). Wall/inclusion yêu cầu head độc lập của V6/V7; inclusion so sánh scar/AAR với các stream AAR/wall độc lập. `loss.dice_class_weights` và `loss.ce_class_weights` là danh sách bốn trọng số theo thứ tự background, normal myocardium, edema, scar. Chọn config model không tự bật loss phụ.
+
+Resume yêu cầu giữ nguyên toàn bộ hệ số loss và trọng số class. Checkpoint cũ dùng weighted CE hoặc inclusion trước khi sửa công thức không được nối tiếp âm thầm với objective mới; dùng `--init-weights` (hoặc `train.init_weights`) để bắt đầu run mới nếu cần chuyển weights. Checkpoint khởi tạo phải có quy ước class canonical của SCAR. `--init-weights`, `--pretrained` và `--resume` loại trừ nhau. Cần ghi rõ loss thực tế khi báo cáo đóng góp kiến trúc và loss.
 
 ## Kết quả lịch sử cần đánh giá lại (MyoPS-380 Test Set)
 
@@ -286,7 +297,7 @@ Train validation, test và prediction dùng chung `predict_volume`: mỗi batch 
 
 `metrics.json` ghi `inference_protocol.id=single_pass_argmax_v1`, số forward mỗi batch, quy tắc resize/argmax và `mask_processing=none`; `test.log` cũng ghi chế độ inference. Augmentation chỉ áp dụng trên train. SkipGateFusion/SE bên trong M2-Max vẫn là các thành phần được học của kiến trúc.
 
-Logic chọn `best.pth`, `best_inclusive.pth`, resume và early stopping được giữ nguyên. Thay đổi này không sửa lỗi reset điểm inclusive khi resume; cần xử lý riêng trước khi dựa vào checkpoint đó để công bố.
+Logic chọn `best.pth`, `best_inclusive.pth`, resume và early stopping dùng điểm validation đã khóa. Điểm inclusive tốt nhất được lưu/khôi phục khi resume; checkpoint cũ được đọc điểm từ `best_inclusive.pth` nếu cần, để lượt validation kém hơn không ghi đè best cũ.
 
 ### Điều kiện so sánh với I-MMSeg và nnU-Net
 

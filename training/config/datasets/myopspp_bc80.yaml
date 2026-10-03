@@ -1,0 +1,8 @@
+# Independent complete-modality cohort. Split seed is fixed in patients.json.
+data:
+  dataset_id: myopspp_bc80
+  data_root: data/myopspp_bc80/cache
+  list_dir: data/myopspp_bc80/cache/lists
+  label_order: canonical
+outputs:
+  run_root: outputs/myopspp_bc80/runs

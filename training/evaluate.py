@@ -20,7 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from training.dataset.data_contract import CLASS_NAMES, patient_id, read_split_names, lock_benchmark_data, resolve_label_order
 from training.dataset.myops_dataset import MyopsDataset
 from training.predict import predict_volume
-from training.metrics.surface_distance import BENCHMARK_PROTOCOL, benchmark_rows, summarize_rows
+from training.metrics.surface_distance import protocol_for_dataset, dataset_rows, summarize_dataset_rows
 from training.models import model_from_config
 from training.run_layout import RunLayout
 from training.evaluation_logging import evaluation_logger
@@ -51,6 +51,8 @@ def build_parser():
     )
     parser.add_argument("--save-predictions", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--cpu-threads", type=int, default=4)
+    parser.add_argument("--dataset", choices=["myops380", "myopspp_bc80"], default=None,
+                        help="Optional identity check; defaults to checkpoint dataset")
     return parser
 
 
@@ -60,8 +62,13 @@ def main(argv=None):
         raise ValueError("batch-size and cpu-threads must be positive")
     torch.set_num_threads(args.cpu_threads)
     checkpoint = load_checkpoint(args.checkpoint)
-    if checkpoint.get("benchmark_protocol") != BENCHMARK_PROTOCOL or "benchmark_data" not in checkpoint:
-        raise ValueError("Checkpoint predates the locked voxel benchmark protocol; start a new Phase 1 run.")
+    dataset_id = checkpoint["args"].get("dataset_id", "myops380")
+    if args.dataset is not None and args.dataset != dataset_id:
+        raise ValueError("Evaluation dataset differs from the checkpoint benchmark")
+    benchmark_protocol = protocol_for_dataset(dataset_id)
+    distance_unit = benchmark_protocol["distance_unit"]
+    if checkpoint.get("benchmark_protocol") != benchmark_protocol or "benchmark_data" not in checkpoint:
+        raise ValueError("Checkpoint dataset/metric protocol is incompatible with this benchmark")
     label_order = args.label_order or checkpoint["args"]["label_order"]
     if resolve_label_order(label_order) != checkpoint["benchmark_data"]["source_label_order"]:
         raise ValueError("Evaluation label order differs from the locked training convention")
@@ -98,7 +105,7 @@ def main(argv=None):
     saved_ids = set(read_split_names(saved_splits, args.split))
     if set(read_split_names(list_dir, args.split)) != saved_ids:
         raise ValueError("Evaluation patients must exactly match the saved split; subsets are not a locked benchmark")
-    data_lock = lock_benchmark_data(args.data_root, saved_splits, label_order)
+    data_lock = lock_benchmark_data(args.data_root, saved_splits, label_order, dataset_id=dataset_id)
     if data_lock != checkpoint["benchmark_data"]:
         raise ValueError("Cache bytes or label convention changed since training")
     if output.exists() and any(output.iterdir()):
@@ -118,6 +125,8 @@ def main(argv=None):
         rows, total_seconds, total_slices = [], 0.0, 0
         for sample in dataset:
             case = sample["case_name"]
+            if dataset_id == "myopspp_bc80" and not sample["has_geometry"]:
+                raise ValueError(f"{case}: MyoPS++ evaluation requires native mm geometry")
             images = [sample[k] for k in ("image", "image1", "image2")]
             if device.type == "cuda":
                 torch.cuda.synchronize(device)
@@ -136,7 +145,7 @@ def main(argv=None):
             total_seconds += elapsed
             total_slices += prediction.shape[2]
             target = np.asarray(sample["label"])
-            case_rows = benchmark_rows(prediction, target, case)
+            case_rows = dataset_rows(prediction, target, case, dataset_id=dataset_id, spacing=sample.get("spacing"))
             for row in case_rows:
                 row["inference_seconds"] = elapsed
             rows.extend(case_rows)
@@ -148,7 +157,7 @@ def main(argv=None):
                     spacing=np.asarray(sample["spacing"]),
                     affine=np.asarray(sample["affine"]),
                     spacing_unit=sample["spacing_unit"],
-                    metric_distance_unit="voxel",
+                    metric_distance_unit=distance_unit,
                 )
                 if sample.get("has_affine", False):
                     import nibabel as nib
@@ -157,19 +166,19 @@ def main(argv=None):
                     if sample.get("spacing_unit") == "mm":
                         nifti.header.set_xyzt_units("mm")
                     nib.save(nifti, output / f"{case}_pred.nii.gz")
-            logger.info("%s: %d slices, %.3fs, HD95 unit=voxel",
-                        case, prediction.shape[2], elapsed)
+            logger.info("%s: %d slices, %.3fs, HD95 unit=%s",
+                        case, prediction.shape[2], elapsed, distance_unit)
             for row in case_rows:
                 logger.info("%s | %s | Dice=%s IoU=%s Precision=%s Recall=%s HD95=%s ASD=%s",
                             case, row["region"], row["dice"], row["iou"], row["precision"],
-                            row["recall"], row["hd95_voxel"], row["asd_voxel"])
+                            row["recall"], row[f"hd95_{distance_unit}"], row[f"asd_{distance_unit}"])
         if not rows:
             raise ValueError("No evaluation cases.")
         with (output / "per_case.csv").open("w", newline="", encoding="utf-8") as stream:
             writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
             writer.writeheader()
             writer.writerows(rows)
-        summary = summarize_rows(rows)
+        summary = summarize_dataset_rows(rows, dataset_id=dataset_id)
         summary.update(
             checkpoint=str(checkpoint_path),
             checkpoint_epoch=checkpoint["epoch"] + 1,
@@ -180,7 +189,8 @@ def main(argv=None):
             inference_seconds=total_seconds,
             inference_slices_per_second=total_slices / total_seconds,
             timing_note="Includes transfer and resizing, excludes disk I/O/metrics; first case includes warmup.",
-            benchmark_protocol=BENCHMARK_PROTOCOL,
+            benchmark_protocol=benchmark_protocol,
+            dataset_id=dataset_id,
             inference_protocol={
                 "id": "single_pass_argmax_v1",
                 "forward_passes_per_batch": 1,
@@ -192,7 +202,9 @@ def main(argv=None):
             },
             benchmark_data=data_lock,
             split_hashes=checkpoint["split_hashes"],
-            hd95_note="All distances are voxel distances (unit grid), never mm. Primary means exclude undefined surfaces; inspect counts. Official reproduction is separately named and retains the upstream empty-mask behavior.",
+            hd95_note=("All distances are voxel distances (unit grid), never mm. Primary means exclude undefined surfaces; inspect counts. Official reproduction is separately named and retains the upstream empty-mask behavior."
+                       if distance_unit == "voxel" else
+                       "Distances use native orthogonal-grid spacing in mm. Means exclude undefined surfaces; inspect defined/undefined counts. No author-specific empty-mask reproduction metric."),
             device=str(device),
             amp_dtype=str(amp_dtype),
         )
