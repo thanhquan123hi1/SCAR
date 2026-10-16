@@ -1,0 +1,138 @@
+#!/bin/bash
+# ==============================================================================
+# Script cài đặt môi trường cho SCAR (CMSPA-Net) trên Google Colab
+# Repository: https://github.com/thanhquan123hi1/SCAR.git
+# ==============================================================================
+
+set -e
+
+echo "=== [1/7] Kiểm tra và Kích hoạt GPU NVIDIA ==="
+cd /content
+
+# Tự động liên kết thư viện driver NVIDIA nếu có trên Colab (/usr/lib64-nvidia)
+if [ -d "/usr/lib64-nvidia" ]; then
+    if ! grep -q "/usr/lib64-nvidia" /etc/ld.so.conf.d/nvidia.conf 2>/dev/null; then
+        echo "/usr/lib64-nvidia" >> /etc/ld.so.conf.d/nvidia.conf
+        ldconfig 2>/dev/null || true
+    fi
+    export LD_LIBRARY_PATH=/usr/lib64-nvidia:${LD_LIBRARY_PATH}
+fi
+if ! grep -q "/usr/lib64-nvidia" /root/.bashrc 2>/dev/null; then
+    echo 'export LD_LIBRARY_PATH=/usr/lib64-nvidia:$LD_LIBRARY_PATH' >> /root/.bashrc
+fi
+
+if ! command -v nvidia-smi &> /dev/null; then
+    echo "⚠️ CẢNH BÁO: Chưa tìm thấy NVIDIA GPU. Hãy kiểm tra lại Runtime > Change runtime type > GPU trên Colab!"
+else
+    nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
+fi
+
+echo "=== [2/7] Clone Repository SCAR ==="
+if [ ! -d "/content/SCAR" ]; then
+    git clone https://github.com/thanhquan123hi1/SCAR.git /content/SCAR
+else
+    echo "Thư mục /content/SCAR đã tồn tại. Tiến hành cập nhật..."
+    cd /content/SCAR && git pull origin main || true
+fi
+cd /content/SCAR
+
+echo "=== [3/7] Cài đặt Dependencies cho SCAR ==="
+python3 -m pip install --upgrade pip
+python3 -m pip install -r requirements.txt gdown
+
+echo "=== [4/7] Chuẩn bị Pretrained Checkpoint (R50-ViT-B_16.npz) ==="
+mkdir -p /content/SCAR/model/vit_checkpoint/imagenet21k
+CKPT_FILE="/content/SCAR/model/vit_checkpoint/imagenet21k/R50-ViT-B_16.npz"
+DRIVE_CKPT="/content/drive/MyDrive/NCKH_V2/i_mmseg/ViT_checkpoint/R50-ViT-B_16.npz"
+
+if [ -s "$CKPT_FILE" ]; then
+    echo "✅ Checkpoint đã có sẵn tại: $CKPT_FILE"
+elif [ -s "$DRIVE_CKPT" ]; then
+    echo "Đang sao chép checkpoint từ Google Drive đã mount..."
+    cp "$DRIVE_CKPT" "$CKPT_FILE"
+    echo "✅ Sao chép checkpoint từ Google Drive thành công!"
+else
+    echo "Đang tải R50-ViT-B_16.npz từ Google Drive qua gdown..."
+    gdown --id "1qJI7m6sM6deBZsSmcZjltHNWygRYagdD" -O "$CKPT_FILE" || {
+        echo "Tải từ Drive thất bại, fallback sang server Google ViT Storage..."
+        wget -c -O "$CKPT_FILE" https://storage.googleapis.com/vit_models/imagenet21k/R50+ViT-B_16.npz
+    }
+    echo "✅ Tải checkpoint hoàn tất!"
+fi
+
+echo "=== [5/7] Chuẩn bị Dataset MyoPS-380 từ file ZIP Google Drive ==="
+LOCAL_DATASET="/content/SCAR/MyoPS380_dataset/Processed_data"
+ZIP_PATH="/content/MyoPS380_dataset.zip"
+
+if [ -d "$LOCAL_DATASET/bSSFP/train_npz" ] && [ -d "$LOCAL_DATASET/LGE/train_npz" ] && [ -d "$LOCAL_DATASET/T2w/train_npz" ] && [ $(ls "$LOCAL_DATASET/bSSFP/train_npz" 2>/dev/null | wc -l) -gt 1500 ]; then
+    echo "✅ Dataset đã có sẵn đầy đủ trên máy ảo: $LOCAL_DATASET"
+else
+    if [ ! -s "$ZIP_PATH" ]; then
+        if [ -s "/content/drive/MyDrive/NCKH_V2/i_mmseg/MyoPS380_dataset.zip" ]; then
+            echo "Đang sao chép file zip từ Google Drive..."
+            cp "/content/drive/MyDrive/NCKH_V2/i_mmseg/MyoPS380_dataset.zip" "$ZIP_PATH"
+        else
+            echo "Đang tải Dataset ZIP từ Google Drive (ID: 1UhD3-ncoARjcv_1IqUcMa_G4oaU9pY-b)..."
+            gdown --id "1UhD3-ncoARjcv_1IqUcMa_G4oaU9pY-b" -O "$ZIP_PATH"
+        fi
+    fi
+
+    echo "Đang giải nén Dataset vào /content/SCAR/MyoPS380_dataset..."
+    mkdir -p /content/SCAR/MyoPS380_dataset
+    command -v unzip &>/dev/null || (apt-get update -qq && apt-get install -y unzip)
+    unzip -q -o "$ZIP_PATH" -d /content/SCAR/MyoPS380_dataset/
+    chmod -R u+rwX /content/SCAR/MyoPS380_dataset
+    echo "✅ Giải nén Dataset hoàn tất!"
+fi
+
+# Tự động build splits nếu data đã sẵn sàng
+if [ -d "$LOCAL_DATASET" ]; then
+    echo "Tạo split bệnh nhân (train/val/test)..."
+    cd /content/SCAR
+    python3 preprocessing/build_splits.py \
+        --data-root "$LOCAL_DATASET" \
+        --list-dir /content/SCAR/data/processed/splits \
+        --test-list preprocessing/splits/test_vol.txt \
+        --seed 1234 || true
+fi
+
+echo "=== [6/7] Cài đặt tmux (Hỗ trợ chạy ngầm không lo mất kết nối) ==="
+if ! command -v tmux &> /dev/null; then
+    apt-get update -qq && apt-get install -y tmux
+else
+    echo "✅ tmux đã được cài đặt: $(tmux -V)"
+fi
+
+echo "=== [7/7] Kiểm tra Môi trường PyTorch & GPU ==="
+python3 -c "import torch; print(f'PyTorch: {torch.__version__} | CUDA: {torch.cuda.is_available()} | GPU: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else \"None\"}')"
+
+echo "=== HOÀN TẤT THIẾT LẬP MÔI TRƯỜNG CHO SCAR ==="
+echo ""
+echo "💡 HƯỚNG DẪN DÙNG TMUX ĐỂ TRAIN KHÔNG LO NGẮT KẾT NỐI (Colab vẫn chạy ngầm):"
+echo "  1. Tạo session tmux mới:"
+echo "     tmux new -s train"
+echo "  2. Chạy lệnh train bên trong tmux:"
+echo "     cd /content/SCAR"
+echo "     python train.py --config training/config/models/cmspa_net.yaml --ablation M3 --data-root MyoPS380_dataset/Processed_data --list-dir data/processed/splits --pretrained model/vit_checkpoint/imagenet21k/R50-ViT-B_16.npz"
+echo "  3. Tách ra khỏi tmux (detach) để tắt trình duyệt / terminal an toàn:"
+echo "     Nhấn phím: Ctrl + B rồi thả ra, sau đó nhấn phím D"
+echo "  4. Khi muốn vào lại xem tiến trình train:"
+echo "     tmux attach -t train"
+
+
+
+
+
+Lệnh train 
+    python3 train.py \
+        --config training/config/models/m2_plus.yaml \
+        --ablation M2-Plus \
+        --data-root MyoPS380_dataset/Processed_data \
+        --list-dir data/processed/splits \
+        --pretrained model/vit_checkpoint/imagenet21k/R50-ViT-B_16.npz \
+        --run-root /content/drive/MyDrive/Quan \
+        --batch-size 16 \
+        --lr 0.0003 \
+        --epochs 300 \
+        --patience 40 \
+        --amp auto
