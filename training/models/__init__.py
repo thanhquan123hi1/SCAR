@@ -23,8 +23,11 @@ from training.models.modules.decoder import DecoderCup, SegmentationHead
 from training.models.modules.fusion import ConcatFusion, CrossAttention_Fusion, Fusion_Embed
 from training.models.modules.m2_plus import M2Plus_Fusion
 from training.models.modules.sspanet import SSPANet_Block
+from training.models.nnunet import NNUNet2D
 
 MODEL_REGISTRY: dict[str, Callable[..., nn.Module]] = {
+    "nnunet": NNUNet2D,
+    "nn_unet": NNUNet2D,
     "cmspa_net": CMSPANet,
     "cmspa": CMSPANet,
     "vision_transformer": CMSPANet,
@@ -93,6 +96,7 @@ __all__ = [
     "Fusion_Embed",
     "DecoderCup",
     "SegmentationHead",
+    "NNUNet2D",
     "MODEL_REGISTRY",
     "build_model",
 ]
