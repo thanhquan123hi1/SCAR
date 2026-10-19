@@ -22,7 +22,11 @@ def test_nnunet_config_and_instantiation():
     model = model_from_config(merged["model"], img_size=128, num_classes=4)
     assert isinstance(model, NNUNet2D)
     assert model.num_classes == 4
-    print(" Config parsing and instantiation verified!")
+    assert hasattr(model, "config"), "Model must have self.config"
+    config_dict = model.config.to_dict()
+    assert config_dict.get("architecture") == "nnunet"
+    assert config_dict.get("ablation") == "NNUNET"
+    print(" Config parsing and instantiation verified! to_dict() verified:", config_dict)
 
 
 def test_nnunet_forward_backward():

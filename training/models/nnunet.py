@@ -33,11 +33,25 @@ class NNUNet2D(nn.Module):
         num_classes: int = 4,
         img_size: int = 128,
         features_per_stage: tuple[int, ...] = (32, 64, 128, 256, 512),
+        config: Any = None,
         **kwargs: Any,
     ):
         super().__init__()
         self.num_classes = num_classes
         self.img_size = img_size
+        if config is None:
+            from ml_collections import ConfigDict
+            self.config = ConfigDict({
+                "architecture": "nnunet",
+                "model_name": "nnU-Net",
+                "ablation": kwargs.get("ablation", "NNUNET"),
+                "num_classes": num_classes,
+            })
+        elif not hasattr(config, "to_dict"):
+            from ml_collections import ConfigDict
+            self.config = ConfigDict(dict(config))
+        else:
+            self.config = config
         n_stages = len(features_per_stage)
 
         strides = [(1, 1)] + [(2, 2)] * (n_stages - 1)
