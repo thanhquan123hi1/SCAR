@@ -5,9 +5,10 @@ The repository supports `myops380`, native `myopspp_bc80`, and two independent e
 | Profile | Patients (train / val / test) | Export folder | Cache | Evaluation XY spacing |
 |---|---|---|---|---|
 | `myopspp_roi128_76` | 48 / 13 / 15 | `roi128mm_76cases` | `data/myopspp_roi128_76/cache` | 1.0 mm |
+| `myopspp_roi128_80` | 51 / 13 / 16 | `roi128mm_80cases` | `data/myopspp_roi128_80/cache` | 1.0 mm |
 | `myopspp_roi160_80` | 51 / 13 / 16 | `roi160mm_to128_80cases` | `data/myopspp_roi160_80/cache` | 1.25 mm |
 
-Both caches contain 128×128 slices; Z spacing is retained per patient. The 76-case cohort excludes Case2013, Case2017, Case2018 and Case2031 and filters the original fixed split without moving retained patients. A model's random seed never regenerates these splits.
+All caches contain 128×128 slices; Z spacing is retained per patient. The 76-case cohort excludes Case2013, Case2017, Case2018 and Case2031 (cases where a 128 mm crop clips part of the cardiac structure). The `myopspp_roi128_80` profile retains all 80 cases with the 128 mm crop (auditing any crop label loss, identical to standard automated cropping pipelines like I-MMSeg). The `myopspp_roi160_80` profile avoids clipping by using a 160 mm physical FOV resized to 128×128. A model's random seed never regenerates these splits.
 
 ## Prepare a cache on another computer
 
@@ -17,6 +18,7 @@ Run from the repository root, substituting the export path on that computer:
 
 ```powershell
 python -m preprocessing.myopspp_roi --dataset myopspp_roi128_76 --src-path D:/NCKH/MyoPSpp_preprocessed_2026-10-03/roi128mm_76cases --dst-path data/myopspp_roi128_76/cache
+python -m preprocessing.myopspp_roi --dataset myopspp_roi128_80 --src-path D:/NCKH/MyoPSpp_preprocessed_2026-10-03/roi128mm_80cases --dst-path data/myopspp_roi128_80/cache
 python -m preprocessing.myopspp_roi --dataset myopspp_roi160_80 --src-path D:/NCKH/MyoPSpp_preprocessed_2026-10-03/roi160mm_to128_80cases --dst-path data/myopspp_roi160_80/cache
 ```
 
@@ -28,6 +30,7 @@ The caches have already been created on this computer. Do not run those commands
 
 ```powershell
 python run_all.py --dataset myopspp_roi128_76 --config training/config/models/cmspa_net.yaml --skip-cache --batch-size 2 --accum-steps 8 --run-id roi128_m3_seed1234
+python run_all.py --dataset myopspp_roi128_80 --config training/config/models/cmspa_net.yaml --skip-cache --batch-size 2 --accum-steps 8 --run-id roi128_80_m3_seed1234
 python run_all.py --dataset myopspp_roi160_80 --config training/config/models/cmspa_net.yaml --skip-cache --batch-size 2 --accum-steps 8 --run-id roi160_m3_seed1234
 ```
 

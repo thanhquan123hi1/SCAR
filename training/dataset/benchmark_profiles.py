@@ -8,6 +8,8 @@ DATASET_IDS = ("myops380", "myopspp_bc80")
 ROI_PROFILES = {
     "myopspp_roi128_76": {"export_id": "roi128mm_76cases", "crop_mm": 128, "spacing_xy": 1.0,
                          "excluded": ("Case2013", "Case2017", "Case2018", "Case2031")},
+    "myopspp_roi128_80": {"export_id": "roi128mm_80cases", "crop_mm": 128, "spacing_xy": 1.0,
+                         "excluded": ()},
     "myopspp_roi160_80": {"export_id": "roi160mm_to128_80cases", "crop_mm": 160, "spacing_xy": 1.25,
                          "excluded": ()},
 }

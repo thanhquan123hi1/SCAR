@@ -50,8 +50,7 @@ C0/LGE/T2, split patient-level **51 train / 13 val / 16 test**. Xem
 Dùng `python train.py --dataset myopspp_bc80` để chọn cache/config/output riêng.
 MyoPS380 và notebook Colab hiện có tiếp tục dùng protocol mặc định.
 
-**Hai bộ MyoPS++ ROI mới:** chọn `--dataset myopspp_roi128_76` (48/13/15 bệnh nhân,
-spacing XY 1 mm) hoặc `--dataset myopspp_roi160_80` (51/13/16, spacing XY 1.25 mm).
+**Các bộ MyoPS++ ROI:** chọn `--dataset myopspp_roi128_76` (48/13/15 bệnh nhân, spacing XY 1 mm, loại 4 ca phạm biên), `--dataset myopspp_roi128_80` (51/13/16, spacing XY 1 mm, giữ trọn 80 ca) hoặc `--dataset myopspp_roi160_80` (51/13/16, spacing XY 1.25 mm).
 Các cache giữ nguyên ảnh [0,1] đã xuất và nhãn canonical; đánh giá trên ROI định vị
 bằng GT, có ghi rõ protocol trong checkpoint/kết quả. Xem
 [hướng dẫn tạo cache, train, resume và evaluate](docs/myopspp_roi_training.md).
@@ -309,7 +308,7 @@ Logic chọn `best.pth`, `best_inclusive.pth`, resume và early stopping dùng �
 ### Điều kiện so sánh với I-MMSeg và nnU-Net
 
 - Dùng đúng 76 bệnh nhân test đã khóa, cùng ground truth và quy ước region; không tune loss, inference hoặc chọn checkpoint bằng test.
-- Để so evaluator I-MMSeg, báo các cột `official_*` cùng các cột metric chính và trạng thái mask rỗng. Không trộn hai bộ metric trong một phép so sánh. HD95 của protocol này có đơn vị voxel, không so trực tiếp với HD95 tính bằng mm.
+- Repo chỉ báo metric chính, kèm trạng thái mask rỗng và số ca xác định/không xác định. Để so I-MMSeg hoặc baseline khác, chấm prediction bằng cùng evaluator trên cùng GT/grid/region; các số trong paper chỉ là tham khảo khi protocol chưa khớp. HD95 voxel không so trực tiếp với HD95 mm.
 - Với nnU-Net, ghi rõ phiên bản, cấu hình 2D/3D, train/validation split, checkpoint, số fold/model và các bước inference. Để so đóng góp model trong chế độ dự đoán trực tiếp, dùng một model/fold, tắt mirroring bằng `--disable_tta`, không áp dụng hậu xử lý của nnU-Net. Nếu báo pipeline đầy đủ có ensemble/hậu xử lý, ghi thành kết quả riêng. Tham khảo [hướng dẫn nnU-Net](https://github.com/MIC-DKFZ/nnUNet/blob/master/documentation/how_to_use_nnunet.md) và [CLI inference](https://github.com/MIC-DKFZ/nnUNet/blob/master/nnunetv2/inference/predict_from_raw_data.py).
 - Đưa prediction của mọi baseline về cùng lưới/nhãn canonical và chấm bằng cùng `benchmark_rows`/`summarize_rows`. Trung bình theo bệnh nhân, kèm số ca metric xác định/không xác định. Không lấy trung bình slice hoặc pixel-pooled để so với patient-mean.
 - Gỡ TTA/hậu xử lý chỉ loại hai yếu tố inference. Kết quả còn phụ thuộc dữ liệu, pretraining, augmentation, optimizer và ngân sách train. Cần ablation kiến trúc × loss với các yếu tố này được kiểm soát; các số trích từ paper phải được ghi rõ là tham khảo, không phải baseline đã tái lập.
@@ -318,17 +317,19 @@ Logic chọn `best.pth`, `best_inclusive.pth`, resume và early stopping dùng �
 
 ## Protocol benchmark đã khóa (Phase 1)
 
-Protocol `myops380_voxel_v1` tính HD95/ASD trên lưới voxel đơn vị (`voxelspacing=None`), không phải mm. Dữ liệu đã chuẩn hóa in-plane; spacing z vật lý không có trong bản phát hành và không được suy diễn từ affine identity. Không cần truyền `--spacing` hoặc `--allow-voxel-spacing`.
+Protocol `myops380_voxel_v2` tính HD95/ASD trên lưới voxel đơn vị (`voxelspacing=None`), không phải mm. V2 loại bỏ các cột tương thích tác giả; công thức metric chính và điểm chọn checkpoint không đổi. Dữ liệu đã chuẩn hóa in-plane; spacing z vật lý không có trong bản phát hành và không được suy diễn từ affine identity. Không cần truyền `--spacing` hoặc `--allow-voxel-spacing`.
 
 - Nhãn đầu ra canonical: `0=background, 1=normal_myocardium, 2=edema, 3=scar`. Cache chính thức thiếu metadata dùng `--label-order legacy`; cache SCAR mới dùng `canonical`. `auto` không còn đoán nhãn cho file thiếu metadata.
 - Region độc lập: normal `[1]`, edema `[2]`, scar `[3]`; region hợp: edema-inclusive `[2,3]`, myocardial ring `[1,2,3]`. Không tự coi region hợp là cột tương ứng trong paper.
 - Metric chính: cả hai mask rỗng thì Dice/IoU/HD95 không xác định; một mask rỗng thì Dice/IoU bằng 0, distance không xác định. Trung bình chỉ dùng giá trị xác định và luôn kèm số ca, trạng thái empty.
 - `avg_pathology_dice` = trung bình của hai patient-mean Dice scar và edema riêng (cần cả hai giá trị xác định). Dice lưu trong [0,1]. Metric này trên **validation volume** chọn `best.pth` và điều khiển early stopping; test không tham gia chọn mô hình.
-- `official_dice`, `official_hd95_voxel` và `official_avg_pathology_dice` là kết quả evaluator I-MMSeg tái lập trên cùng prediction. Giữ nguyên ngoại lệ upstream: nếu một mask rỗng, trả Dice=1 khi pred<200 và GT<=200 voxel, ngược lại Dice=0; HD95=0. Các điểm này được báo riêng, không dùng để chọn checkpoint. Đây là parity của evaluator, không phải tuyên bố tái lập toàn bộ training của paper.
+- Không tính hoặc xuất `official_*`; bỏ sót tổn thương nhỏ vẫn có Dice=0, không có ngoại lệ ngưỡng 200 voxel. Các báo cáo cũ được giữ nguyên như dữ liệu lịch sử. Khi viết bài, mô tả chính sách mask rỗng và endpoint (edema-exclusive hay edema-inclusive) rõ ràng.
 - 76 ID test chính thức được khóa bằng hash; 304 ca còn lại chia train/val. Hash nội dung cache, quy ước nhãn, protocol và hash manifest được lưu trong `config.json`, checkpoint và báo cáo evaluation. Resume/evaluation từ chối thay đổi dữ liệu, đổi nhãn hoặc đổi split; evaluation không nhận tập con của split đã lưu.
-- Checkpoint cũ chưa lưu protocol không được resume/evaluate trong chế độ benchmark đã khóa. Cần bắt đầu run Phase 1 mới; không tái sử dụng best score từ metric cũ. Chạy lại evaluation phải chọn thư mục đầu ra mới nếu thư mục cũ đã có dữ liệu.
+- Checkpoint `myops380_voxel_v1` có đúng metadata protocol gốc vẫn được resume/evaluate vì metric chính và objective không đổi; output mới chỉ có metric chính v2. Protocol MyoPS++ và ROI không đổi. Checkpoint thiếu protocol hoặc thay đổi bất kỳ định nghĩa metric/dữ liệu/split nào vẫn bị từ chối. Chạy lại evaluation phải chọn thư mục đầu ra mới nếu thư mục cũ đã có dữ liệu.
 
 `val/mean_dice` trong log vẫn là chỉ số pixel-pooled phụ; đường chọn checkpoint là `val/avg_pathology_dice`. Mỗi epoch có thêm lượt inference trên validation volumes. Khóa dữ liệu đọc toàn bộ cache để tính hash ở đầu train/resume/evaluation; hãy giữ cache bất biến trong lúc chạy.
+
+Tiền xử lý không mặc nhiên là bản tái lập I-MMSeg. Với MyoPS380 đã phát hành, SCAR dùng cùng phép `clip(0,255)/255` trên ảnh đầu vào 128×128, nhưng giữ validation riêng và augmentation khác. Profile `myopspp_bc80` dùng percentile 1/99 trên volume native; hai profile ROI dùng GT-centered crop và percentile sau crop/resize. Các pipeline MyoPS++ này là protocol riêng của SCAR, không phải preprocessing I-MMSeg nguyên trạng. Code packaging của cả hai repo không thay thế đăng ký ảnh upstream; cùng shape/affine không chứng minh alignment giải phẫu.
 
 ---
 

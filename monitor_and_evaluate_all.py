@@ -3,7 +3,7 @@
 
 Monitors training runs (especially M2-MAX-V4), evaluates checkpoints on
 the 76-case test benchmark, tests against stopping criteria, and logs full results.
-Automatically pushes to Git repository when benchmark criteria are fully cleared.
+Uses primary metrics only; numerical targets do not establish paper reproduction.
 """
 from __future__ import annotations
 
@@ -84,12 +84,14 @@ def evaluate_checkpoint(checkpoint_path: Path, output_dir: Path) -> dict | None:
 
 
 def verify_criteria(metrics: dict) -> tuple[bool, dict]:
-    # Official challenge metrics on all 76 cases
-    scar_dice = metrics.get("scar", {}).get("mean_official_dice", metrics.get("scar", {}).get("mean_dice", 0.0))
-    scar_hd95 = metrics.get("scar", {}).get("mean_official_hd95_voxel", metrics.get("scar", {}).get("mean_hd95_voxel", float("inf")))
-    edema_inc_dice = metrics.get("edema_inclusive", {}).get("mean_official_dice", metrics.get("edema_inclusive", {}).get("mean_dice", 0.0))
-    edema_inc_hd95 = metrics.get("edema_inclusive", {}).get("mean_official_hd95_voxel", metrics.get("edema_inclusive", {}).get("mean_hd95_voxel", float("inf")))
-    myo_dice = metrics.get("myocardial_ring", {}).get("mean_dice", 0.0)
+    # Historical numerical targets are reference values, not evaluator parity.
+    scar_dice = metrics.get("scar", {}).get("mean_dice")
+    scar_hd95 = metrics.get("scar", {}).get("mean_hd95_voxel")
+    edema_inc_dice = metrics.get("edema_inclusive", {}).get("mean_dice")
+    edema_inc_hd95 = metrics.get("edema_inclusive", {}).get("mean_hd95_voxel")
+    myo_dice = metrics.get("myocardial_ring", {}).get("mean_dice")
+    if any(value is None for value in (scar_dice, scar_hd95, edema_inc_dice, edema_inc_hd95, myo_dice)):
+        raise ValueError("Threshold reporting requires defined primary metrics; inspect empty-mask counts")
     
     empty_edema = metrics.get("edema", {}).get("status_counts", {}).get("prediction_empty", 0)
     empty_scar = metrics.get("scar", {}).get("status_counts", {}).get("prediction_empty", 0)
@@ -146,7 +148,9 @@ def evaluate_run(run_dir: Path, run_name: str) -> bool:
 
     best_result_passed = False
     winning_ckpt = None
-    report_lines = [f"# BENCHMARK EVALUATION REPORT FOR {run_name}", ""]
+    report_lines = [f"# PRIMARY METRIC REPORT FOR {run_name}", "",
+                    "Reference thresholds are historical numbers, not a matched-evaluator comparison with I-MMSeg.",
+                    "Checkpoint selection must use validation; this table reports test results only.", ""]
 
     for ckpt_name, ckpt_path in all_ckpts:
         eval_dir = run_dir / f"eval_{ckpt_name}"
@@ -176,7 +180,7 @@ def evaluate_run(run_dir: Path, run_name: str) -> bool:
     print("\n".join(report_lines))
 
     if best_result_passed:
-        print(f"\n🎉 WINNING CHECKPOINT IDENTIFIED: {winning_ckpt} satisfied ALL stopping criteria!")
+        print(f"\nReference thresholds reached by {winning_ckpt}; checkpoint selection remains validation-based.")
 
     return best_result_passed
 
@@ -199,11 +203,8 @@ def main():
                     passed = evaluate_run(v6_dir, "M2-MAX-V6")
                     already_evaluated.update(ckpts)
                     if passed:
-                        print("SUCCESS: M2-MAX-V6 beat all stopping criteria simultaneously!")
-                        (PROJECT_ROOT / "SUCCESS_M2_MAX_V6.txt").write_text("ALL CRITERIA SATISFIED")
-                        run_cmd(["git", "add", "training/", "train.py", "test.py", "monitor_and_evaluate_all.py"])
-                        run_cmd(["git", "commit", "-m", "feat(model): M2-Max-V6 exceeds I_MMSeg benchmark on MyoPS-380"])
-                        run_cmd(["git", "push", "origin", "main"])
+                        print("Configured reference thresholds reached using primary metrics. "
+                              "This does not establish a comparison with I-MMSeg's evaluator.")
                         break
 
         time.sleep(15)

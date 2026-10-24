@@ -7,7 +7,7 @@ from scipy.ndimage import binary_erosion, distance_transform_edt, generate_binar
 
 
 BENCHMARK_PROTOCOL = {
-    "id": "myops380_voxel_v1",
+    "id": "myops380_voxel_v2",
     "distance_unit": "voxel",
     "voxelspacing": None,
     "axis_order": "HWD",
@@ -18,8 +18,6 @@ BENCHMARK_PROTOCOL = {
     "selection_metric": "avg_pathology_dice",
     "pathology_regions": ["scar", "edema"],
     "pathology_aggregation": "arithmetic mean of scar and exclusive-edema patient means; both required",
-    "official_reference": "I_MMSeg@90f46c4eb72924509895fcda6bc6a3b8c3316e66/utils.py:171-182",
-    "official_empty_policy": "if either empty: Dice=1 when pred<200 and target<=200, else 0; HD95=0",
 }
 
 
@@ -29,17 +27,34 @@ def protocol_for_dataset(dataset_id="myops380"):
         return BENCHMARK_PROTOCOL
     if dataset_id in ROI_PROFILES:
         profile = ROI_PROFILES[dataset_id]
-        return {k: v for k, v in dict(BENCHMARK_PROTOCOL,
+        return dict(BENCHMARK_PROTOCOL,
                 id=f"{dataset_id}_roi_mm_v1", distance_unit="mm",
                 voxelspacing="preprocessed ROI NIfTI spacing in mm, orthogonal grid",
                 evaluation_grid="preprocessed_roi", localization="oracle_gt_bbox",
                 crop_mm=profile["crop_mm"], model_hw=[128, 128],
-                spacing_xy_mm=profile["spacing_xy"]).items() if not k.startswith("official_")}
+                spacing_xy_mm=profile["spacing_xy"])
     if dataset_id != "myopspp_bc80":
         raise ValueError(f"Unknown metric dataset profile: {dataset_id}")
-    return {k: v for k, v in dict(BENCHMARK_PROTOCOL,
+    return dict(BENCHMARK_PROTOCOL,
             id="myopspp_bc80_mm_v1", distance_unit="mm",
-            voxelspacing="native NIfTI spacing in mm, orthogonal grid").items() if not k.startswith("official_")}
+            voxelspacing="native NIfTI spacing in mm, orthogonal grid")
+
+
+def benchmark_protocol_matches(saved_protocol, dataset_id="myops380"):
+    """Accept current protocols and the exact old MyoPS380 reporting schema.
+
+    V2 removes author-compatibility columns only. Primary metrics, checkpoint
+    selection, dataset locks and the training objective remain identical.
+    """
+    current = protocol_for_dataset(dataset_id)
+    if saved_protocol == current:
+        return True
+    if dataset_id != "myops380":
+        return False
+    legacy = dict(current, id="myops380_voxel_v1",
+                  official_reference="I_MMSeg@90f46c4eb72924509895fcda6bc6a3b8c3316e66/utils.py:171-182",
+                  official_empty_policy="if either empty: Dice=1 when pred<200 and target<=200, else 0; HD95=0")
+    return saved_protocol == legacy
 
 
 def dataset_rows(prediction, target, case, compute_distance=True, dataset_id="myops380", spacing=None):
@@ -56,7 +71,7 @@ def dataset_rows(prediction, target, case, compute_distance=True, dataset_id="my
         ids = protocol["regions"][row["region"]]
         physical = binary_metrics(np.isin(prediction, ids), np.isin(target, ids), spacing=spacing,
                                   compute_distance=compute_distance)
-        for key in ("hd95_voxel", "asd_voxel", "official_dice", "official_hd95_voxel"):
+        for key in ("hd95_voxel", "asd_voxel"):
             row.pop(key)
         row.update(physical, hd95_unit="mm", hd95_mm=physical["hd95"], asd_mm=physical["asd"])
     return rows
@@ -91,7 +106,7 @@ def summarize_dataset_rows(rows, dataset_id="myops380"):
 
 
 def benchmark_rows(prediction, target, case, compute_distance=True):
-    """Two evaluators on identical canonical HWD predictions; never mutate masks."""
+    """Primary metrics on canonical HWD predictions; never mutate masks."""
     prediction, target = np.asarray(prediction), np.asarray(target)
     if prediction.ndim != 3 or prediction.shape != target.shape or not prediction.size:
         raise ValueError("Benchmark requires matching nonempty HWD volumes")
@@ -105,20 +120,15 @@ def benchmark_rows(prediction, target, case, compute_distance=True):
         overlap = int(np.logical_and(pred, truth).sum())
         metrics["precision"] = overlap / n_pred if n_pred else None
         metrics["recall"] = overlap / n_true if n_true else None
-        official_dice, official_hd95 = metrics["dice"], metrics["hd95"]
-        if not n_pred or not n_true:
-            official_dice = float(n_pred < 200 and n_true <= 200)
-            official_hd95 = 0.0 if compute_distance else None
         rows.append(dict(case=case, region=region, **metrics,
                          prediction_voxels=n_pred, target_voxels=n_true,
                          hd95_unit="voxel", hd95_voxel=metrics["hd95"],
-                         asd_voxel=metrics["asd"],
-                         official_dice=official_dice, official_hd95_voxel=official_hd95))
+                         asd_voxel=metrics["asd"]))
     return rows
 
 
 def summarize_rows(rows):
-    """Case means, defined counts and separately named official reproduction metrics."""
+    """Patient means and defined/undefined counts for primary metrics only."""
     summary = {}
     identities = [(r["case"], r["region"]) for r in rows]
     if len(identities) != len(set(identities)):
@@ -130,7 +140,7 @@ def summarize_rows(rows):
     for name in BENCHMARK_PROTOCOL["regions"]:
         subset = [r for r in rows if r["region"] == name]
         region = {"cases": len(subset), "status_counts": dict(Counter(r["status"] for r in subset))}
-        for metric in ("dice", "iou", "precision", "recall", "hd95_voxel", "asd_voxel", "official_dice", "official_hd95_voxel"):
+        for metric in ("dice", "iou", "precision", "recall", "hd95_voxel", "asd_voxel"):
             values = [r[metric] for r in subset if r[metric] is not None]
             if not all(np.isfinite(v) for v in values):
                 raise ValueError(f"Non-finite {metric}; undefined values must be None")
@@ -138,11 +148,9 @@ def summarize_rows(rows):
             region[f"{metric}_defined_cases"] = len(values)
             region[f"{metric}_undefined_cases"] = len(subset) - len(values)
         summary[name] = region
-    for metric in ("dice", "iou", "official_dice", "hd95_voxel", "official_hd95_voxel"):
+    for metric in ("dice", "iou", "hd95_voxel"):
         values = [summary[name][f"mean_{metric}"] for name in ("scar", "edema")]
-        key = (f"official_avg_pathology_{metric.removeprefix('official_')}"
-               if metric.startswith("official_") else f"avg_pathology_{metric}")
-        summary[key] = float(np.mean(values)) if all(v is not None for v in values) else None
+        summary[f"avg_pathology_{metric}"] = float(np.mean(values)) if all(v is not None for v in values) else None
     return summary
 
 

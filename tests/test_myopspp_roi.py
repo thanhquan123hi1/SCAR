@@ -10,6 +10,7 @@ import pytest
 import torch
 
 PROFILES = [("myopspp_roi128_76", "roi128mm_76cases", 128, 1.0, [48, 13, 15]),
+            ("myopspp_roi128_80", "roi128mm_80cases", 128, 1.0, [51, 13, 16]),
             ("myopspp_roi160_80", "roi160mm_to128_80cases", 160, 1.25, [51, 13, 16])]
 EXCLUDED = {"Case2013", "Case2017", "Case2018", "Case2031"}
 
@@ -20,14 +21,14 @@ def roi_export(tmp_path, request):
     profile, export_id, crop, spacing, counts = request.param
     root = tmp_path / "export"
     root.mkdir()
-    splits = {s: [c for c in names if crop == 160 or c not in EXCLUDED]
+    splits = {s: [c for c in names if "80" in profile or c not in EXCLUDED]
               for s, names in fixed_myopspp_splits().items()}
     ids = sorted(c for names in splits.values() for c in names)
     (root / "splits.json").write_text(json.dumps({"patients": splits}))
     (root / "dataset_manifest.json").write_text(json.dumps(dict(
         dataset_id=export_id, patients=ids, patient_count=len(ids), crop_mm=crop,
         model_hw=[128, 128], output_inplane_spacing_mm=spacing,
-        excluded_cases=sorted(EXCLUDED) if crop == 128 else [],
+        excluded_cases=sorted(EXCLUDED) if profile == "myopspp_roi128_76" else [],
         localization="oracle GT bbox; NOT automatic inference",
         normalization="p1/p99 after crop/resize; [0,1]")))
     image = np.linspace(0, 1, 128 * 128, dtype=np.float32).reshape(128, 128, 1)

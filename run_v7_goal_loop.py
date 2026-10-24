@@ -4,7 +4,7 @@
 Features:
 1. Automated Disk Guard: Prunes intermediate checkpoints if disk space < 5.0 GB.
 2. Checkpoint strategy: Saves every 10 epochs for detailed trajectory analysis.
-3. Automated Evaluation: Evaluates test split on all checkpoints (Standard + Official).
+3. Automated Evaluation: Reports primary metrics without author-compatibility scores.
 4. Automated Backup: Compresses and uploads to Google Drive upon completion.
 """
 from __future__ import annotations
@@ -24,14 +24,6 @@ DRIVE_DEST_DIR = Path("/content/drive/Colab Notebooks/Quan")
 DATA_ROOT = PROJECT_ROOT / "MyoPS380_dataset" / "Processed_data"
 LIST_DIR = PROJECT_ROOT / "data" / "processed" / "splits"
 INIT_WEIGHTS = RUNS_DIR / "m2_max_v6" / "checkpoints" / "best.pth"
-
-TARGETS = {
-    "scar_dice": 0.74,        # User Target: > 74.00%
-    "aar_dice": 0.758,        # User Target: ~ 76.00%
-    "scar_hd95": 3.66,        # Benchmark target: < 3.66 vox
-    "aar_hd95": 3.89,         # Benchmark target: < 3.89 vox
-}
-
 
 def log(msg: str) -> None:
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
@@ -62,8 +54,6 @@ def disk_guard_cleanup(target_dir: Path, min_free_gb: float = 5.0) -> None:
 def evaluate_checkpoint(ckpt_path: Path, output_dir: Path) -> dict | None:
     cmd = [
         sys.executable, "test.py",
-        "--config", "training/config/models/m2_max_v7.yaml",
-        "--ablation", "M2-MAX-V7",
         "--data-root", str(DATA_ROOT),
         "--list-dir", str(LIST_DIR),
         "--checkpoint", str(ckpt_path),
@@ -71,9 +61,6 @@ def evaluate_checkpoint(ckpt_path: Path, output_dir: Path) -> dict | None:
         "--split", "test_vol",
         "--device", "cuda",
         "--amp", "auto",
-        "--num-workers", "4",
-        "--preview-cases", "10",
-        "--quiet",
     ]
     log(f"Running evaluation: {ckpt_path.name} -> {output_dir.name}...")
     res = subprocess.run(cmd, cwd=str(PROJECT_ROOT))
@@ -91,6 +78,8 @@ def evaluate_checkpoint(ckpt_path: Path, output_dir: Path) -> dict | None:
 
 
 def run_full_benchmark(run_dir: Path) -> list[dict]:
+    def percent(value):
+        return None if value is None else value * 100
     ckpt_dir = run_dir / "checkpoints"
     ckpts = [
         ("best", ckpt_dir / "best.pth"),
@@ -115,57 +104,33 @@ def run_full_benchmark(run_dir: Path) -> list[dict]:
             results.append({
                 "label": label,
                 "epoch": m.get("checkpoint_epoch", "-"),
-                "scar_dice_std": s.get("mean_dice", 0.0) * 100,
-                "scar_dice_off": s.get("mean_official_dice", 0.0) * 100,
-                "scar_hd95_std": s.get("mean_hd95_voxel", float("inf")),
-                "scar_hd95_off": s.get("mean_official_hd95_voxel", float("inf")),
-                "aar_dice_std": e.get("mean_dice", 0.0) * 100,
-                "aar_dice_off": e.get("mean_official_dice", 0.0) * 100,
-                "aar_hd95_std": e.get("mean_hd95_voxel", float("inf")),
-                "aar_hd95_off": e.get("mean_official_hd95_voxel", float("inf")),
-                "myo_dice": myo.get("mean_dice", 0.0) * 100,
+                "scar_dice": percent(s["mean_dice"]),
+                "scar_hd95": s["mean_hd95_voxel"],
+                "aar_dice": percent(e["mean_dice"]),
+                "aar_hd95": e["mean_hd95_voxel"],
+                "scar_hd95_defined": s["hd95_voxel_defined_cases"],
+                "aar_hd95_defined": e["hd95_voxel_defined_cases"],
+                "cases": m["case_count"],
+                "myo_dice": percent(myo["mean_dice"]),
             })
     return results
 
 
 def format_report(results: list[dict]) -> str:
-    lines = ["# 🏆 BENCHMARK EVALUATION REPORT FOR M2-MAX-V7\n"]
-    lines.append("| Checkpoint | Epoch | Scar Dice (Off / Std) | Scar HD95 | AAR Dice (Off / Std) | AAR HD95 | Myo Ring | Status |")
+    lines = ["# PRIMARY METRIC REPORT FOR M2-MAX-V7\n"]
+    lines.append("| Checkpoint | Epoch | Scar Dice (%) | Scar HD95 (vox) | AAR Dice (%) | AAR HD95 (vox) | Myo Ring (%) | HD95 defined cases (scar / AAR) |")
     lines.append("| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |")
-
-    best_overall = None
-    max_score = -1
-
+    def display(value):
+        return "undefined" if value is None else f"{value:.2f}"
     for r in results:
-        pass_s = r["scar_dice_off"] >= 74.0
-        pass_a = r["aar_dice_off"] >= 75.8
-        pass_sh = r["scar_hd95_off"] <= 3.66
-        pass_ah = r["aar_hd95_off"] <= 3.89
-
-        all_pass = pass_s and pass_a and pass_sh and pass_ah
-        status = "🌟 ALL TARGETS MET!" if all_pass else ("✅ Scar > 74%" if pass_s else "Processing")
-
-        combined = r["scar_dice_off"] + r["aar_dice_off"]
-        if combined > max_score:
-            max_score = combined
-            best_overall = r
-
         lines.append(
             f"| `{r['label']}` | {r['epoch']} | "
-            f"**{r['scar_dice_off']:.2f}%** / {r['scar_dice_std']:.2f}% | "
-            f"{r['scar_hd95_off']:.2f} vox | "
-            f"**{r['aar_dice_off']:.2f}%** / {r['aar_dice_std']:.2f}% | "
-            f"{r['aar_hd95_off']:.2f} vox | "
-            f"{r['myo_dice']:.2f}% | {status} |"
+            f"{display(r['scar_dice'])} | {display(r['scar_hd95'])} | "
+            f"{display(r['aar_dice'])} | {display(r['aar_hd95'])} | "
+            f"{display(r['myo_dice'])} | "
+            f"{r['scar_hd95_defined']}/{r['cases']} / {r['aar_hd95_defined']}/{r['cases']} |"
         )
-
-    lines.append("\n*Targets: Scar Dice > 74.00%, AAR Dice ~ 76.00% (>=75.80%), Scar HD95 < 3.66 vox, AAR HD95 < 3.89 vox*\n")
-    if best_overall:
-        lines.append(f"### Best Overall Checkpoint: `{best_overall['label']}` (Epoch {best_overall['epoch']})")
-        lines.append(f"- **Scar Dice (Official):** {best_overall['scar_dice_off']:.2f}%")
-        lines.append(f"- **AAR Dice (Official):** {best_overall['aar_dice_off']:.2f}%")
-        lines.append(f"- **Scar HD95 (Official):** {best_overall['scar_hd95_off']:.2f} vox")
-        lines.append(f"- **AAR HD95 (Official):** {best_overall['aar_hd95_off']:.2f} vox")
+    lines.append("\n*Checkpoint selection uses validation only. Distances exclude undefined surfaces; inspect the counts. These primary metrics do not reproduce I-MMSeg's evaluator.*")
     return "\n".join(lines)
 
 

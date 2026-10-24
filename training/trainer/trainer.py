@@ -30,7 +30,7 @@ from training.metrics.confusion_meter import ConfusionMeter
 from training.dataset.sampler import build_rare_class_sampler
 from training.predict import predict_volume
 from training.run_layout import RunLayout
-from training.metrics.surface_distance import protocol_for_dataset, dataset_rows, summarize_dataset_rows
+from training.metrics.surface_distance import protocol_for_dataset, benchmark_protocol_matches, dataset_rows, summarize_dataset_rows
 
 
 def validate_volumes(model, dataset, img_size, batch_size, device, amp_dtype, dataset_id="myops380"):
@@ -411,7 +411,7 @@ def trainer_Myops(args, model, snapshot_path):
     dataset_id = getattr(args, "dataset_id", "myops380")
     benchmark_protocol = protocol_for_dataset(dataset_id)
     resume_checkpoint = load_checkpoint(args.resume) if args.resume else None
-    if resume_checkpoint is not None and resume_checkpoint.get("benchmark_protocol") != benchmark_protocol:
+    if resume_checkpoint is not None and not benchmark_protocol_matches(resume_checkpoint.get("benchmark_protocol"), dataset_id):
         raise ValueError("Cannot resume a checkpoint from a different dataset/metric protocol")
     directory = Path(snapshot_path)
     directory.mkdir(parents=True, exist_ok=True)
@@ -549,7 +549,7 @@ def trainer_Myops(args, model, snapshot_path):
             if inclusive_path.is_file():
                 inclusive_checkpoint = load_checkpoint(inclusive_path)
                 if (inclusive_checkpoint.get("benchmark_data") != benchmark_data or
-                        inclusive_checkpoint.get("benchmark_protocol") != benchmark_protocol):
+                        not benchmark_protocol_matches(inclusive_checkpoint.get("benchmark_protocol"), dataset_id)):
                     raise ValueError("Best inclusive checkpoint belongs to a different benchmark")
                 recovered = inclusive_validation_score(inclusive_checkpoint.get("validation_volume_metrics", {}))
                 if recovered is not None:

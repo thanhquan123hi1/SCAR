@@ -20,7 +20,7 @@ if str(PROJECT_ROOT) not in sys.path:
 from training.dataset.data_contract import CLASS_NAMES, patient_id, read_split_names, lock_benchmark_data, resolve_label_order
 from training.dataset.myops_dataset import MyopsDataset
 from training.predict import predict_volume
-from training.metrics.surface_distance import protocol_for_dataset, dataset_rows, summarize_dataset_rows
+from training.metrics.surface_distance import protocol_for_dataset, benchmark_protocol_matches, dataset_rows, summarize_dataset_rows
 from training.models import model_from_config
 from training.run_layout import RunLayout
 from training.evaluation_logging import evaluation_logger
@@ -68,7 +68,7 @@ def main(argv=None):
         raise ValueError("Evaluation dataset differs from the checkpoint benchmark")
     benchmark_protocol = protocol_for_dataset(dataset_id)
     distance_unit = benchmark_protocol["distance_unit"]
-    if checkpoint.get("benchmark_protocol") != benchmark_protocol or "benchmark_data" not in checkpoint:
+    if not benchmark_protocol_matches(checkpoint.get("benchmark_protocol"), dataset_id) or "benchmark_data" not in checkpoint:
         raise ValueError("Checkpoint dataset/metric protocol is incompatible with this benchmark")
     label_order = args.label_order or checkpoint["args"]["label_order"]
     if resolve_label_order(label_order) != checkpoint["benchmark_data"]["source_label_order"]:
@@ -183,6 +183,7 @@ def main(argv=None):
         summary.update(
             checkpoint=str(checkpoint_path),
             checkpoint_epoch=checkpoint["epoch"] + 1,
+            checkpoint_metric_protocol_id=checkpoint["benchmark_protocol"]["id"],
             ablation=config.ablation,
             architecture=config.get("architecture", "cmspa_net"),
             split=args.split,
@@ -203,7 +204,7 @@ def main(argv=None):
             },
             benchmark_data=data_lock,
             split_hashes=checkpoint["split_hashes"],
-            hd95_note=("All distances are voxel distances (unit grid), never mm. Primary means exclude undefined surfaces; inspect counts. Official reproduction is separately named and retains the upstream empty-mask behavior."
+            hd95_note=("All distances are voxel distances (unit grid), never mm. Means exclude undefined surfaces; inspect defined/undefined counts and empty-prediction status."
                        if distance_unit == "voxel" else
                        ("Distances use preprocessed oracle ROI grid spacing in mm; GT is evaluated on that ROI, without native restoration. "
                         if benchmark_protocol.get("evaluation_grid") == "preprocessed_roi" else

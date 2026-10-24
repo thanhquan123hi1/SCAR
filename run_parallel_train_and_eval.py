@@ -34,16 +34,6 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 V5_STDOUT_LOG = LOG_DIR / "train_v5_stdout.log"
 V6_STDOUT_LOG = LOG_DIR / "train_v6_stdout.log"
 
-# Target benchmark criteria from official paper / competition
-TARGETS = {
-    "scar_dice": (0.7364, "Dice > 73.64%"),
-    "scar_hd95": (3.66, "HD95 < 3.66 vox"),
-    "edema_inc_dice": (0.7544, "Dice > 75.44%"),
-    "edema_inc_hd95": (3.89, "HD95 < 3.89 vox"),
-    "myo_dice": (0.8680, "Dice > 86.80%"),
-}
-
-
 def log(msg: str):
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
 
@@ -108,6 +98,8 @@ def evaluate_checkpoint(ckpt_path: Path, eval_dir: Path) -> dict | None:
 
 
 def run_evaluation_for_model(model_name: str, run_dir: Path) -> list[dict]:
+    def percent(value):
+        return None if value is None else value * 100
     ckpt_dir = run_dir / "checkpoints"
     ckpts_to_evaluate = [
         ("best", ckpt_dir / "best.pth"),
@@ -129,12 +121,12 @@ def run_evaluation_for_model(model_name: str, run_dir: Path) -> list[dict]:
                 "label": label,
                 "ckpt_file": ckpt_path.name,
                 "epoch": metrics.get("checkpoint_epoch", "-"),
-                "scar_dice": metrics.get("scar", {}).get("mean_official_dice", metrics.get("scar", {}).get("mean_dice", 0.0)) * 100,
-                "scar_hd95": metrics.get("scar", {}).get("mean_official_hd95_voxel", metrics.get("scar", {}).get("mean_hd95_voxel", float("inf"))),
-                "edema_inc_dice": metrics.get("edema_inclusive", {}).get("mean_official_dice", metrics.get("edema_inclusive", {}).get("mean_dice", 0.0)) * 100,
-                "edema_inc_hd95": metrics.get("edema_inclusive", {}).get("mean_official_hd95_voxel", metrics.get("edema_inclusive", {}).get("mean_hd95_voxel", float("inf"))),
-                "myo_dice": metrics.get("myocardial_ring", {}).get("mean_dice", 0.0) * 100,
-                "edema_dice": metrics.get("edema", {}).get("mean_official_dice", metrics.get("edema", {}).get("mean_dice", 0.0)) * 100,
+                "scar_dice": percent(metrics["scar"]["mean_dice"]),
+                "scar_hd95": metrics["scar"]["mean_hd95_voxel"],
+                "edema_inc_dice": percent(metrics["edema_inclusive"]["mean_dice"]),
+                "edema_inc_hd95": metrics["edema_inclusive"]["mean_hd95_voxel"],
+                "myo_dice": percent(metrics["myocardial_ring"]["mean_dice"]),
+                "edema_dice": percent(metrics["edema"]["mean_dice"]),
                 "empty_count": (
                     metrics.get("edema", {}).get("status_counts", {}).get("prediction_empty", 0) +
                     metrics.get("scar", {}).get("status_counts", {}).get("prediction_empty", 0) +
@@ -145,26 +137,23 @@ def run_evaluation_for_model(model_name: str, run_dir: Path) -> list[dict]:
 
 
 def format_results_markdown(all_results: list[dict]) -> str:
+    def display(value):
+        return "undefined" if value is None else f"{value:.2f}"
     lines = []
     lines.append("## 📊 TEST BENCHMARK RESULTS (76-Case Official Test Split)\n")
     lines.append("| Model | Checkpoint | Epoch | Scar Dice (%) | Scar HD95 (vox) | Edema-Inc Dice (%) | Edema-Inc HD95 (vox) | Myo Ring Dice (%) | Empty Masks |")
     lines.append("| :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |")
 
     for r in all_results:
-        s_d_pass = "✅ " if r["scar_dice"] > TARGETS["scar_dice"][0] * 100 else ""
-        s_h_pass = "✅ " if r["scar_hd95"] < TARGETS["scar_hd95"][0] else ""
-        e_d_pass = "✅ " if r["edema_inc_dice"] > TARGETS["edema_inc_dice"][0] * 100 else ""
-        e_h_pass = "✅ " if r["edema_inc_hd95"] < TARGETS["edema_inc_hd95"][0] else ""
-        m_d_pass = "✅ " if r["myo_dice"] > TARGETS["myo_dice"][0] * 100 else ""
         empty_pass = "✅ " if r["empty_count"] == 0 else "⚠️ "
 
         lines.append(
             f"| **{r['model']}** | `{r['label']}` | {r['epoch']} | "
-            f"{s_d_pass}{r['scar_dice']:.2f}% | {s_h_pass}{r['scar_hd95']:.2f} | "
-            f"{e_d_pass}{r['edema_inc_dice']:.2f}% | {e_h_pass}{r['edema_inc_hd95']:.2f} | "
-            f"{m_d_pass}{r['myo_dice']:.2f}% | {empty_pass}{r['empty_count']} |"
+            f"{display(r['scar_dice'])} | {display(r['scar_hd95'])} | "
+            f"{display(r['edema_inc_dice'])} | {display(r['edema_inc_hd95'])} | "
+            f"{display(r['myo_dice'])} | {empty_pass}{r['empty_count']} |"
         )
-    lines.append("\n*Targets: Scar Dice > 73.64%, Scar HD95 < 3.66 vox, Edema-Inc Dice > 75.44%, Edema-Inc HD95 < 3.89 vox, Myo Dice > 86.80%, Empty Masks = 0*")
+    lines.append("\n*Primary metrics. Numerical targets are historical references, not a matched-evaluator comparison with I-MMSeg. Checkpoints must be selected on validation, not this table.*")
     return "\n".join(lines)
 
 

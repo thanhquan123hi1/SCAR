@@ -104,7 +104,8 @@ Trong model YAML, thay riêng `data.data_root` sẽ chuyển list mặc định 
 `outputs.output_dir`; `--run-id` chỉ định trực tiếp sẽ chọn run đó dưới `--run-root`.
 
 MyoPS380 tiếp tục dùng các lệnh cũ không có `--dataset`, các split 243/61/76 và protocol
-`myops380_voxel_v1`. Không so sánh trực tiếp HD95 voxel của MyoPS380 với HD95 mm ở đây.
+`myops380_voxel_v2` chỉ báo metric chính; checkpoint v1 có đúng metadata cũ vẫn đọc được.
+Không so sánh trực tiếp HD95 voxel của MyoPS380 với HD95 mm ở đây.
 Không gọi score cohort80 là reproduction điểm paper cohort95/challenge.
 
 ## Kiểm chứng
