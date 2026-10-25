@@ -190,6 +190,7 @@ def test_training_profile_changes_dataset_but_retains_default_380():
 
 
 def test_real_training_resume_and_evaluation_use_separate_profile(packaged, tmp_path):
+    import torch
     from training.train import main as train
     from training.evaluate import main as evaluate
     from training.trainer.trainer import load_checkpoint
@@ -200,15 +201,22 @@ def test_real_training_resume_and_evaluation_use_separate_profile(packaged, tmp_
             "--epochs", "2", "--epochs-per-run", "1", "--batch-size", "64", "--accum-steps", "1",
             "--num-workers", "0", "--cpu-threads", "2", "--device", "cpu", "--amp", "none", "--no-tensorboard"]
     first = train(argv)
-    last = run / "checkpoints/last.pth"
+    last = run / "checkpoints/last.pt"
     checkpoint = load_checkpoint(last)
     assert checkpoint["epoch"] == 0
     assert checkpoint["benchmark_protocol"]["distance_unit"] == "mm"
     assert checkpoint["benchmark_data"]["dataset_id"] == "myopspp_bc80"
+    # An existing M2-Plus checkpoint can carry the previous factory identity and
+    # disabled anatomy-loss fields without changing its architecture or objective.
+    checkpoint["model_config"]["architecture"] = "cmspa_net"
+    checkpoint["model_config"]["ablation"] = "M2-Plus"
+    checkpoint["args"].update(wall_weight=0.0, inclusion_weight=0.0)
+    torch.save(checkpoint, last)
+    del checkpoint
     second = train(argv + ["--resume", str(last)])
     assert second["global_step"] > first["global_step"]
     assert load_checkpoint(last)["epoch"] == 1
-    best = run / "checkpoints/best.pth"
+    best = run / "checkpoints/best.pt"
     with pytest.raises(ValueError, match="dataset"):
         evaluate(["--checkpoint", str(best), "--data-root", str(cache), "--dataset", "myops380"])
     summary = evaluate(["--checkpoint", str(best), "--data-root", str(cache), "--device", "cpu",
@@ -225,21 +233,20 @@ def test_run_all_supports_new_dataset_profile():
     assert args.dataset == "myopspp_bc80"
 
 
-@pytest.mark.parametrize("ablation", ["M2-MAX-V6", "M2-MAX-V7"])
-def test_hierarchical_models_train_resume_evaluate_myopspp(packaged, tmp_path, ablation):
+def test_m2_plus_weighted_loss_train_resume_evaluate_myopspp(packaged, tmp_path):
     from training.train import main as train
     from training.evaluate import main as evaluate
     from training.trainer.trainer import load_checkpoint
     cache, _ = packaged
-    run = tmp_path / "hierarchical_run"
-    argv = ["--dataset", "myopspp_bc80", "--config", "testing", "--ablation", ablation,
+    run = tmp_path / "weighted_run"
+    argv = ["--dataset", "myopspp_bc80", "--config", "testing", "--ablation", "M2-PLUS",
             "--data-root", str(cache), "--list-dir", str(cache / "lists"), "--output-dir", str(run),
             "--epochs", "2", "--epochs-per-run", "1", "--batch-size", "64", "--accum-steps", "1",
-            "--wall-weight", "0.2", "--inclusion-weight", "0.1", "--aar-weight", "0.2",
+            "--aar-weight", "0.2",
             "--scar-weight", "0.2", "--ce-class-weights", "0.2", "1", "2", "2",
             "--num-workers", "0", "--cpu-threads", "2", "--device", "cpu", "--amp", "none", "--no-tensorboard"]
     first = train(argv)
-    last = run / "checkpoints/last.pth"
+    last = run / "checkpoints/last.pt"
     checkpoint = load_checkpoint(last)
     assert checkpoint["loss_protocol_version"] == 2
     assert checkpoint["benchmark_data"]["dataset_id"] == "myopspp_bc80"
@@ -249,7 +256,7 @@ def test_hierarchical_models_train_resume_evaluate_myopspp(packaged, tmp_path, a
     second = train(argv + ["--resume", str(last)])
     assert second["global_step"] > first["global_step"]
     assert load_checkpoint(last)["epoch"] == 1
-    summary = evaluate(["--checkpoint", str(run / "checkpoints/best.pth"), "--data-root", str(cache),
+    summary = evaluate(["--checkpoint", str(run / "checkpoints/best.pt"), "--data-root", str(cache),
                         "--device", "cpu", "--amp", "none", "--cpu-threads", "2", "--no-save-predictions"])
     assert summary["case_count"] == 16
     assert summary["dataset_id"] == "myopspp_bc80"
@@ -263,16 +270,16 @@ def test_run_all_trains_and_evaluates_profile_with_model_alias(packaged, tmp_pat
                 "--data-root", str(cache), "--run-root", str(tmp_path / "runs"), "--run-id", "smoke",
                 "--epochs", "1", "--batch-size", "64", "--accum-steps", "1", "--device", "cpu",
                 "--amp", "none", "--num-workers", "0", "--cpu-threads", "2", "--no-tensorboard"])
-    assert (run / "checkpoints/best.pth").is_file()
+    assert (run / "checkpoints/best.pt").is_file()
     from training.run_layout import RunLayout
-    metrics_path = RunLayout.from_checkpoint(run / "checkpoints/best.pth").evaluation("test_vol") / "metrics.json"
+    metrics_path = RunLayout.from_checkpoint(run / "checkpoints/best.pt").evaluation("test_vol") / "metrics.json"
     metrics = json.loads(metrics_path.read_text())
     assert metrics["dataset_id"] == "myopspp_bc80"
     assert metrics["case_count"] == 16
 
 
-@pytest.mark.parametrize("legacy_checkpoint", [False, True])
-def test_resume_preserves_best_inclusive_checkpoint_when_validation_gets_worse(packaged, tmp_path, legacy_checkpoint):
+@pytest.mark.parametrize("inclusive_improves", [False, True])
+def test_best_and_early_stopping_follow_inclusive_not_exclusive_dice(packaged, tmp_path, inclusive_improves):
     from unittest.mock import patch
     from training.train import main as train
     from training.trainer.trainer import load_checkpoint
@@ -281,33 +288,47 @@ def test_resume_preserves_best_inclusive_checkpoint_when_validation_gets_worse(p
     run = tmp_path / "inclusive_run"
     argv = ["--dataset", "myopspp_bc80", "--config", "testing", "--data-root", str(cache),
             "--list-dir", str(cache / "lists"), "--output-dir", str(run),
-            "--epochs", "2", "--epochs-per-run", "1", "--batch-size", "64", "--accum-steps", "1",
+            "--epochs", "3", "--epochs-per-run", "1", "--patience", "1", "--batch-size", "64", "--accum-steps", "1",
             "--num-workers", "0", "--cpu-threads", "2", "--device", "cpu", "--amp", "none", "--no-tensorboard"]
     truth = np.zeros((32, 32, 1), dtype=np.uint8)
     truth[10:14, 10:14] = 2
     truth[16:20, 16:20] = 3
-    worse = truth.copy()
-    worse[10:12, 10:14] = 0
-    worse[16:18, 16:20] = 0
+    # A: whole lesion predicted as scar: inclusive=5/6, exclusive=1/3.
+    # B: half of each class missed: inclusive=2/3, exclusive=2/3.
+    # The two metrics rank the epochs in opposite orders.
+    merged = truth.copy()
+    merged[merged == 2] = 3
+    partial = truth.copy()
+    partial[10:12, 10:14] = 0
+    partial[16:18, 16:20] = 0
+    predictions = (partial, merged) if inclusive_improves else (merged, partial)
     metrics = [summarize_dataset_rows(dataset_rows(pred, truth, "validation", compute_distance=False,
                                                   dataset_id="myopspp_bc80", spacing=[1.5, 1.5, 7]),
-                                     dataset_id="myopspp_bc80") for pred in (truth, worse)]
-    # Control the validation sequence, while exercising real training, serialized
-    # checkpoints and resume. A lower positive score must never replace epoch 0.
+                                      dataset_id="myopspp_bc80") for pred in predictions]
     with patch("training.trainer.trainer.validate_volumes", return_value=metrics[0]):
         train(argv)
-    best = run / "checkpoints/best_inclusive.pth"
+    best = run / "checkpoints/best.pt"
     assert load_checkpoint(best)["epoch"] == 0
-    last = run / "checkpoints/last.pth"
-    if legacy_checkpoint:
-        import torch
-        old = load_checkpoint(last)
-        old.pop("best_inclusive_score", None)
-        torch.save(old, last)
+    last = run / "checkpoints/last.pt"
+    before = best.read_bytes()
     with patch("training.trainer.trainer.validate_volumes", return_value=metrics[1]):
         train(argv + ["--resume", str(last)])
-    assert load_checkpoint(best)["epoch"] == 0
-    assert load_checkpoint(last)["best_inclusive_score"] == pytest.approx(1.0)
+    expected_epoch = 1 if inclusive_improves else 0
+    assert load_checkpoint(best)["epoch"] == expected_epoch
+    saved = load_checkpoint(last)
+    assert saved["best_score"] == pytest.approx(5 / 6)
+    assert saved["best_epoch"] == expected_epoch
+    assert saved["bad_epochs"] == (0 if inclusive_improves else 1)
+    assert saved["benchmark_protocol"]["selection_metric"] == "avg_pathology_inclusive_dice"
+    assert {p.name for p in best.parent.iterdir()} == {"best.pt", "last.pt"}
+    assert "best_inclusive_score" not in saved
+    if not inclusive_improves:
+        assert best.read_bytes() == before
+    from training.run_layout import RunLayout
+    records = [json.loads(line) for line in (RunLayout.from_checkpoint(last).logs / "metrics.jsonl").read_text().splitlines()]
+    assert records[-1]["early_stop"] is (not inclusive_improves)
+    assert records[-1]["val/avg_pathology_dice"] == pytest.approx(metrics[1]["avg_pathology_dice"])
+    assert records[-1]["val/avg_pathology_inclusive_dice"] == pytest.approx(metrics[1]["avg_pathology_inclusive_dice"])
 
 
 def test_dataset_identity_in_yaml_selects_complete_profile_and_cli_can_override(tmp_path):
@@ -345,9 +366,9 @@ def test_run_all_honors_yaml_output_directory(packaged, tmp_path, output_key):
                    "--epochs", "1", "--batch-size", "64", "--accum-steps", "1", "--device", "cpu",
                    "--amp", "none", "--num-workers", "0", "--cpu-threads", "2", "--no-tensorboard"])
     assert actual == run
-    assert (run / "checkpoints/best.pth").is_file()
+    assert (run / "checkpoints/best.pt").is_file()
     from training.run_layout import RunLayout
-    logged = json.loads((RunLayout.from_checkpoint(run / "checkpoints/best.pth").logs / "config.json").read_text())
+    logged = json.loads((RunLayout.from_checkpoint(run / "checkpoints/best.pt").logs / "config.json").read_text())
     assert Path(logged["args"]["list_dir"]) == manifests
 
 
@@ -386,7 +407,7 @@ def test_resume_of_early_stopped_checkpoint_performs_no_more_updates(packaged, t
                                     dataset_id="myopspp_bc80")
     with patch("training.trainer.trainer.validate_volumes", return_value=metrics):
         first = train(argv)
-    last = run / "checkpoints/last.pth"
+    last = run / "checkpoints/last.pt"
     before = last.read_bytes()
     assert load_checkpoint(last)["bad_epochs"] == 1
     second = train(argv + ["--resume", str(last)])

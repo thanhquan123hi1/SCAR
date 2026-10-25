@@ -1,4 +1,4 @@
-# System and Training Defaults for SCAR (M3: SSPANet + CMSPA)
+# System and Training Defaults for SCAR M2-Plus
 seed: 1234
 deterministic: true
 device: auto
@@ -33,8 +33,8 @@ data:
   foreground_boost: 1.3
 
 model:
-  model_name: CMSPA-Net
-  ablation: M3
+  model_name: M2-Plus
+  ablation: M2-PLUS
   img_size: 128
   num_classes: 4
   gradient_checkpointing: false

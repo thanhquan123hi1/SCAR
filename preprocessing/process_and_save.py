@@ -26,7 +26,6 @@ from training.dataset.data_contract import (
     CANONICAL_LABEL_ORDER,
     CLASS_NAMES,
     _write_manifest,
-    canonicalize_label,
     read_split_names,
     resolve_label_order,
     validate_patient_splits,

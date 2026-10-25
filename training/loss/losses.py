@@ -7,7 +7,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-# Version 2 fixes weighted CE reduction and independent-stream inclusion semantics.
+# Keep version 2: the weighted CE reduction is unchanged for M2-Plus.
 LOSS_PROTOCOL_VERSION = 2
 
 
@@ -47,7 +47,7 @@ class DiceLoss(nn.Module):
 
 
 class SegmentationLoss(nn.Module):
-    """Combined Cross-Entropy, Soft Dice, Dual Pathology-Targeted, and Myocardial Wall Auxiliary Loss."""
+    """Cross-Entropy and Soft Dice with optional AAR and scar supervision."""
 
     def __init__(
         self,
@@ -56,8 +56,6 @@ class SegmentationLoss(nn.Module):
         dice_weight=0.5,
         aar_weight=0.0,
         scar_weight=0.0,
-        wall_weight=0.0,
-        inclusion_weight=0.0,
         dice_class_weights=None,
         ce_class_weights=None,
         pathology_reduction="positive",
@@ -67,8 +65,7 @@ class SegmentationLoss(nn.Module):
             raise ValueError("pathology_reduction must be positive or sample")
         self.pathology_reduction = pathology_reduction
         for name, value in (("ce_weight", ce_weight), ("dice_weight", dice_weight),
-                            ("aar_weight", aar_weight), ("scar_weight", scar_weight),
-                            ("wall_weight", wall_weight), ("inclusion_weight", inclusion_weight)):
+                            ("aar_weight", aar_weight), ("scar_weight", scar_weight)):
             if not math.isfinite(value) or value < 0:
                 raise ValueError(f"{name} must be finite and nonnegative")
         for name, values in (("dice_class_weights", dice_class_weights), ("ce_class_weights", ce_class_weights)):
@@ -81,26 +78,11 @@ class SegmentationLoss(nn.Module):
         self.dice_weight = dice_weight
         self.aar_weight = aar_weight
         self.scar_weight = scar_weight
-        self.wall_weight = wall_weight
-        self.inclusion_weight = inclusion_weight
         self.dice_class_weights = dice_class_weights
         self.ce_class_weights = ce_class_weights
         self.dice = DiceLoss(n_classes)
 
     def forward(self, logits, target):
-        if isinstance(logits, dict):
-            wall_logits = logits.get("wall_logits")
-            aar_stream_logits = logits.get("aar_logits")
-            logits = logits["logits"]
-        else:
-            wall_logits = None
-            aar_stream_logits = None
-        if (self.wall_weight > 0 or self.inclusion_weight > 0) and wall_logits is None:
-            raise ValueError("Wall/inclusion auxiliary loss requires independent wall_logits (M2-Max V6/V7)")
-        # Keep auxiliary BCE, sigmoid and spatial reductions in float32 under AMP.
-        wall_logits = wall_logits.float() if wall_logits is not None else None
-        aar_stream_logits = aar_stream_logits.float() if aar_stream_logits is not None else None
-
         # 1. Cross-Entropy (with optional class weights)
         if self.ce_class_weights is not None:
             ce_w = torch.as_tensor(self.ce_class_weights, device=logits.device, dtype=torch.float32)
@@ -131,17 +113,6 @@ class SegmentationLoss(nn.Module):
                     aar_loss = aar_loss * has_patho.float().mean()
             else:
                 aar_loss = torch.tensor(0.0, device=logits.device, dtype=torch.float32)
-
-            # Extra supervision if model has explicit aar_stream_logits
-            if aar_stream_logits is not None:
-                y_aar_full = ((target == 2) | (target == 3)).float().unsqueeze(1)
-                aar_bce = F.binary_cross_entropy_with_logits(aar_stream_logits, y_aar_full)
-                p_stream_aar = torch.sigmoid(aar_stream_logits)
-                dims = (2, 3)
-                inter_stream = 2.0 * (p_stream_aar * y_aar_full).sum(dims) + 1e-5
-                denom_stream = p_stream_aar.sum(dims) + y_aar_full.sum(dims) + 1e-5
-                aar_stream_dice = (1.0 - inter_stream / denom_stream).mean()
-                aar_loss = 0.5 * aar_loss + 0.5 * (0.5 * (aar_bce + aar_stream_dice))
         else:
             aar_loss = torch.tensor(0.0, device=logits.device, dtype=torch.float32)
 
@@ -163,40 +134,11 @@ class SegmentationLoss(nn.Module):
         else:
             scar_loss = torch.tensor(0.0, device=logits.device, dtype=torch.float32)
 
-        # 5. Conditional Myocardial Wall Auxiliary Loss
-        if self.wall_weight > 0.0 and wall_logits is not None:
-            y_wall = (target > 0).float().unsqueeze(1)  # (B, 1, H, W)
-            wall_bce = F.binary_cross_entropy_with_logits(wall_logits, y_wall)
-            p_wall = torch.sigmoid(wall_logits)
-            dims = (2, 3)
-            inter_w = 2.0 * (p_wall * y_wall).sum(dims) + 1e-5
-            denom_w = p_wall.sum(dims) + y_wall.sum(dims) + 1e-5
-            wall_dice = (1.0 - inter_w / denom_w).mean()
-            wall_loss = 0.5 * (wall_bce + wall_dice)
-        else:
-            wall_loss = torch.tensor(0.0, device=logits.device, dtype=torch.float32)
-
-        # 6. Hierarchical Pathology Topological Inclusion Loss (Scar in AAR in Myo)
-        if self.inclusion_weight > 0.0:
-            probs = logits.float().softmax(1)
-            p_scar = probs[:, 3]
-            p_aar = (aar_stream_logits.sigmoid()[:, 0] if aar_stream_logits is not None
-                     else probs[:, 2] + probs[:, 3])
-            p_myo = wall_logits.sigmoid()[:, 0]
-            # Independent anatomy/AAR streams can disagree with multiclass pathology.
-            # Summing nested classes alone would make this penalty identically zero.
-            violation = F.relu(p_scar - p_aar) + 0.5 * F.relu(p_aar - p_myo)
-            inclusion_loss = violation.mean()
-        else:
-            inclusion_loss = torch.tensor(0.0, device=logits.device, dtype=torch.float32)
-
         total_loss = (
             self.ce_weight * ce
             + self.dice_weight * dice
             + self.aar_weight * aar_loss
             + self.scar_weight * scar_loss
-            + self.wall_weight * wall_loss
-            + self.inclusion_weight * inclusion_loss
         )
         return {
             "loss": total_loss,
@@ -204,6 +146,4 @@ class SegmentationLoss(nn.Module):
             "dice_loss": dice,
             "aar_loss": aar_loss,
             "scar_loss": scar_loss,
-            "wall_loss": wall_loss,
-            "inclusion_loss": inclusion_loss,
         }

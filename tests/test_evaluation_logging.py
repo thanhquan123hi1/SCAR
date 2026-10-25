@@ -34,10 +34,11 @@ class EvaluationLoggingTests(unittest.TestCase):
         checkpoint = dict(benchmark_protocol=BENCHMARK_PROTOCOL,
                           benchmark_data={'source_label_order': resolve_label_order('canonical')},
                           args={'label_order': 'canonical', 'img_size': 32},
-                          model_config={'ablation': 'M3'}, model={}, split_hashes={}, epoch=0)
+                          model_config={'ablation': 'M2-PLUS'}, model={}, split_hashes={}, epoch=0)
         if legacy:
             checkpoint['benchmark_protocol'] = dict(
                 BENCHMARK_PROTOCOL, id='myops380_voxel_v1',
+                selection_metric='avg_pathology_dice',
                 official_reference='I_MMSeg@90f46c4eb72924509895fcda6bc6a3b8c3316e66/utils.py:171-182',
                 official_empty_policy='if either empty: Dice=1 when pred<200 and target<=200, else 0; HD95=0')
         def predict(*args, **kwargs):
@@ -58,7 +59,7 @@ class EvaluationLoggingTests(unittest.TestCase):
                  patch('training.evaluate.lock_benchmark_data', return_value=checkpoint['benchmark_data']), \
                  patch('training.evaluate.MyopsDataset', return_value=samples), \
                  patch('training.evaluate.predict_volume', side_effect=predict):
-                main(['--checkpoint', str(layout.checkpoints / 'best.pth'),
+                main(['--checkpoint', str(layout.checkpoints / 'best.pt'),
                       '--data-root', tmp])
             self.assertEqual(events, ['predict', 'predict'])
             self.assertFalse(layout.tensorboard.exists())
@@ -72,7 +73,8 @@ class EvaluationLoggingTests(unittest.TestCase):
             report = json.loads((output / 'metrics.json').read_text(encoding='utf-8'))
             self.assertEqual(report['inference_protocol']['id'], 'single_pass_argmax_v1')
             self.assertEqual(report['inference_protocol']['mask_processing'], 'none')
-            self.assertEqual(report['benchmark_protocol']['id'], 'myops380_voxel_v2')
+            self.assertEqual(report['benchmark_protocol']['id'], 'myops380_voxel_v3')
+            self.assertEqual(report['checkpoint_selection_metric'], checkpoint['benchmark_protocol']['selection_metric'])
             self.assertEqual(report['checkpoint_metric_protocol_id'], checkpoint['benchmark_protocol']['id'])
             self.assertEqual(report['scar']['mean_dice'], 1.0)
             self.assertFalse(any('official_' in key for key in report))

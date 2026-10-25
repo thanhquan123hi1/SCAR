@@ -1,68 +1,8 @@
-"""Modular layers and sub-networks for attention, fusion, and decoding."""
-from training.models.modules.cmspa import CMSPA_Fusion, channel_std
-from training.models.modules.decoder import (
-    Conv2dReLU,
-    DecoderBlock,
-    DecoderCup,
-    SegmentationHead,
-)
-from training.models.modules.fusion import (
-    ConcatFusion,
-    CrossAttention_Fusion,
-    Fusion_Embed,
-)
-from training.models.modules.h_cmspa import H_CMSPA_Fusion
+"""Shared layers used by M2-Plus."""
+from training.models.modules.decoder import Conv2dReLU, DecoderBlock, DecoderCup, SegmentationHead
+from training.models.modules.fusion import ConcatFusion, Fusion_Embed
 from training.models.modules.m2_plus import M2Plus_Fusion
-from training.models.modules.m2_max import M2Max_Fusion, SkipGateFusion
-from training.models.modules.m2_max_pro import M2MaxPro_Fusion
-from training.models.modules.m2_max_v2 import M2MaxV2_Fusion
-from training.models.modules.m2_max_v4 import M2MaxV4_Fusion, SpatialSkipGateFusion
-from training.models.modules.m2_max_v5 import M2MaxV5_Fusion, AdaptiveSkipGateFusion
-from training.models.modules.m2_max_v6 import M2MaxV6_Fusion, BoundaryAwareSkipGateFusion, HierarchicalAnatomicalHead
-from training.models.modules.m2_max_v7 import M2MaxV7_Fusion, TriStreamHierarchicalHead
-from training.models.modules.m2_pro import M2Pro_Fusion
-from training.models.modules.sspanet import (
-    SSPA_BasicConv,
-    SSPA_ChannelAttention,
-    SSPA_SpatialAttention,
-    SSPA_ZPool,
-    SSPANet_Block,
-    _statistics_input,
-    strip_rms,
-)
+from training.models.modules.sspanet import SSPANet_Block
 
-__all__ = [
-    "M2Max_Fusion",
-    "M2MaxPro_Fusion",
-    "M2MaxV2_Fusion",
-    "M2MaxV4_Fusion",
-    "M2MaxV5_Fusion",
-    "M2MaxV6_Fusion",
-    "M2MaxV7_Fusion",
-    "SkipGateFusion",
-    "SpatialSkipGateFusion",
-    "AdaptiveSkipGateFusion",
-    "BoundaryAwareSkipGateFusion",
-    "HierarchicalAnatomicalHead",
-    "TriStreamHierarchicalHead",
-    "M2Pro_Fusion",
-    "H_CMSPA_Fusion",
-    "CMSPA_Fusion",
-    "channel_std",
-    "Conv2dReLU",
-    "DecoderBlock",
-    "DecoderCup",
-    "SegmentationHead",
-    "ConcatFusion",
-    "CrossAttention_Fusion",
-    "M2Plus_Fusion",
-    "Fusion_Embed",
-    "SSPA_BasicConv",
-    "SSPA_ChannelAttention",
-    "SSPA_SpatialAttention",
-    "SSPA_ZPool",
-    "SSPANet_Block",
-    "_statistics_input",
-    "strip_rms",
-]
-
+__all__ = ["Conv2dReLU", "DecoderBlock", "DecoderCup", "SegmentationHead",
+           "ConcatFusion", "Fusion_Embed", "M2Plus_Fusion", "SSPANet_Block"]

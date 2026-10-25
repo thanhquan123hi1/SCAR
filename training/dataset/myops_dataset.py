@@ -17,15 +17,10 @@ from torch.nn import functional as F
 from torch.utils.data import Dataset
 
 from training.dataset.data_contract import (
-    CANONICAL_LABEL_ORDER,
-    CLASS_NAMES,
-    LEGACY_LABEL_ORDER,
     canonicalize_label,
-    ensure_patient_splits,
     patient_id,
     read_split_names,
     resolve_label_order,
-    validate_patient_splits,
 )
 
 

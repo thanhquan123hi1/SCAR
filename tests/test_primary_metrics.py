@@ -1,7 +1,5 @@
 """Primary metric semantics and strict compatibility with old reporting metadata."""
 from copy import deepcopy
-import ast
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -15,6 +13,7 @@ from training.metrics.surface_distance import (
 
 def legacy_protocol():
     return dict(BENCHMARK_PROTOCOL, id="myops380_voxel_v1",
+                selection_metric="avg_pathology_dice",
                 official_reference="I_MMSeg@90f46c4eb72924509895fcda6bc6a3b8c3316e66/utils.py:171-182",
                 official_empty_policy="if either empty: Dice=1 when pred<200 and target<=200, else 0; HD95=0")
 
@@ -38,6 +37,7 @@ def test_primary_reports_penalize_small_misses_and_keep_distance_counts(dataset)
     assert scar[f"hd95_{unit}_defined_cases"] == 1
     assert scar[f"hd95_{unit}_undefined_cases"] == 2
     assert summary["avg_pathology_dice"] is None  # no defined exclusive-edema cases
+    assert summary["avg_pathology_inclusive_dice"] == 0.5
     def keys(value):
         if isinstance(value, dict):
             for key, child in value.items():
@@ -80,45 +80,39 @@ def test_only_exact_legacy_reporting_protocol_is_accepted():
     assert not benchmark_protocol_matches(original, "myopspp_bc80")
 
 
-def extract_function(filename, name):
-    """Exercise report functions without orchestrator training/backup side effects."""
-    path = Path(__file__).resolve().parents[1] / filename
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == name)
-    env = {}
-    exec(compile(ast.Module(body=[node], type_ignores=[]), str(path), "exec"), env)
-    return env[name]
+@pytest.mark.parametrize("dataset", DATASET_IDS)
+def test_old_selection_is_readable_but_cannot_resume(dataset):
+    current = protocol_for_dataset(dataset)
+    assert current["selection_metric"] == "avg_pathology_inclusive_dice"
+    assert benchmark_protocol_matches(current, dataset, allow_legacy_selection=False)
+    old_id = ("myops380_voxel_v2" if dataset == "myops380" else
+              f"{dataset}_roi_mm_v1" if "evaluation_grid" in current else "myopspp_bc80_mm_v1")
+    old = dict(current, id=old_id, selection_metric="avg_pathology_dice")
+    assert benchmark_protocol_matches(old, dataset)
+    assert not benchmark_protocol_matches(old, dataset, allow_legacy_selection=False)
+    old["regions"] = dict(old["regions"], edema_inclusive=[2])
+    assert not benchmark_protocol_matches(old, dataset)
 
 
-def test_v7_primary_report_handles_undefined_distances_without_test_winner():
-    render = extract_function("run_v7_goal_loop.py", "format_report")
-    report = render([dict(label="best", epoch=3, scar_dice=0., scar_hd95=None,
-                          aar_dice=0., aar_hd95=None, myo_dice=80.,
-                          scar_hd95_defined=0, aar_hd95_defined=0, cases=76)])
-    assert "undefined" in report
-    assert "0/76" in report
-    assert "Best Overall" not in report
-    assert "Off / Std" not in report
+def test_trainer_rejects_old_selection_before_reading_data(tmp_path):
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    from training.trainer.trainer import trainer_Myops
+    args = SimpleNamespace(dataset_id="myops380", resume="last.pth")
+    with patch("training.trainer.trainer.load_checkpoint", return_value={"benchmark_protocol": legacy_protocol()}):
+        with pytest.raises(ValueError, match="--init-weights"):
+            trainer_Myops(args, None, tmp_path / "untouched")
+    assert not (tmp_path / "untouched").exists()
 
 
-def test_threshold_monitor_does_not_fall_back_to_author_compatibility_scores():
-    verify = extract_function("monitor_and_evaluate_all.py", "verify_criteria")
-    verify.__globals__.update(TARGET_SCAR_DICE=.7364, TARGET_SCAR_HD95=3.66,
-                             TARGET_EDEMA_INC_DICE=.7544, TARGET_EDEMA_INC_HD95=3.89,
-                             TARGET_MYO_DICE=.868)
-    metrics = {r: dict(mean_dice=0., mean_hd95_voxel=10., mean_official_dice=1.,
-                       mean_official_hd95_voxel=0., status_counts={})
-               for r in ("scar", "edema_inclusive", "myocardial_ring")}
-    passed, detail = verify(metrics)
-    assert not passed
-    assert detail["scar_dice"][0] == 0
-    assert detail["scar_hd95"][0] == 10
-
-
-def test_parallel_report_preserves_undefined_values():
-    render = extract_function("run_parallel_train_and_eval.py", "format_results_markdown")
-    report = render([dict(model="M3", label="best", epoch=1, scar_dice=None,
-                          scar_hd95=None, edema_inc_dice=None, edema_inc_hd95=None,
-                          myo_dice=80., empty_count=76)])
-    assert "undefined" in report
-    assert "not a matched-evaluator comparison" in report
+@pytest.mark.parametrize("source", ["cli", "yaml"])
+def test_periodic_checkpoints_are_rejected(source, tmp_path):
+    from training.train import parse_args
+    if source == "cli":
+        argv = ["--save-every", "10"]
+    else:
+        config = tmp_path / "periodic.yaml"
+        config.write_text("train:\n  save_every: 10\n")
+        argv = ["--config", str(config)]
+    with pytest.raises(SystemExit if source == "cli" else ValueError):
+        parse_args(argv)

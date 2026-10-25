@@ -1,4 +1,4 @@
-"""Prepare or validate MyoPS cache, train M2/M3, then evaluate held-out volumes."""
+"""Prepare or validate MyoPS cache, train M2-Plus, then evaluate held-out volumes."""
 from __future__ import annotations
 
 import argparse
@@ -28,7 +28,7 @@ def project_path(value: str | Path) -> Path:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", default="training/config/models/cmspa_net.yaml")
+    parser.add_argument("--config", default="training/config/models/m2_plus.yaml")
     from training.dataset.benchmark_profiles import DATASET_IDS
     parser.add_argument("--dataset", choices=DATASET_IDS, default=None,
                         help="CLI > YAML data.dataset_id > myops380")
@@ -64,6 +64,8 @@ def main(argv=None) -> Path:
     model_config_path = project_path(args.config)
     config_name = str(model_config_path) if model_config_path.is_file() else args.config
     config = load_merged_config(config_name, dataset_id=args.dataset)
+    from training.models import validate_model_config
+    validate_model_config(config["model"])
     args.dataset = config["data"]["dataset_id"]
     with (ROOT / "preprocessing/config.yaml").open(encoding="utf-8") as stream:
         prep_config = yaml.safe_load(stream)
@@ -155,7 +157,7 @@ def main(argv=None) -> Path:
         if value is not None:
             train_command.append("--" + ("" if value else "no-") + name.replace("_", "-"))
     run_command(train_command, "3/4: Train with validation-based checkpoint selection")
-    checkpoint = run_dir / "checkpoints" / "best.pth"
+    checkpoint = run_dir / "checkpoints" / "best.pt"
     if not checkpoint.is_file():
         raise FileNotFoundError(f"Training did not produce the best checkpoint: {checkpoint}")
     if not args.skip_evaluate:

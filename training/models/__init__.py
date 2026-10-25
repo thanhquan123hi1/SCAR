@@ -1,98 +1,39 @@
-"""Model architectures and model registry."""
+"""M2-Plus construction and compatibility with M2-Plus checkpoint metadata."""
 from __future__ import annotations
 
-from functools import partial
-from typing import Callable
+from training.models.m2_plus_net import M2PlusNet, get_config, get_testing
 
-from torch import nn
 
-from training.models.backbones.resnet_v2 import PreActBottleneck, ResNetV2, StdConv2d
-from training.models.cmspa_net import (
-    CONFIGS,
-    CMSPANet,
-    Embeddings,
-    Transformer,
-    VisionTransformer,
-    get_config,
-    get_r50_b16_config,
-    get_r50_l16_config,
-    get_testing,
-)
-from training.models.modules.cmspa import CMSPA_Fusion
-from training.models.modules.decoder import DecoderCup, SegmentationHead
-from training.models.modules.fusion import ConcatFusion, CrossAttention_Fusion, Fusion_Embed
-from training.models.modules.m2_plus import M2Plus_Fusion
-from training.models.modules.sspanet import SSPANet_Block
-
-MODEL_REGISTRY: dict[str, Callable[..., nn.Module]] = {
-    "cmspa_net": CMSPANet,
-    "cmspa": CMSPANet,
-    "vision_transformer": CMSPANet,
-    "cross_attn_baseline": partial(CMSPANet, ablation="M2"),
-    "m2_plus": partial(CMSPANet, ablation="M2-PLUS"),
-    "m2plus": partial(CMSPANet, ablation="M2-PLUS"),
-    "m2_pro": partial(CMSPANet, ablation="M2-PRO"),
-    "m2pro": partial(CMSPANet, ablation="M2-PRO"),
-    "m2_max": partial(CMSPANet, ablation="M2-MAX"),
-    "m2max": partial(CMSPANet, ablation="M2-MAX"),
-    "m2_max_pro": partial(CMSPANet, ablation="M2-MAX-PRO"),
-    "m2maxpro": partial(CMSPANet, ablation="M2-MAX-PRO"),
-    "m2_max_v2": partial(CMSPANet, ablation="M2-MAX-V2"),
-    "m2maxv2": partial(CMSPANet, ablation="M2-MAX-V2"),
-    "m2_max_v4": partial(CMSPANet, ablation="M2-MAX-V4"),
-    "m2maxv4": partial(CMSPANet, ablation="M2-MAX-V4"),
-    "m2_max_v5": partial(CMSPANet, ablation="M2-MAX-V5"),
-    "m2maxv5": partial(CMSPANet, ablation="M2-MAX-V5"),
-    "m2_max_v6": partial(CMSPANet, ablation="M2-MAX-V6"),
-    "m2maxv6": partial(CMSPANet, ablation="M2-MAX-V6"),
-    "m2_max_v7": partial(CMSPANet, ablation="M2-MAX-V7"),
-    "m2maxv7": partial(CMSPANet, ablation="M2-MAX-V7"),
-    "h_cmspa": partial(CMSPANet, ablation="H-CMSPA"),
-    "hcmspa": partial(CMSPANet, ablation="H-CMSPA"),
-}
+def validate_model_config(config):
+    """Reject retired architectures before loading weights or modifying a run."""
+    architecture = str(config.get("architecture", "m2_plus")).lower().replace("-", "_")
+    if architecture not in {"m2_plus", "m2plus", "cmspa_net"}:
+        raise ValueError(f"Only M2-Plus is supported; received architecture {architecture!r}")
+    # cmspa_net was shared by several architectures. Its ablation must identify
+    # M2-Plus explicitly rather than silently interpreting an old model as M2-Plus.
+    if architecture == "cmspa_net" and "ablation" not in config:
+        raise ValueError("Legacy cmspa_net checkpoint must identify ablation M2-PLUS")
+    if str(config.get("ablation", "M2-PLUS")).upper() != "M2-PLUS":
+        raise ValueError(f"Only M2-Plus is supported; received ablation {config.get('ablation')!r}")
 
 
 def model_from_config(config, **kwargs):
-    """Old checkpoints without an architecture field remain CMSPANet."""
-    architecture = config.get("architecture", "cmspa_net")
-    return build_model(architecture, config=config, **kwargs)
+    validate_model_config(config)
+    return M2PlusNet(config=config, **kwargs)
 
 
-def build_model(model_name: str, **kwargs) -> nn.Module:
-    """Instantiate a registered model by name."""
-    name = model_name.lower().replace("-", "_")
-    if name not in MODEL_REGISTRY:
-        raise ValueError(
-            f"Unknown model '{model_name}'. Available models: {list(MODEL_REGISTRY.keys())}"
-        )
-    expected = {"cross_attn_baseline": "M2", "m2_plus": "M2-PLUS", "m2plus": "M2-PLUS"}.get(name)
-    if expected is not None and kwargs.get("ablation", expected).upper() != expected:
-        raise ValueError(f"Model {model_name!r} requires ablation {expected}")
-    return MODEL_REGISTRY[name](**kwargs)
+def build_model(model_name="m2_plus", **kwargs):
+    """Build M2-Plus; cmspa_net is accepted only with explicit M2-Plus metadata."""
+    config = kwargs.get("config", {})
+    selected = dict(config)
+    selected["architecture"] = model_name
+    if "ablation" in kwargs:
+        selected["ablation"] = kwargs["ablation"]
+    validate_model_config(selected)
+    if config:
+        validate_model_config(config)
+    return M2PlusNet(**kwargs)
 
 
-__all__ = [
-    "model_from_config",
-    "CMSPANet",
-    "VisionTransformer",
-    "CONFIGS",
-    "get_config",
-    "get_r50_b16_config",
-    "get_r50_l16_config",
-    "get_testing",
-    "Embeddings",
-    "Transformer",
-    "ResNetV2",
-    "StdConv2d",
-    "PreActBottleneck",
-    "SSPANet_Block",
-    "CMSPA_Fusion",
-    "ConcatFusion",
-    "CrossAttention_Fusion",
-    "M2Plus_Fusion",
-    "Fusion_Embed",
-    "DecoderCup",
-    "SegmentationHead",
-    "MODEL_REGISTRY",
-    "build_model",
-]
+__all__ = ["M2PlusNet", "get_config", "get_testing", "build_model",
+           "model_from_config", "validate_model_config"]

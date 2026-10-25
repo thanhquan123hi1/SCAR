@@ -95,8 +95,8 @@ def _lock_myopspp_data(data_root, list_dir, label_order, dataset_id="myopspp_bc8
     if info.get("patients") != fixed or set(info.get("case_shapes", {})) != cohort:
         raise ValueError("Cache cohort/splits differ from the fixed MyoPS++ benchmark")
     if roi:
-        from training.metrics.surface_distance import protocol_for_dataset
-        if info.get("benchmark_protocol") != protocol_for_dataset(dataset_id):
+        from training.metrics.surface_distance import benchmark_protocol_matches
+        if not benchmark_protocol_matches(info.get("benchmark_protocol"), dataset_id):
             raise ValueError("ROI cache preprocessing/evaluation protocol differs from the selected profile")
         for case, shape in info["case_shapes"].items():
             if len(shape) != 3 or shape[:2] != [128, 128] or type(shape[2]) is not int or shape[2] <= 0:

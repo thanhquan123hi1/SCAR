@@ -1,7 +1,6 @@
 """ROI exports must keep their own geometry, splits and already normalized values."""
 import hashlib
 import json
-from pathlib import Path
 
 import h5py
 import nibabel as nib
@@ -93,6 +92,16 @@ def test_adapter_preserves_export_values_and_locks_roi_protocol(roi_export, tmp_
     with pytest.raises(ValueError):
         lock_benchmark_data(cache, cache / "lists", "canonical", "myopspp_bc80")
     before = report["benchmark_data"]
+    # Selection changed, but existing ROI cache bytes/geometry remain valid.
+    metadata_path = cache / "dataset_metadata.json"
+    metadata = json.loads(metadata_path.read_text())
+    metadata["benchmark_protocol"].update(id=f"{profile}_roi_mm_v1", selection_metric="avg_pathology_dice")
+    metadata_path.write_text(json.dumps(metadata))
+    legacy_lock = lock_benchmark_data(cache, cache / "lists", "canonical", profile)
+    assert legacy_lock["patient_counts"] == before["patient_counts"]
+    assert legacy_lock["split_ids_sha256"] == before["split_ids_sha256"]
+    assert legacy_lock == lock_benchmark_data(cache, cache / "lists", "canonical", profile)
+    before = legacy_lock
     with h5py.File(cache / f"LGE/test_vol_h5/{case}.npy.h5", "r+") as volume:
         volume["image"][0, 0, 0] = 0.9
     assert lock_benchmark_data(cache, cache / "lists", "canonical", profile) != before
@@ -189,20 +198,20 @@ def test_invalid_native_provenance_is_rejected(roi_export, tmp_path, problem):
     assert not cache.exists()
 
 
-def test_warm_start_transfers_hierarchical_base_classifier_to_standard_head(tmp_path):
-    from training.models import CMSPANet, get_testing
+def test_warm_start_preserves_m2_plus_classifier(tmp_path):
+    from training.models import M2PlusNet, get_testing
     from training.train import _load_initial_weights
     from training.dataset.data_contract import CLASS_NAMES
-    source = CMSPANet(get_testing(), img_size=32, ablation="M2-MAX-V6")
-    destination = CMSPANet(get_testing(), img_size=32, ablation="M2-MAX-V4")
+    source = M2PlusNet(get_testing(), img_size=32, ablation="M2-PLUS")
+    destination = M2PlusNet(get_testing(), img_size=32, ablation="M2-PLUS")
     with torch.no_grad():
-        source.segmentation_head.base_head.weight.fill_(0.125)
-        source.segmentation_head.base_head.bias.fill_(0.25)
+        source.segmentation_head[0].weight.fill_(0.125)
+        source.segmentation_head[0].bias.fill_(0.25)
     path = tmp_path / "init.pth"
-    torch.save(dict(format_version=1, class_names=CLASS_NAMES, model=source.state_dict()), path)
+    torch.save(dict(format_version=1, class_names=CLASS_NAMES, model=source.state_dict(), model_config=source.config.to_dict()), path)
     _load_initial_weights(destination, path)
-    torch.testing.assert_close(destination.segmentation_head[0].weight, source.segmentation_head.base_head.weight)
-    torch.testing.assert_close(destination.segmentation_head[0].bias, source.segmentation_head.base_head.bias)
+    torch.testing.assert_close(destination.segmentation_head[0].weight, source.segmentation_head[0].weight)
+    torch.testing.assert_close(destination.segmentation_head[0].bias, source.segmentation_head[0].bias)
 
 
 def test_roi_train_resume_evaluate_and_objective_guard(roi_export, tmp_path):
@@ -216,18 +225,17 @@ def test_roi_train_resume_evaluate_and_objective_guard(roi_export, tmp_path):
     argv = ["--dataset", profile, "--config", "testing", "--data-root", str(cache),
             "--list-dir", str(cache / "lists"), "--output-dir", str(run),
             "--epochs", "2", "--epochs-per-run", "1", "--batch-size", "32", "--accum-steps", "2",
-            "--ablation", "M2-MAX-V7", "--aar-weight", "0.2", "--scar-weight", "0.2",
-            "--wall-weight", "0.2", "--inclusion-weight", "0.1",
+            "--ablation", "M2-PLUS", "--aar-weight", "0.2", "--scar-weight", "0.2",
             "--num-workers", "0", "--cpu-threads", "2", "--device", "cpu", "--amp", "none", "--no-tensorboard"]
     first = train(argv)
-    last = run / "checkpoints/last.pth"
+    last = run / "checkpoints/last.pt"
     with pytest.raises(ValueError, match="pathology_reduction"):
         train(argv + ["--resume", str(last), "--pathology-reduction", "positive"])
     second = train(argv + ["--resume", str(last)])
     assert second["global_step"] > first["global_step"]
     assert load_checkpoint(last)["epoch"] == 1
     assert load_checkpoint(last)["benchmark_protocol"]["evaluation_grid"] == "preprocessed_roi"
-    summary = evaluate(["--checkpoint", str(run / "checkpoints/best.pth"), "--data-root", str(cache),
+    summary = evaluate(["--checkpoint", str(run / "checkpoints/best.pt"), "--data-root", str(cache),
                         "--device", "cpu", "--amp", "none", "--cpu-threads", "2", "--no-save-predictions"])
     assert summary["dataset_id"] == profile and summary["case_count"] == counts[2]
     assert "mean_hd95_mm" in summary["scar"]
@@ -242,5 +250,5 @@ def test_run_all_can_package_train_and_evaluate_roi_export(roi_export, tmp_path)
                 "--epochs", "1", "--batch-size", "32", "--accum-steps", "1", "--device", "cpu",
                 "--amp", "none", "--num-workers", "0", "--cpu-threads", "2", "--no-tensorboard"])
     from training.run_layout import RunLayout
-    summary = json.loads((RunLayout.from_checkpoint(run / "checkpoints/best.pth").evaluation("test_vol") / "metrics.json").read_text())
+    summary = json.loads((RunLayout.from_checkpoint(run / "checkpoints/best.pt").evaluation("test_vol") / "metrics.json").read_text())
     assert summary["dataset_id"] == profile and summary["case_count"] == counts[2]

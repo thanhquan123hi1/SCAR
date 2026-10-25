@@ -37,13 +37,13 @@ Shape/affine agreement không chứng minh anatomical alignment; dùng aligned r
 đăng ký ảnh upstream nếu overlay cho thấy lệch giải phẫu. Grid có shear bị reject vì
 distance transform theo spacing cần các trục voxel trực giao.
 
-Metric profile **`myopspp_bc80_mm_v1`**: patient-mean Dice, IoU, precision, recall;
+Metric profile **`myopspp_bc80_mm_v2`**: patient-mean Dice, IoU, precision, recall;
 HD95 và ASD theo **mm**. Báo normal, edema-exclusive `{2}`, scar `{3}`,
 edema-inclusive `{2,3}`, myocardial ring `{1,2,3}`. Hai mask rỗng bị loại khỏi mean;
 một mask rỗng có Dice/IoU=0 và distance undefined. Báo defined/undefined counts.
 Không có metric “official reproduction” dựa trên empty-mask threshold của MyoPS380.
-`best.pth` chọn bằng trung bình patient-mean Dice scar và edema-exclusive trên val.
-`best_inclusive.pth` là output phụ theo scar/edema-inclusive, không dùng test để chọn model.
+`best.pt` chọn bằng trung bình patient-mean Dice scar và edema-inclusive `{2,3}` trên validation volumes; early stopping dùng cùng điểm này.
+Chỉ lưu `best.pt` và `last.pt`; không dùng test để chọn model và không lưu checkpoint định kỳ.
 
 ## Chuẩn bị cache mới
 
@@ -62,11 +62,11 @@ và train; không chạy lại packaging vào cùng destination.
 ## Train và test
 
 ```powershell
-python train.py --dataset myopspp_bc80 --config training/config/models/cmspa_net.yaml --run-id myopspp_m3_seed1234
-python test.py --checkpoint outputs/myopspp_bc80/runs/myopspp_m3_seed1234/checkpoints/best.pth --data-root data/myopspp_bc80/cache
+python train.py --dataset myopspp_bc80 --config training/config/models/m2_plus.yaml --run-id myopspp_m2_plus_seed1234
+python test.py --checkpoint outputs/myopspp_bc80/runs/myopspp_m2_plus_seed1234/checkpoints/best.pt --data-root data/myopspp_bc80/cache
 ```
 
-Đổi `--config` sang model YAML khác để chạy các ablation trong SCAR trên cùng benchmark.
+Repo dùng duy nhất M2-Plus; model YAML tùy chỉnh có thể thay thông số train/loss trên cùng benchmark.
 `--dataset` tự nạp [`../training/config/datasets/myopspp_bc80.yaml`](../training/config/datasets/myopspp_bc80.yaml)
 giữa base config và model config. Có thể khai báo `data.dataset_id: myopspp_bc80` trong
 model YAML thay cho flag. Dataset identity theo CLI > model YAML > base YAML > MyoPS380.
@@ -76,15 +76,16 @@ dataset từ checkpoint; `--dataset myopspp_bc80` là identity check tùy chọn
 Resume với cùng config, seed, batch size, epoch budget, data-root và model:
 
 ```powershell
-python train.py --dataset myopspp_bc80 --config training/config/models/cmspa_net.yaml --resume outputs/myopspp_bc80/runs/myopspp_m3_seed1234/checkpoints/last.pth
+python train.py --dataset myopspp_bc80 --config training/config/models/m2_plus.yaml --resume outputs/myopspp_bc80/runs/myopspp_m2_plus_seed1234/checkpoints/last.pt
 ```
 
-Resume giữ điểm tốt nhất của cả checkpoint chính và inclusive; checkpoint cũ chưa lưu
-điểm inclusive được phục hồi từ `best_inclusive.pth` hiện có. Nếu run đã early-stop,
+Resume giữ điểm inclusive tốt nhất và trạng thái patience của protocol mới. Checkpoint M2-Plus
+protocol cũ vẫn được evaluate hoặc dùng `--init-weights` trong run mới, nhưng không resume
+trạng thái chọn best theo edema-exclusive. Nếu run đã early-stop,
 resume với cùng patience không chạy thêm optimizer updates. Muốn tiếp tục, phải chủ động
 đổi chính sách patience, ví dụ `--patience 0` để tắt early stopping.
 
-Output theo run: `checkpoints/best.pth`, `last.pth`, `logs_<model>_seed<seed>/config.json`,
+Output theo run: `checkpoints/best.pt`, `last.pt`, `logs_<model>_seed<seed>/config.json`,
 metrics CSV/JSONL và `logs_<model>_seed<seed>/test_results/{metrics.json,per_case.csv,*_pred.nii.gz}`.
 Cache bytes, label convention, split hashes và metric profile được lưu trong checkpoint;
 train/resume/test reject khi không khớp. Checkpoint MyoPS380 không dùng được để benchmark
@@ -93,7 +94,7 @@ cache MyoPS++ và ngược lại.
 Chạy toàn pipeline trên cache đã có:
 
 ```powershell
-python run_all.py --dataset myopspp_bc80 --config training/config/models/cmspa_net.yaml --skip-cache --run-id myopspp_m3_full
+python run_all.py --dataset myopspp_bc80 --config training/config/models/m2_plus.yaml --skip-cache --run-id myopspp_m2_plus_full
 ```
 
 Bỏ `--skip-cache` nếu muốn tự tạo cache khi chưa có; `--raw-root` đổi nguồn,
@@ -103,8 +104,8 @@ Trong model YAML, thay riêng `data.data_root` sẽ chuyển list mặc định 
 `data.list_dir` được khai báo rõ sẽ được giữ. `run_all` hỗ trợ `outputs.dir` hoặc alias
 `outputs.output_dir`; `--run-id` chỉ định trực tiếp sẽ chọn run đó dưới `--run-root`.
 
-MyoPS380 tiếp tục dùng các lệnh cũ không có `--dataset`, các split 243/61/76 và protocol
-`myops380_voxel_v2` chỉ báo metric chính; checkpoint v1 có đúng metadata cũ vẫn đọc được.
+MyoPS380 dùng M2-Plus mặc định khi không có `--dataset`, các split 243/61/76 và protocol
+`myops380_voxel_v3` chọn best theo scar/edema-inclusive; checkpoint v1/v2 có đúng metadata cũ vẫn evaluate được.
 Không so sánh trực tiếp HD95 voxel của MyoPS380 với HD95 mm ở đây.
 Không gọi score cohort80 là reproduction điểm paper cohort95/challenge.
 
@@ -115,6 +116,6 @@ không quét test trong source clones dưới `tmp`. Tests bao gồm raw mapping
 split isolation, cache fingerprint, native mm metrics, rejection geometry, real train →
 resume → evaluation và lệnh pipeline trên synthetic NIfTI.
 
-Run `outputs/myopspp_bc80/smoke/integration_smoke` sử dụng cấu hình `testing`, input 32 và
-1 epoch để kiểm tra plumbing trên dữ liệu local; không dùng score của run này làm kết quả
+Cấu hình `testing` hiện dùng M2-Plus thu nhỏ và input 32 để kiểm tra plumbing. Run lịch sử
+`outputs/myopspp_bc80/smoke/integration_smoke` vẫn được giữ nhưng thuộc implementation cũ; không dùng score của run này làm kết quả
 benchmark nghiên cứu. Full model vẫn cần train theo budget đã chọn trước khi so sánh.

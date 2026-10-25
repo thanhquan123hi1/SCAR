@@ -1,8 +1,7 @@
-"""Train the prompt-free M2/M2-Plus/M3 ablations (hierarchical YAML configuration & CLI)."""
+"""Train M2-Plus (hierarchical YAML configuration & CLI)."""
 from __future__ import annotations
 
 import argparse
-import copy
 import math
 from pathlib import Path
 import sys
@@ -19,8 +18,7 @@ from training.config.config_utils import (
     generate_run_dir,
     load_merged_config,
 )
-from training.models.cmspa_net import CONFIGS, CMSPANet
-from training.models import model_from_config
+from training.models import get_config, model_from_config, validate_model_config
 from training.dataset.benchmark_profiles import DATASET_IDS
 from training.run_layout import RunLayout
 from training.trainer.trainer import Trainer, load_checkpoint, seed_everything
@@ -33,8 +31,8 @@ def build_parser():
     )
     parser.add_argument(
         "--config",
-        default="training/config/models/cmspa_net.yaml",
-        help="Path to model YAML config, or legacy config name: R50-ViT-B_16, testing",
+        default="training/config/models/m2_plus.yaml",
+        help="Path to M2-Plus YAML config, or testing for small CPU checks",
     )
     parser.add_argument(
         "--base-config",
@@ -79,18 +77,6 @@ def build_parser():
         help="Weight for conditional Scar auxiliary Dice loss (default: 0.0)",
     )
     parser.add_argument(
-        "--wall-weight",
-        type=float,
-        default=0.0,
-        help="Weight for conditional myocardial wall auxiliary loss (default: 0.0)",
-    )
-    parser.add_argument(
-        "--inclusion-weight",
-        type=float,
-        default=0.0,
-        help="Weight for hierarchical pathology inclusion loss (Scar in AAR) (default: 0.0)",
-    )
-    parser.add_argument(
         "--dice-class-weights",
         nargs="+",
         type=float,
@@ -107,7 +93,7 @@ def build_parser():
     parser.add_argument("--sampler", choices=("none", "rare"), default="none")
     parser.add_argument("--rare-boost", type=float, default=2.0)
     parser.add_argument("--foreground-boost", type=float, default=1.3)
-    parser.add_argument("--ablation", choices=["M2", "M2-Plus", "M2-PLUS", "M2-PRO", "M2PRO", "M2-MAX", "M2MAX", "M2-MAX-PRO", "M2MAXPRO", "M2-MAX-V2", "M2MAXV2", "M2-MAX-V4", "M2MAXV4", "M2-MAX-V5", "M2MAXV5", "M2-MAX-V6", "M2MAXV6", "M2-MAX-V7", "M2MAXV7", "M3", "H-CMSPA", "HCMSPA"], default="M3")
+    parser.add_argument("--ablation", type=str.upper, choices=["M2-PLUS"], default="M2-PLUS")
     parser.add_argument("--epochs", "--max_epochs", dest="max_epochs", type=int, default=300)
     parser.add_argument(
         "--batch-size",
@@ -155,7 +141,8 @@ def build_parser():
         "--save-every",
         type=int,
         default=0,
-        help="optional archival checkpoint cadence; best/last always saved",
+        choices=[0],
+        help="compatibility option; only 0 is supported (save best.pt and last.pt only)",
     )
     parser.add_argument("--log-every", type=int, default=20)
     parser.add_argument("--tensorboard", action=argparse.BooleanOptionalAction, default=True)
@@ -178,13 +165,13 @@ def build_parser():
 def parse_args(argv=None):
     """Resolve base YAML < model YAML < explicit CLI, without starting training."""
     pre_parser = argparse.ArgumentParser(add_help=False)
-    pre_parser.add_argument("--config", default="training/config/models/cmspa_net.yaml")
+    pre_parser.add_argument("--config", default="training/config/models/m2_plus.yaml")
     pre_parser.add_argument("--base-config", default=str(PROJECT_ROOT / "training/config/base.yaml"))
     pre_parser.add_argument("--dataset", dest="dataset_id", choices=DATASET_IDS, default=None)
     pre_args, _ = pre_parser.parse_known_args(argv)
     config_name = pre_args.config
-    if config_name in CONFIGS:
-        config_name = "testing.yaml" if config_name == "testing" else "cmspa_net.yaml"
+    if config_name == "testing":
+        config_name = "testing.yaml"
     config_path = Path(config_name)
     if not config_path.is_absolute() and (PROJECT_ROOT / config_path).is_file():
         config_path = PROJECT_ROOT / config_path
@@ -192,6 +179,8 @@ def parse_args(argv=None):
     parser = build_parser()
     parser.set_defaults(**coerce_config_to_parser_types(flatten_config(merged), parser))
     args = parser.parse_args(argv)
+    if args.save_every != 0:
+        parser.error("save_every must be 0: only best.pt and last.pt are saved")
     for key in ("max_epochs", "batch_size", "accum_steps", "img_size", "cpu_threads", "log_every"):
         if getattr(args, key) < 1:
             parser.error(f"{key} must be positive")
@@ -199,18 +188,14 @@ def parse_args(argv=None):
         parser.error("img_size must be a multiple of 16 and >=32")
     if args.base_lr <= 0 or args.weight_decay < 0 or not 0 < args.val_fraction < 1:
         parser.error("Require lr>0, weight_decay>=0, 0<val_fraction<1")
-    for key in ("base_lr", "weight_decay", "val_fraction", "min_delta", "clip_grad", "ce_weight", "dice_weight", "aar_weight", "scar_weight", "wall_weight", "inclusion_weight"):
+    for key in ("base_lr", "weight_decay", "val_fraction", "min_delta", "clip_grad", "ce_weight", "dice_weight", "aar_weight", "scar_weight"):
         if not math.isfinite(getattr(args, key)):
             parser.error(f"{key} must be finite")
-    for key in ("num_workers", "patience", "min_delta", "save_every", "epochs_per_run", "clip_grad", "ce_weight", "dice_weight", "aar_weight", "scar_weight", "wall_weight", "inclusion_weight"):
+    for key in ("num_workers", "patience", "min_delta", "save_every", "epochs_per_run", "clip_grad", "ce_weight", "dice_weight", "aar_weight", "scar_weight"):
         if getattr(args, key) < 0:
             parser.error(f"{key} must be nonnegative")
     if args.ce_weight + args.dice_weight <= 0:
         parser.error("At least one loss weight must be positive")
-    if (args.wall_weight > 0 or args.inclusion_weight > 0) and args.ablation.upper() not in {
-        "M2-MAX-V6", "M2MAXV6", "M2-MAX-V7", "M2MAXV7"
-    }:
-        parser.error("Wall/inclusion loss requires M2-Max V6 or V7 with an independent anatomy head")
     for key in ("dice_class_weights", "ce_class_weights"):
         weights = getattr(args, key)
         if weights is not None and (len(weights) != 4 or any(not math.isfinite(v) or v < 0 for v in weights)
@@ -226,23 +211,18 @@ def parse_args(argv=None):
         parser.error("Use either --run-id or --output-dir")
     if merged["model"].get("num_classes", 4) != 4:
         parser.error("This data contract requires four canonical classes")
+    validate_model_config(merged["model"])
     return args, merged
 
 
 def _load_initial_weights(model, path):
     """Warm-start a compatible SCAR checkpoint with canonical output semantics."""
     checkpoint = load_checkpoint(path)
-    state = dict(checkpoint["model"])
-    if hasattr(model.segmentation_head, "base_head") and "segmentation_head.0.weight" in state:
-        state["segmentation_head.base_head.weight"] = state.pop("segmentation_head.0.weight")
-        state["segmentation_head.base_head.bias"] = state.pop("segmentation_head.0.bias")
-    elif not hasattr(model.segmentation_head, "base_head") and "segmentation_head.base_head.weight" in state:
-        state["segmentation_head.0.weight"] = state.pop("segmentation_head.base_head.weight")
-        state["segmentation_head.0.bias"] = state.pop("segmentation_head.base_head.bias")
-    missing, unexpected = model.load_state_dict(state, strict=False)
-    print(f"Initialized from {path}: {len(model.state_dict()) - len(missing)} tensors loaded, "
-          f"{len(missing)} new/missing, {len(unexpected)} unused source tensors")
-    return missing, unexpected
+    # Matching M2-Plus checkpoints must load every parameter. Partial loading
+    # could silently produce an untrained fusion block or classifier.
+    model.load_state_dict(checkpoint["model"], strict=True)
+    print(f"Initialized M2-Plus from {path}: all {len(model.state_dict())} tensors loaded")
+    return [], []
 
 
 def main(argv=None):
@@ -260,7 +240,7 @@ def main(argv=None):
         else:
             output = generate_run_dir(
                 args.run_root,
-                merged["model"].get("model_name", "CMSPA-Net"),
+                merged["model"].get("model_name", "M2-Plus"),
                 seed=args.seed,
             )
     else:
@@ -269,12 +249,12 @@ def main(argv=None):
     if not args.resume and output.exists() and any(output.iterdir()):
         raise FileExistsError("Run directory is not empty; choose a new run-id or use --resume")
     if args.resume:
-        if RunLayout.from_checkpoint(args.resume).root != output or Path(args.resume).name != "last.pth":
-            raise ValueError("Resume from last.pth into its original run directory")
+        if RunLayout.from_checkpoint(args.resume).root != output or Path(args.resume).name not in {"last.pt", "last.pth"}:
+            raise ValueError("Resume from last.pt into its original run directory")
     args.output_dir = str(output)
-    args.model_name = merged["model"].get("model_name", "CMSPA-Net")
+    args.model_name = merged["model"].get("model_name", "M2-Plus")
     section = merged["model"]
-    config = copy.deepcopy(CONFIGS["R50-ViT-B_16"])
+    config = get_config()
     config.resnet.num_layers = tuple(section["resnet"]["num_layers"])
     config.resnet.width_factor = float(section["resnet"]["width_factor"])
     config.transformer.dropout_rate = float(section.get("transformer", {}).get("dropout_rate", 0.1))

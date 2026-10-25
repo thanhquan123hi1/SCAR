@@ -1,4 +1,4 @@
-"""Evaluate a saved prompt-free checkpoint on held-out 3D cases."""
+"""Evaluate a saved M2-Plus checkpoint on held-out 3D cases."""
 from __future__ import annotations
 
 import argparse
@@ -184,8 +184,9 @@ def main(argv=None):
             checkpoint=str(checkpoint_path),
             checkpoint_epoch=checkpoint["epoch"] + 1,
             checkpoint_metric_protocol_id=checkpoint["benchmark_protocol"]["id"],
+            checkpoint_selection_metric=checkpoint["benchmark_protocol"]["selection_metric"],
             ablation=config.ablation,
-            architecture=config.get("architecture", "cmspa_net"),
+            architecture="m2_plus",
             split=args.split,
             case_count=len(dataset),
             inference_seconds=total_seconds,

@@ -1,7 +1,7 @@
 # Lightweight smoke test configuration for fast CPU test suites
 model:
   model_name: Testing-Small
-  ablation: M3
+  ablation: M2-PLUS
   img_size: 32
   resnet:
     num_layers: [1, 1, 1]

@@ -1,373 +1,161 @@
-# SCAR: Phân đoạn Cơ tim Đa phương thức với SSPANet + CMSPA
+# SCAR — M2-Plus
 
-<p align="center">
-  <a href="https://colab.research.google.com/github/thanhquan123hi1/SCAR/blob/main/scar_pipeline.ipynb">
-    <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab">
-  </a>
-  <img src="https://img.shields.io/badge/Python-3.11%20%7C%203.12-blue?logo=python" alt="Python Version">
-  <img src="https://img.shields.io/badge/PyTorch-%E2%89%A52.3-ee4c2c?logo=pytorch" alt="PyTorch Version">
-  <img src="https://img.shields.io/badge/Task-CMR%20Segmentation-success" alt="Task">
-  <img src="https://img.shields.io/badge/Architecture-CMSPA--Net%20(M3)-8A2BE2" alt="Model Architecture">
-</p>
+Phân đoạn cơ tim đa phương thức từ bSSFP/CINE, LGE/PSIR và T2w đã căn chỉnh. Repo chỉ hỗ trợ **M2-Plus** cho train, resume, đánh giá volume và prediction.
 
----
+## Kiến trúc và nhãn
 
-## Giới thiệu tổng quan
+M2-Plus dùng ba encoder ResNetV2 độc lập, SSPANet trên từng modality, hai nhánh cross-attention riêng cho scar/edema, ba tầng skip fusion concat/project và decoder bốn cấp. CINE cung cấp queries; LGE và T2w cung cấp keys/values cho hai attention stream. Hai stream được kết hợp với đặc trưng CINE trước decoder.
 
-**SCAR** là hệ thống học sâu tiên tiến phục vụ phân đoạn tổn thương cơ tim đa phương thức trên tập dữ liệu cộng hưởng từ tim mạch **MyoPS-380**, kết hợp đồng thời ba chuỗi xung CMR đã căn chỉnh đồng bộ:
-* **bSSFP / CINE** (Cine Balanced Steady-State Free Precession - cấu trúc giải phẫu chuyển động)
-* **LGE** (Late Gadolinium Enhancement - tổn thương sẹo cơ tim)
-* **T2w** (T2-weighted - vùng phù nề cơ tim)
+Mã chính: [m2_plus_net.py](training/models/m2_plus_net.py), [m2_plus.py](training/models/modules/m2_plus.py). Input mặc định 128×128; model trả raw logits `(B,4,H,W)` trong cả train và eval. Không có anatomy head hay skip gate của các model nghiên cứu trước đây. File pretrained `R50-ViT-B_16.npz` chỉ khởi tạo phần ResNet tương thích; model không dùng ViT hoặc text encoder.
 
-Mô hình chủ lực **CMSPA-Net (M3)** kết hợp **3 encoder ResNetV2 độc lập**, khối chú ý không gian-kênh **SSPANet** (RMS Strip Pooling Attention), cơ chế hòa trộn **CMSPA** (Cross-Modal Strip Pathology Attention), 3 tầng skip fusion và 1 decoder 4 cấp, xuất trực tiếp raw logits 4 kênh chuẩn hóa (**canonical**):
-1. `Lớp 0`: Nền (Background)
-2. `Lớp 1`: Cơ tim lành (Normal Myocardium)
-3. `Lớp 2`: Phù nề (Edema)
-4. `Lớp 3`: Sẹo cơ tim (Scar)
+| ID | Nhãn canonical |
+|---:|---|
+| 0 | background |
+| 1 | normal myocardium |
+| 2 | edema |
+| 3 | scar |
 
----
+## Cài đặt
 
-## Mục lục
-- [Benchmark MyoPS++ riêng](preprocessing/MYOPSPP.md)
-- [Train hai bộ MyoPS++ ROI 128 mm và 160 mm](docs/myopspp_roi_training.md)
-- [Chạy nhanh trên Google Colab](#chạy-nhanh-trên-google-colab)
-- [Kiến trúc Mô hình CMSPA-Net (M3)](#kiến-trúc-mô-hình-cmspa-net-m3)
-- [Các cấu hình nghiên cứu (Ablation Studies M2, M2-Plus, M3)](#các-cấu-hình-nghiên-cứu-ablation-studies-m2-m2-plus-m3)
-- [Hợp đồng Dữ liệu và Quy ước Nhãn Canonical](#hợp-đồng-dữ-liệu-và-quy-ước-nhãn-canonical)
-- [Cài đặt Môi trường](#cài-đặt-môi-trường)
-- [Huấn luyện Mô hình](#huấn-luyện-mô-hình)
-- [Đánh giá và Xuất kết quả NIfTI](#đánh-giá-và-xuất-kết-quả-nifti)
-- [Cấu trúc Repository](#cấu-trúc-repository)
-- [Tài liệu Tham khảo](#tài-liệu-tham-khảo)
-
----
-
-## Chạy nhanh trên Google Colab
-
-**MyoPS++:** repo hỗ trợ benchmark riêng `myopspp_bc80` với 80 ca CenterB/CenterC đủ
-C0/LGE/T2, split patient-level **51 train / 13 val / 16 test**. Xem
-[chuẩn bị dữ liệu, train, resume và test](preprocessing/MYOPSPP.md).
-Dùng `python train.py --dataset myopspp_bc80` để chọn cache/config/output riêng.
-MyoPS380 và notebook Colab hiện có tiếp tục dùng protocol mặc định.
-
-**Các bộ MyoPS++ ROI:** chọn `--dataset myopspp_roi128_76` (48/13/15 bệnh nhân, spacing XY 1 mm, loại 4 ca phạm biên), `--dataset myopspp_roi128_80` (51/13/16, spacing XY 1 mm, giữ trọn 80 ca) hoặc `--dataset myopspp_roi160_80` (51/13/16, spacing XY 1.25 mm).
-Các cache giữ nguyên ảnh [0,1] đã xuất và nhãn canonical; đánh giá trên ROI định vị
-bằng GT, có ghi rõ protocol trong checkpoint/kết quả. Xem
-[hướng dẫn tạo cache, train, resume và evaluate](docs/myopspp_roi_training.md).
-
-Bạn có thể chạy toàn bộ quy trình từ tải dữ liệu, tiền xử lý, huấn luyện M3 đến đánh giá volume 3D chỉ với một cú nhấp chuột:
-
-<p align="center">
-  <a href="https://colab.research.google.com/github/thanhquan123hi1/SCAR/blob/main/scar_pipeline.ipynb" target="_blank">
-    <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab" width="200px">
-  </a>
-</p>
-
-* File notebook: [`scar_pipeline.ipynb`](scar_pipeline.ipynb)
-* Tự động kết nối Google Drive, nạp bộ dữ liệu `MyoPS380_dataset` và trọng số tiền huấn luyện `R50-ViT-B_16.npz`.
-* Hỗ trợ lưu trữ checkpoints (`best.pth`, `last.pth`) và đồ thị huấn luyện trực tiếp về Google Drive cá nhân.
-
----
-
-## Kiến trúc Mô hình CMSPA-Net (M3)
-
-```mermaid
-flowchart LR
-    C[bSSFP / CINE] --> EC[ResNetV2 Encoder] --> AC[SSPANet]
-    L[LGE]          --> EL[ResNetV2 Encoder] --> AL[SSPANet]
-    T[T2w]          --> ET[ResNetV2 Encoder] --> AT[SSPANet]
-    AC --> F[CMSPA Bottleneck Fusion]
-    AL --> F
-    AT --> F
-    EC --> S[3 tầng Skip Fusion]
-    EL --> S
-    ET --> S
-    F --> D[Decoder 4 tầng]
-    S --> D
-    D --> O[Raw Logits 4 kênh: B, 4, 128, 128]
-```
-
-### Thông số và công thức
-
-M3 có **64.403.442 tham số** với encoder `(3, 4, 9)`, `width_factor=1.0`.
-Ký hiệu: $C$ là CINE, $L$ là LGE, $T$ là T2w; $\odot$ là nhân từng phần tử.
-Các phép lấy trung bình giữ lại chiều để broadcast. Công thức dưới đây mô tả code hiện tại.
-
-**SSPANet:** pooling theo kênh tạo gate không gian (giữ tên CA trong code).
-
-$$
-Z = \mathrm{Concat}(\mathrm{Max}_C(X),\mathrm{Mean}_C(X))
-$$
-
-$$
-\mathrm{CA}(X)=X\odot\sigma(\mathrm{BN}(\mathrm{Conv}_{7\times7}(Z)))
-$$
-
-$$
-R_h=\sqrt{\mathrm{Mean}_W(X^2)+\epsilon},\qquad
-R_w=\sqrt{\mathrm{Mean}_H(X^2)+\epsilon}
-$$
-
-$$
-U_h=\mathrm{BN}(\mathrm{Conv}_{3\times1}(R_h)),\qquad
-U_w=\mathrm{BN}(\mathrm{Conv}_{1\times3}(R_w))
-$$
-
-$$
-\mathrm{SA}(X)=X\odot\sigma(\mathrm{Conv}_{1\times1}(U_h+U_w))
-$$
-
-$$
-\mathrm{SSPA}(X)=X+X\odot\sigma(\mathrm{CA}(X)+\mathrm{SA}(X))
-$$
-
-**CMSPA:** $g_A$ và $g_P$ đều là Conv 1×1 → BN → ReLU → Conv 1×1 → sigmoid.
-Độ lệch chuẩn dùng population variance và epsilon; gate là đặc trưng học được, không phải mask giải phẫu được đảm bảo.
-
-$$
-A=g_A(\mathrm{Mean}_W(C)+\mathrm{Mean}_H(C))
-$$
-
-$$
-P=g_P\left(\sqrt{\mathrm{Var}_C(L)+\epsilon}+\sqrt{\mathrm{Var}_C(T)+\epsilon}\right)
-$$
-
-$$
-F=g_F(\mathrm{Concat}(C+C\odot P, L\odot A, T\odot A))
-$$
-
-$g_F$ là Conv 1×1 → BN → ReLU, đầu ra 512 kênh ở cấu hình mặc định.
-
----
-
-## Các cấu hình nghiên cứu (Ablation Studies M2, M2-Plus, M2-Max, M3)
-
-| Mã Ablation | Attention từng nhánh | Fusion Bottleneck & Skip | File cấu hình YAML |
-|:---:|:---:|:---:|:---:|
-| **M2** | SSPANet | Cross-Attention | [`training/config/models/cross_attn_baseline.yaml`](training/config/models/cross_attn_baseline.yaml) |
-| **M2-Plus** | SSPANet | Hai nhánh Cross-Attention riêng cho sẹo (PSIR/LGE) và phù nề (T2w) | [`training/config/models/m2_plus.yaml`](training/config/models/m2_plus.yaml) |
-| **M2-Max** | **SSPANet** | **Bi-Pathology Interactive Refinement + SkipGateFusion** | [`training/config/models/m2_max.yaml`](training/config/models/m2_max.yaml) |
-| **M3 (Đề xuất)** | **SSPANet** | **CMSPA** | [`training/config/models/cmspa_net.yaml`](training/config/models/cmspa_net.yaml) |
-
----
-
-Repo hỗ trợ thêm các config `m2_max_pro.yaml`, `m2_max_v2.yaml` đến `m2_max_v7.yaml`; config V3 dùng kiến trúc V2. Các config model dùng chung pipeline với MyoPS380 hoặc `--dataset myopspp_bc80`.
-
-Loss phụ AAR, scar, wall và inclusion mặc định đều có hệ số `0.0`. Có thể đặt qua CLI (`--aar-weight`, `--scar-weight`, `--wall-weight`, `--inclusion-weight`) hoặc YAML (`loss.aar_weight`, `loss.scar_weight`, `loss.wall_weight`, `loss.inclusion_weight`). Wall/inclusion yêu cầu head độc lập của V6/V7; inclusion so sánh scar/AAR với các stream AAR/wall độc lập. `loss.dice_class_weights` và `loss.ce_class_weights` là danh sách bốn trọng số theo thứ tự background, normal myocardium, edema, scar. Chọn config model không tự bật loss phụ.
-
-Resume yêu cầu giữ nguyên toàn bộ hệ số loss và trọng số class. Checkpoint cũ dùng weighted CE hoặc inclusion trước khi sửa công thức không được nối tiếp âm thầm với objective mới; dùng `--init-weights` (hoặc `train.init_weights`) để bắt đầu run mới nếu cần chuyển weights. Checkpoint khởi tạo phải có quy ước class canonical của SCAR. `--init-weights`, `--pretrained` và `--resume` loại trừ nhau. Cần ghi rõ loss thực tế khi báo cáo đóng góp kiến trúc và loss.
-
-## Kết quả lịch sử cần đánh giá lại (MyoPS-380 Test Set)
-
-Các số M2-Plus/M2-Max dưới đây được lưu từ phiên bản trước. Chưa có báo cáo kèm chế độ inference và checkpoint để xác minh chúng được tạo bằng dự đoán trực tiếp, không TTA/hậu xử lý. **Không dùng bảng này để kết luận vượt SOTA hoặc chứng minh đóng góp kiến trúc/loss.** Cần đánh giá lại checkpoint trên đủ 76 bệnh nhân bằng evaluator hiện tại, lưu `per_case.csv`, `metrics.json` và prediction.
-
-| Chỉ số từng được ghi nhận | M2-Plus (lịch sử) | M2-Max (lịch sử) |
-|---|:---:|:---:|
-| Scar Dice (%) ↑ | 73.72 | 74.99 |
-| Scar HD95 (voxel) ↓ | 4.06 | 3.01 |
-| Edema Inclusive Dice (%) ↑ | 74.11 | 76.27 |
-| Edema Inclusive HD95 (voxel) ↓ | 5.50 | 3.92 |
-| Myocardial Ring Dice (%) ↑ | 87.62 | 87.99 |
-| Normal Myocardium Dice (%) ↑ | 76.94 | 80.15 |
-
-Mốc I-MMSeg trong Table 1 của paper: Scar Dice 73.64 / HD 3.66; Edema Dice 75.44 / HD 3.89; Myocardium Dice 87.41 / HD 1.07. Table 1 không có cột normal-myocardium riêng. Phải đối chiếu ánh xạ region và loại metric trước khi so sánh; không tự gán cột Edema trong paper cho edema-inclusive. Xem [mã nguồn I-MMSeg](https://github.com/zzzzzzl24/I_MMSeg).
-
----
-
-## Hợp đồng Dữ liệu và Quy ước Nhãn Canonical
-
-### Bảng nhãn Canonical chuẩn hóa:
-| ID Lớp | Tên nhãn | Định nghĩa giải phẫu |
-|:---:|:---|:---|
-| **0** | `background` | Nền và các mô ngoài tim |
-| **1** | `normal_myocardium` | Vùng cơ tim lành (không bao gồm phù nề và sẹo) |
-| **2** | `edema` | Vùng phù nề cơ tim (tổn thương cấp tính) |
-| **3** | `scar` | Vùng sẹo tổn thương cơ tim (tổn thương mạn tính) |
-
-> [!IMPORTANT]
-> **Tương thích ngược dữ liệu Legacy:**
-> Bộ cache cũ của I_MMSeg dùng quy ước `2=scar, 3=edema`. Chọn `--label-order legacy` cho cache tác giả; chọn `canonical` cho cache mới do SCAR đóng gói. Hệ thống kiểm tra metadata nếu có và hoán vị về chuẩn canonical `[0, 1, 3, 2]` thông qua [`data_contract.py`](training/dataset/data_contract.py).
-
-### Phân chia Dataset (Patient-level Split):
-* **Tổng số ca:** 380 bệnh nhân (MyoPS-380).
-* **Test set cố định:** **76 bệnh nhân** (lưu tại [`preprocessing/splits/test_vol.txt`](preprocessing/splits/test_vol.txt)).
-* **Train / Validation:** 304 bệnh nhân còn lại được phân chia chặt chẽ theo tỷ lệ ca bệnh (**243 Train / 61 Validation**), tương đương **1.578 lát cắt train / 394 lát cắt val**. Tuyệt đối không rò rỉ (0% data leakage) giữa các tập.
-
----
-
-## Cài đặt Môi trường
-
-Yêu cầu: **Python 3.11 hoặc 3.12**, **PyTorch ≥ 2.3**.
-
-```bash
-# Clone repository
-git clone https://github.com/thanhquan123hi1/SCAR.git
-cd SCAR
-
-# Cài đặt các thư viện phụ thuộc
-pip install -r requirements.txt
-
-# Kiểm tra môi trường GPU
-python -c "import torch; print('PyTorch:', torch.__version__, '| CUDA Available:', torch.cuda.is_available())"
-```
-
----
-
-## Huấn luyện Mô hình
-
-### Cách 1: Tự động hóa toàn diện với `run_all.py` (Khuyên dùng)
-Tự động kiểm tra cache, tạo split bệnh nhân, kiểm định dữ liệu, huấn luyện mô hình M3 và đánh giá volume test:
-
-```bash
-python run_all.py --run-id m3_run01 --skip-cache --label-order legacy
-```
-
-### Cách 2: Huấn luyện chi tiết qua CLI
-Để huấn luyện M2-Plus, chọn cấu hình của nó; file này tự đặt `--ablation M2-Plus`:
+Python 3.11 hoặc 3.12, PyTorch ≥2.3. Chạy lệnh từ root repo:
 
 ```powershell
-python train.py --config training/config/models/m2_plus.yaml --data-root /path/to/Processed_data --list-dir data/processed/splits --run-id m2_plus_run01
+pip install -r requirements.txt
+python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
 ```
 
-```bash
-python train.py \
-    --config training/config/models/cmspa_net.yaml \
-    --ablation M3 \
-    --data-root /path/to/Processed_data \
-    --list-dir data/processed/splits \
-    --output-dir outputs/runs/m3_run01 \
-    --batch-size 16 \
-    --lr 0.0003 \
-    --epochs 300 \
-    --amp auto \
-    --pretrained model/vit_checkpoint/imagenet21k/R50-ViT-B_16.npz
+Notebook Colab: [scar_pipeline.ipynb](scar_pipeline.ipynb). Chuẩn bị dataset và pretrained weights riêng; Git không chứa chúng.
+
+## Dataset và split
+
+| Profile | Train / val / test (bệnh nhân) | Khoảng cách metric |
+|---|---|---|
+| `myops380` — mặc định | 243 / 61 / 76 với bộ chia hiện có | voxel |
+| `myopspp_bc80` | 51 / 13 / 16 | mm, native grid |
+| `myopspp_roi128_76` | 48 / 13 / 15 | mm, ROI grid |
+| `myopspp_roi128_80` | 51 / 13 / 16 | mm, ROI grid |
+| `myopspp_roi160_80` | 51 / 13 / 16 | mm, ROI grid |
+
+MyoPS++ và ROI dùng patient split cố định đã version-control. MyoPS380 khóa 76 ca test trong [test_vol.txt](preprocessing/splits/test_vol.txt). Không chia lát cắt của cùng bệnh nhân sang nhiều tập.
+
+Chạy nhiều seed với **cùng `--list-dir` có đủ** `train.txt`, `val.txt`, `val_vol.txt`, `test_vol.txt`. `--seed` thay đổi khởi tạo, augmentation và thứ tự batch. Nếu chưa có `val.txt`, trainer có thể tạo validation theo seed; hãy tạo manifest hoàn chỉnh trước thí nghiệm nhiều seed.
+
+Tạo/kiểm tra manifest từ cache MyoPS380 đã có:
+
+```powershell
+python preprocessing/build_splits.py --data-root E:/STUDY/DATASET/MyoPS380/Processed_data --list-dir data/processed/splits --test-list preprocessing/splits/test_vol.txt --seed 1234
+python preprocessing/verify.py --data-root E:/STUDY/DATASET/MyoPS380/Processed_data --list-dir data/processed/splits --label-order legacy
 ```
 
-Với GPU ít VRAM, bắt đầu bằng `--batch-size 2`; dùng `--accum-steps 8` nếu cần tích lũy gradient. Đo bộ nhớ thực tế trước khi tăng batch. Các lệnh nhiều dòng phía trên dùng cú pháp Bash; PowerShell cần viết trên một dòng hoặc dùng dấu backtick để nối dòng.
+Manifest đầy đủ được dùng lại, không ghi đè khi đổi seed. Cache MyoPS380 chính thức thiếu metadata dùng `legacy` (`2=scar, 3=edema`); cache SCAR mới dùng `canonical`. Pipeline chuyển nhãn về canonical và kiểm tra metadata; `auto` không đoán khi thiếu thông tin.
 
-### Khôi phục huấn luyện (Resume):
+Packaging NIfTI đã căn chỉnh dùng `preprocessing/process_and_save.py`; script từ chối ghi đè cache có dữ liệu và không thực hiện đăng ký ảnh. MyoPS380 dùng clip(0,255)/255; MyoPS++ native dùng percentile p1/p99 trên volume. Xem [MyoPS++](preprocessing/MYOPSPP.md) và [ROI](docs/myopspp_roi_training.md) cho lệnh chuẩn bị dữ liệu và giới hạn của từng profile.
 
-Truyền lại config và các tham số của run gốc, gồm batch size, accumulation, LR, số epoch và quy ước nhãn. `--resume` không tự nạp các tùy chọn CLI từ checkpoint; bỏ `--pretrained` khi resume.
-```bash
-python train.py --config training/config/models/cmspa_net.yaml --data-root /path/to/Processed_data --list-dir data/processed/splits --resume outputs/runs/m3_run01/checkpoints/last.pth
+## Huấn luyện
+
+M2-Plus là mặc định của `train.py` và `run_all.py`. Config chính: [m2_plus.yaml](training/config/models/m2_plus.yaml); thông số chung: [base.yaml](training/config/base.yaml). Ưu tiên base YAML → dataset profile → model YAML → CLI.
+
+```powershell
+python run_all.py --skip-cache --label-order legacy --run-id m2_plus_seed1234
 ```
 
----
+Lệnh trên tạo/kiểm tra manifest, verify cache, train và evaluate `best.pt`. Train riêng:
 
-## Đánh giá và Xuất kết quả NIfTI
-
-Đánh giá checkpoint tốt nhất trên tập dữ liệu kiểm thử 3D:
-```bash
-python test.py \
-    --checkpoint outputs/runs/m3_run01/checkpoints/best.pth \
-    --data-root /path/to/Processed_data \
-    --split test_vol \
-    --batch-size 8 \
-    --save-predictions
+```powershell
+python train.py --config training/config/models/m2_plus.yaml --data-root E:/STUDY/DATASET/MyoPS380/Processed_data --list-dir data/processed/splits --run-id m2_plus_seed1234 --seed 1234
 ```
 
-Run tự động có tên `<model>_seed<seed>_<YYYY-MM-DD_HHhMM>`. Có thể chọn tên riêng bằng `--run-id` hoặc `--output-dir`.
+Pretrained encoder là tùy chọn: thêm `--pretrained training/pretrained/R50-ViT-B_16.npz`. GPU ít VRAM có thể giảm `--batch-size` và tăng `--accum-steps`; batch hiệu dụng là tích hai tham số này. BatchNorm và phép toán ngẫu nhiên vẫn có thể làm microbatch khác batch vật lý lớn.
+
+Các profile khác giữ cùng M2-Plus:
+
+```powershell
+python train.py --dataset myopspp_bc80 --run-id m2_plus_seed1234
+python run_all.py --dataset myopspp_roi160_80 --skip-cache --batch-size 2 --accum-steps 8 --run-id m2_plus_seed1234
+```
+
+Loss mặc định: `0.5 CE + 0.5 Dice`. Hỗ trợ `--aar-weight`, `--scar-weight`, `--ce-class-weights`, `--dice-class-weights`; loss phụ mặc định bằng 0. AAR là edema-inclusive `{2,3}`. ROI dùng `pathology_reduction: sample`; MyoPS380/native MyoPS++ mặc định `positive`. Loss và reduction được khóa khi resume.
+
+`--config testing` dùng **M2-Plus thu nhỏ**, input 32×32, để kiểm thử phần mềm; không dùng cho bảng kết quả nghiên cứu.
+
+## Checkpoint và resume
 
 ```text
-outputs/runs/CMSPA-Net_seed1234_2026-09-22_14h30/
+outputs/runs/M2-Plus_seed1234_<timestamp>/
+├── checkpoints/{best.pt,last.pt}
 ├── tensorboard/
-│   ├── epochs/
-│   └── updates/
-├── checkpoints/
-│   ├── best.pth
-│   └── last.pth
-└── logs_CMSPA-Net_seed1234/
-    ├── train.log
-    ├── metrics.csv
-    ├── metrics.jsonl
-    ├── summary.json
-    ├── config.json
+└── logs_M2-Plus_seed1234/
+    ├── config.json, train.log, metrics.csv, metrics.jsonl, summary.json
     ├── splits/
     └── test_results/
 ```
 
-Tên thư mục logs lấy model và seed từ cấu hình. `test_results/` được tạo khi đánh giá `test_vol`; `validation_results/` khi đánh giá `val_vol`. `--output-dir` của lệnh test cho phép chọn nơi lưu khác. Resume và test vẫn đọc được run cũ có checkpoint/log/splits nằm trực tiếp trong thư mục run; không tự di chuyển dữ liệu cũ.
+`best.pt` chọn bằng trung bình patient-mean Dice scar và edema-inclusive trên **validation volumes**. Early stopping dùng cùng điểm; `patience: 0` tắt early stopping. `min_delta` chỉ điều khiển patience, mọi cải thiện điểm tốt nhất vẫn cập nhật `best.pt`. `last.pt` giữ optimizer, scheduler, scaler và RNG. Không lưu checkpoint theo chu kỳ.
 
-Báo cáo kết quả được lưu tại `outputs/runs/m3_run01/logs_CMSPA-Net_seed1234/test_results/` gồm:
-* `per_case.csv`: Chi tiết Dice, IoU, HD95, ASD cho từng ca bệnh.
-* `metrics.json`: Điểm theo bệnh nhân, protocol, hash dữ liệu và số ca metric xác định/không xác định.
-* Mask `.npz`; chỉ xuất thêm NIfTI khi cache có affine hợp lệ. Không tạo geometry giả cho cache legacy.
+```powershell
+python train.py --data-root E:/STUDY/DATASET/MyoPS380/Processed_data --list-dir data/processed/splits --run-id m2_plus_seed1234 --resume outputs/runs/m2_plus_seed1234/checkpoints/last.pt
+```
 
-Đánh giá cũng ghi `test.log` trong thư mục kết quả: tiến độ, metric từng ca/vùng, tổng kết và traceback nếu lỗi trong vòng đánh giá. Các lỗi kiểm tra đầu vào trước khi tạo thư mục kết quả vẫn hiển thị trên terminal.
+Truyền lại cùng config, seed, batch size, accumulation, LR, tổng epoch, loss và nhãn của run gốc; `--resume` không tự nạp toàn bộ CLI. `--epochs-per-run` dừng sau một số epoch mà giữ lịch LR đã lên kế hoạch. `--init-weights` nạp chính xác trọng số M2-Plus cho run mới, không mang optimizer/split/score cũ. Ba nguồn `--resume`, `--init-weights`, `--pretrained` loại trừ nhau.
 
-Test không sử dụng TensorBoard và không cần thư mục `tensorboard/`. Kết quả được lưu bằng `test.log`, `per_case.csv`, `metrics.json` và prediction nếu bật. TensorBoard chỉ dùng cho train. Text log của test được ghi ngoài khoảng đo inference.
+Tên tensor M2-Plus được giữ để nạp checkpoint cũ. Metadata `architecture: cmspa_net` chỉ được chấp nhận khi `ablation` xác định M2-PLUS. Model khác bị từ chối. Checkpoint dùng protocol chọn best cũ vẫn có thể evaluate hoặc khởi tạo run mới nếu metadata hợp lệ; không resume trạng thái best/patience theo metric cũ. Các kiểm tra dữ liệu, loss và split vẫn áp dụng.
 
-### Inference trực tiếp để đánh giá kiến trúc và loss
+## Đánh giá và prediction
 
-Train validation, test và prediction dùng chung `predict_volume`: mỗi batch thực hiện đúng một forward pass, resize logits về lưới ảnh đầu vào nếu cần, rồi lấy `argmax`. Mask được chấm điểm và lưu trực tiếp, giữ cả các vùng tổn thương nhỏ hoặc không liên thông. Repo không còn hỗ trợ TTA, ensemble các flip hoặc lọc thành phần liên thông. Các cờ cũ `--tta`, `--no-tta`, `--postprocess`, `--no-postprocess` bị từ chối thay vì âm thầm bỏ qua.
+```powershell
+python test.py --checkpoint outputs/runs/m2_plus_seed1234/checkpoints/best.pt --data-root E:/STUDY/DATASET/MyoPS380/Processed_data --split test_vol --batch-size 8 --save-predictions
+```
 
-`metrics.json` ghi `inference_protocol.id=single_pass_argmax_v1`, số forward mỗi batch, quy tắc resize/argmax và `mask_processing=none`; `test.log` cũng ghi chế độ inference. Augmentation chỉ áp dụng trên train. SkipGateFusion/SE bên trong M2-Max vẫn là các thành phần được học của kiến trúc.
+Evaluator xuất `test.log`, `per_case.csv`, `metrics.json` và mask `.npz`. Chỉ xuất NIfTI khi cache có affine hợp lệ. Evaluation không cần TensorBoard. Chọn thư mục mới nếu kết quả đã tồn tại.
 
-Logic chọn `best.pth`, `best_inclusive.pth`, resume và early stopping dùng điểm validation đã khóa. Điểm inclusive tốt nhất được lưu/khôi phục khi resume; checkpoint cũ được đọc điểm từ `best_inclusive.pth` nếu cần, để lượt validation kém hơn không ghi đè best cũ.
+Validation, test và prediction dùng chung `predict_volume`: một forward mỗi batch, resize logits về lưới đánh giá trước `argmax`, giữ tổn thương nhỏ và không liên thông. Không TTA/lọc connected components. Báo cáo ghi `single_pass_argmax_v1`, nguồn dữ liệu, hash manifest và protocol.
 
-### Điều kiện so sánh với I-MMSeg và nnU-Net
+Prediction NIfTI đã căn chỉnh cho checkpoint thuộc profile native:
 
-- Dùng đúng 76 bệnh nhân test đã khóa, cùng ground truth và quy ước region; không tune loss, inference hoặc chọn checkpoint bằng test.
-- Repo chỉ báo metric chính, kèm trạng thái mask rỗng và số ca xác định/không xác định. Để so I-MMSeg hoặc baseline khác, chấm prediction bằng cùng evaluator trên cùng GT/grid/region; các số trong paper chỉ là tham khảo khi protocol chưa khớp. HD95 voxel không so trực tiếp với HD95 mm.
-- Với nnU-Net, ghi rõ phiên bản, cấu hình 2D/3D, train/validation split, checkpoint, số fold/model và các bước inference. Để so đóng góp model trong chế độ dự đoán trực tiếp, dùng một model/fold, tắt mirroring bằng `--disable_tta`, không áp dụng hậu xử lý của nnU-Net. Nếu báo pipeline đầy đủ có ensemble/hậu xử lý, ghi thành kết quả riêng. Tham khảo [hướng dẫn nnU-Net](https://github.com/MIC-DKFZ/nnUNet/blob/master/documentation/how_to_use_nnunet.md) và [CLI inference](https://github.com/MIC-DKFZ/nnUNet/blob/master/nnunetv2/inference/predict_from_raw_data.py).
-- Đưa prediction của mọi baseline về cùng lưới/nhãn canonical và chấm bằng cùng `benchmark_rows`/`summarize_rows`. Trung bình theo bệnh nhân, kèm số ca metric xác định/không xác định. Không lấy trung bình slice hoặc pixel-pooled để so với patient-mean.
-- Gỡ TTA/hậu xử lý chỉ loại hai yếu tố inference. Kết quả còn phụ thuộc dữ liệu, pretraining, augmentation, optimizer và ngân sách train. Cần ablation kiến trúc × loss với các yếu tố này được kiểm soát; các số trích từ paper phải được ghi rõ là tham khảo, không phải baseline đã tái lập.
+```powershell
+python training/predict.py --checkpoint outputs/runs/m2_plus_seed1234/checkpoints/best.pt --cine /path/case_C0.nii.gz --lge /path/case_LGE.nii.gz --t2w /path/case_T2.nii.gz --normalization unit255 --output /path/prediction.nii.gz
+```
 
----
+Dùng normalization đúng với training. Checkpoint ROI phải dùng evaluator trên ROI cache; raw prediction từ chối chúng vì cần localizer/preprocessing riêng.
 
-## Protocol benchmark đã khóa (Phase 1)
+## Protocol báo cáo
 
-Protocol `myops380_voxel_v2` tính HD95/ASD trên lưới voxel đơn vị (`voxelspacing=None`), không phải mm. V2 loại bỏ các cột tương thích tác giả; công thức metric chính và điểm chọn checkpoint không đổi. Dữ liệu đã chuẩn hóa in-plane; spacing z vật lý không có trong bản phát hành và không được suy diễn từ affine identity. Không cần truyền `--spacing` hoặc `--allow-voxel-spacing`.
+- Region: normal `{1}`, edema-exclusive `{2}`, scar `{3}`, edema-inclusive `{2,3}`, myocardial ring `{1,2,3}`. Không tự gán edema-inclusive thành cột edema trong paper khác.
+- Metric trung bình theo bệnh nhân. Hai mask rỗng: metric không xác định; một mask rỗng: Dice/IoU bằng 0, distance không xác định. Báo số ca defined/undefined và trạng thái empty.
+- MyoPS380 dùng HD95/ASD trên voxel grid đơn vị, không suy diễn mm từ affine identity. MyoPS++ dùng mm. ROI là **GT-centered oracle crop**, đánh giá trên ROI grid; không đánh giá localizer hoặc khôi phục whole-image grid.
+- Cache bytes, nhãn, split và protocol được khóa trong checkpoint. Resume/evaluation từ chối khi không khớp. Test không dùng để tune hyperparameter/chọn model.
+- Baseline cần cùng bệnh nhân, GT/grid, region, evaluator, ngân sách train và inference. Điểm paper chỉ là tham khảo khi protocol chưa khớp; không suy ra vượt SOTA từ bảng lịch sử.
 
-- Nhãn đầu ra canonical: `0=background, 1=normal_myocardium, 2=edema, 3=scar`. Cache chính thức thiếu metadata dùng `--label-order legacy`; cache SCAR mới dùng `canonical`. `auto` không còn đoán nhãn cho file thiếu metadata.
-- Region độc lập: normal `[1]`, edema `[2]`, scar `[3]`; region hợp: edema-inclusive `[2,3]`, myocardial ring `[1,2,3]`. Không tự coi region hợp là cột tương ứng trong paper.
-- Metric chính: cả hai mask rỗng thì Dice/IoU/HD95 không xác định; một mask rỗng thì Dice/IoU bằng 0, distance không xác định. Trung bình chỉ dùng giá trị xác định và luôn kèm số ca, trạng thái empty.
-- `avg_pathology_dice` = trung bình của hai patient-mean Dice scar và edema riêng (cần cả hai giá trị xác định). Dice lưu trong [0,1]. Metric này trên **validation volume** chọn `best.pth` và điều khiển early stopping; test không tham gia chọn mô hình.
-- Không tính hoặc xuất `official_*`; bỏ sót tổn thương nhỏ vẫn có Dice=0, không có ngoại lệ ngưỡng 200 voxel. Các báo cáo cũ được giữ nguyên như dữ liệu lịch sử. Khi viết bài, mô tả chính sách mask rỗng và endpoint (edema-exclusive hay edema-inclusive) rõ ràng.
-- 76 ID test chính thức được khóa bằng hash; 304 ca còn lại chia train/val. Hash nội dung cache, quy ước nhãn, protocol và hash manifest được lưu trong `config.json`, checkpoint và báo cáo evaluation. Resume/evaluation từ chối thay đổi dữ liệu, đổi nhãn hoặc đổi split; evaluation không nhận tập con của split đã lưu.
-- Checkpoint `myops380_voxel_v1` có đúng metadata protocol gốc vẫn được resume/evaluate vì metric chính và objective không đổi; output mới chỉ có metric chính v2. Protocol MyoPS++ và ROI không đổi. Checkpoint thiếu protocol hoặc thay đổi bất kỳ định nghĩa metric/dữ liệu/split nào vẫn bị từ chối. Chạy lại evaluation phải chọn thư mục đầu ra mới nếu thư mục cũ đã có dữ liệu.
+## Kiểm thử và cấu trúc
 
-`val/mean_dice` trong log vẫn là chỉ số pixel-pooled phụ; đường chọn checkpoint là `val/avg_pathology_dice`. Mỗi epoch có thêm lượt inference trên validation volumes. Khóa dữ liệu đọc toàn bộ cache để tính hash ở đầu train/resume/evaluation; hãy giữ cache bất biến trong lúc chạy.
+```powershell
+python -m pytest -q
+```
 
-Tiền xử lý không mặc nhiên là bản tái lập I-MMSeg. Với MyoPS380 đã phát hành, SCAR dùng cùng phép `clip(0,255)/255` trên ảnh đầu vào 128×128, nhưng giữ validation riêng và augmentation khác. Profile `myopspp_bc80` dùng percentile 1/99 trên volume native; hai profile ROI dùng GT-centered crop và percentile sau crop/resize. Các pipeline MyoPS++ này là protocol riêng của SCAR, không phải preprocessing I-MMSeg nguyên trạng. Code packaging của cả hai repo không thay thế đăng ký ảnh upstream; cùng shape/affine không chứng minh alignment giải phẫu.
-
----
-
-## Cấu trúc Repository
+Suite kiểm tra forward/backward M2-Plus, loss/accumulation, checkpoint cũ, rejection model đã bỏ, train → resume → evaluate, patient split, cache fingerprint, native/ROI geometry, metric và logging.
 
 ```text
 SCAR/
-├── data/                        # Dữ liệu splits (train.txt, val.txt, test_vol.txt)
-├── outputs/                     # Checkpoints và logs huấn luyện (runs/)
-├── preprocessing/               # Pipeline tiền xử lý NIfTI, chuẩn hóa cường độ, chia splits
-│   ├── build_splits.py
-│   ├── config.yaml
-│   ├── preprocessing.py
-│   ├── process_and_save.py
-│   ├── verify.py
-│   └── splits/test_vol.txt      # 76 ca test cố định
-├── training/                    # Toàn bộ mã nguồn mô hình & huấn luyện cốt lõi
-│   ├── config/                  # base.yaml và cấu hình models/ (M2, M2-Plus, M3)
-│   ├── dataset/                 # Dataset loader, Data Contract, Sampler
-│   ├── loss/                    # DiceLoss, SegmentationLoss (AMP-safe)
-│   ├── metrics/                 # ConfusionMeter, SurfaceDistance (HD95, ASD)
-│   ├── models/                  # CMSPA-Net, backbones/ (ResNetV2), modules/ (SSPANet, CMSPA)
-│   ├── trainer/                 # Trainer core, logging, checkpoints, early stopping
-│   ├── train.py                 # Module train chính
-│   ├── evaluate.py              # Đánh giá 3D volume
-│   └── predict.py               # Dự đoán NIfTI
-├── run_all.py                   # Script chạy tự động trọn gói (Build splits -> Train -> Eval)
-├── train.py                     # CLI huấn luyện nhanh
-├── test.py                      # CLI đánh giá nhanh
-├── scar_pipeline.ipynb          # Notebook Google Colab hoàn chỉnh
-├── requirements.txt             # Danh sách thư viện phụ thuộc
-└── README.md                    # Tài liệu hướng dẫn sử dụng
+├── preprocessing/          # Packaging, verify, patient manifests
+├── training/
+│   ├── models/
+│   │   ├── m2_plus_net.py
+│   │   ├── backbones/resnet_v2.py
+│   │   └── modules/        # m2_plus, sspanet, fusion, decoder
+│   ├── config/             # base, M2-Plus/testing, dataset profiles
+│   ├── dataset/
+│   ├── loss/
+│   ├── metrics/
+│   ├── trainer/
+│   ├── train.py
+│   ├── evaluate.py
+│   └── predict.py
+├── tests/
+├── docs/
+├── train.py                # CLI wrapper
+├── test.py                 # CLI wrapper
+├── run_all.py
+└── scar_pipeline.ipynb
 ```
 
----
-
-## Tài liệu Tham khảo
-
-1. **SSPANet**: Hasan et al., *Enhancing brain tumor classification with a novel attention based explainable deep learning framework*, Biomedical Signal Processing and Control 112 (2026), 108636.
-2. **I-MMSeg**: Fang et al., *Incorporating modality-specific intensity prior as text prompt for multimodal myocardial pathology segmentation*, Medical Image Analysis 111 (2026), 104072.
-3. **TransUNet**: Chen et al., *TransUNet: Transformers Make Strong Encoders for Medical Image Segmentation*, arXiv:2102.04306 (2021).
+`data/`, `outputs/`, `reports/` và weights không được đưa vào Git. Kết quả/checkpoint lịch sử được giữ trên máy; implementation model khác đã bỏ khỏi phiên bản repo này.

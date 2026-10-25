@@ -12,7 +12,7 @@ class RunLayoutTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             layout = RunLayout.create(root / 'run', 'Testing-Small', 1234)
-            checkpoint = layout.checkpoints / 'last.pth'
+            checkpoint = layout.checkpoints / 'last.pt'
             checkpoint.touch()
             with patch('training.train.Trainer') as trainer:
                 main(['--config', 'testing', '--data-root', str(root),
@@ -31,22 +31,22 @@ class RunLayoutTests(unittest.TestCase):
             def run(command, description):
                 commands.append(command)
                 if command[1] == 'training/train.py':
-                    layout = RunLayout.create(root / 'runs' / 'demo', 'CMSPA-Net', 1234)
-                    (layout.checkpoints / 'best.pth').touch()
+                    layout = RunLayout.create(root / 'runs' / 'demo', 'M2-Plus', 1234)
+                    (layout.checkpoints / 'best.pt').touch()
             with patch('run_all.run_command', side_effect=run):
                 run_all.main(['--data-root', str(data), '--run-root', str(root / 'runs'),
                               '--run-id', 'demo', '--skip-cache'])
             evaluation = commands[-1]
             self.assertEqual(Path(evaluation[evaluation.index('--checkpoint') + 1]),
-                             root / 'runs' / 'demo' / 'checkpoints' / 'best.pth')
+                             root / 'runs' / 'demo' / 'checkpoints' / 'best.pt')
 
     def test_new_run_and_checkpoint_discovery(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / 'custom_run'
-            layout = RunLayout.create(root, 'CMSPA-Net', 1234)
+            layout = RunLayout.create(root, 'M2-Plus', 1234)
             self.assertEqual({p.name for p in root.iterdir()},
-                             {'tensorboard', 'checkpoints', 'logs_CMSPA-Net_seed1234'})
-            checkpoint = layout.checkpoints / 'last.pth'
+                             {'tensorboard', 'checkpoints', 'logs_M2-Plus_seed1234'})
+            checkpoint = layout.checkpoints / 'last.pt'
             checkpoint.touch()
             self.assertEqual(RunLayout.from_checkpoint(checkpoint), layout)
             self.assertEqual(layout.evaluation('test_vol'), layout.logs / 'test_results')
@@ -56,7 +56,7 @@ class RunLayoutTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / 'splits').mkdir()
-            layout = RunLayout.from_checkpoint(root / 'last.pth')
+            layout = RunLayout.from_checkpoint(root / 'last.pt')
             self.assertEqual(layout.root, root.resolve())
             self.assertEqual(layout.logs, root.resolve())
             self.assertEqual(layout.checkpoints, root.resolve())
@@ -66,7 +66,7 @@ class RunLayoutTests(unittest.TestCase):
             root = Path(tmp)
             (root / 'splits').mkdir()
             (root / 'checkpoints').mkdir()
-            layout = RunLayout.from_checkpoint(root / 'checkpoints' / 'best.pth')
+            layout = RunLayout.from_checkpoint(root / 'checkpoints' / 'best.pt')
             self.assertEqual(layout.root, root.resolve())
             self.assertEqual(layout.logs, root.resolve())
             self.assertEqual(layout.checkpoints, root.resolve() / 'checkpoints')

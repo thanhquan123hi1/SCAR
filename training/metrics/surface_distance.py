@@ -7,7 +7,7 @@ from scipy.ndimage import binary_erosion, distance_transform_edt, generate_binar
 
 
 BENCHMARK_PROTOCOL = {
-    "id": "myops380_voxel_v2",
+    "id": "myops380_voxel_v3",
     "distance_unit": "voxel",
     "voxelspacing": None,
     "axis_order": "HWD",
@@ -15,7 +15,8 @@ BENCHMARK_PROTOCOL = {
                 "edema_inclusive": [2, 3], "myocardial_ring": [1, 2, 3]},
     "primary_empty_policy": "both_empty: excluded; one_empty: Dice/IoU=0, distances undefined",
     "aggregation": "equal patient weight within each region; exclude undefined values and report counts",
-    "selection_metric": "avg_pathology_dice",
+    "selection_metric": "avg_pathology_inclusive_dice",
+    # Preserve the meaning of the supplemental avg_pathology_* report fields.
     "pathology_regions": ["scar", "edema"],
     "pathology_aggregation": "arithmetic mean of scar and exclusive-edema patient means; both required",
 }
@@ -28,7 +29,7 @@ def protocol_for_dataset(dataset_id="myops380"):
     if dataset_id in ROI_PROFILES:
         profile = ROI_PROFILES[dataset_id]
         return dict(BENCHMARK_PROTOCOL,
-                id=f"{dataset_id}_roi_mm_v1", distance_unit="mm",
+                id=f"{dataset_id}_roi_mm_v2", distance_unit="mm",
                 voxelspacing="preprocessed ROI NIfTI spacing in mm, orthogonal grid",
                 evaluation_grid="preprocessed_roi", localization="oracle_gt_bbox",
                 crop_mm=profile["crop_mm"], model_hw=[128, 128],
@@ -36,22 +37,29 @@ def protocol_for_dataset(dataset_id="myops380"):
     if dataset_id != "myopspp_bc80":
         raise ValueError(f"Unknown metric dataset profile: {dataset_id}")
     return dict(BENCHMARK_PROTOCOL,
-            id="myopspp_bc80_mm_v1", distance_unit="mm",
+            id="myopspp_bc80_mm_v2", distance_unit="mm",
             voxelspacing="native NIfTI spacing in mm, orthogonal grid")
 
 
-def benchmark_protocol_matches(saved_protocol, dataset_id="myops380"):
-    """Accept current protocols and the exact old MyoPS380 reporting schema.
+def benchmark_protocol_matches(saved_protocol, dataset_id="myops380", *, allow_legacy_selection=True):
+    """Keep old caches/evaluation readable, but never resume old selection state.
 
-    V2 removes author-compatibility columns only. Primary metrics, checkpoint
-    selection, dataset locks and the training objective remain identical.
+    Per-region metrics and data geometry are unchanged. New runs select on
+    scar/inclusive-edema Dice; old runs selected on scar/exclusive-edema Dice.
     """
     current = protocol_for_dataset(dataset_id)
     if saved_protocol == current:
         return True
+    if not allow_legacy_selection:
+        return False
+    old_id = ("myops380_voxel_v2" if dataset_id == "myops380" else
+              f"{dataset_id}_roi_mm_v1" if "evaluation_grid" in current else "myopspp_bc80_mm_v1")
+    legacy = dict(current, id=old_id, selection_metric="avg_pathology_dice")
+    if saved_protocol == legacy:
+        return True
     if dataset_id != "myops380":
         return False
-    legacy = dict(current, id="myops380_voxel_v1",
+    legacy = dict(legacy, id="myops380_voxel_v1",
                   official_reference="I_MMSeg@90f46c4eb72924509895fcda6bc6a3b8c3316e66/utils.py:171-182",
                   official_empty_policy="if either empty: Dice=1 when pred<200 and target<=200, else 0; HD95=0")
     return saved_protocol == legacy
@@ -102,6 +110,8 @@ def summarize_dataset_rows(rows, dataset_id="myops380"):
     for metric in ("dice", "iou", "hd95_mm"):
         values = [summary[name][f"mean_{metric}"] for name in ("scar", "edema")]
         summary[f"avg_pathology_{metric}"] = float(np.mean(values)) if all(v is not None for v in values) else None
+        values = [summary[name][f"mean_{metric}"] for name in ("scar", "edema_inclusive")]
+        summary[f"avg_pathology_inclusive_{metric}"] = float(np.mean(values)) if all(v is not None for v in values) else None
     return summary
 
 
@@ -151,6 +161,8 @@ def summarize_rows(rows):
     for metric in ("dice", "iou", "hd95_voxel"):
         values = [summary[name][f"mean_{metric}"] for name in ("scar", "edema")]
         summary[f"avg_pathology_{metric}"] = float(np.mean(values)) if all(v is not None for v in values) else None
+        values = [summary[name][f"mean_{metric}"] for name in ("scar", "edema_inclusive")]
+        summary[f"avg_pathology_inclusive_{metric}"] = float(np.mean(values)) if all(v is not None for v in values) else None
     return summary
 
 

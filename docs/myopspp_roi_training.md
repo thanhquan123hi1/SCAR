@@ -1,6 +1,6 @@
 # Train the MyoPS++ ROI datasets
 
-The repository supports `myops380`, native `myopspp_bc80`, and two independent exported ROI profiles. Model architecture files and MyoPS380 defaults are unchanged.
+The repository supports `myops380`, native `myopspp_bc80`, and three independent exported ROI profiles. All profiles use M2-Plus; MyoPS380 data and metric defaults are unchanged.
 
 | Profile | Patients (train / val / test) | Export folder | Cache | Evaluation XY spacing |
 |---|---|---|---|---|
@@ -29,28 +29,22 @@ The caches have already been created on this computer. Do not run those commands
 `run_all.py` reuses a cache with `--skip-cache`, verifies it, trains with validation-based checkpoint selection, and evaluates the best checkpoint on held-out patient volumes:
 
 ```powershell
-python run_all.py --dataset myopspp_roi128_76 --config training/config/models/cmspa_net.yaml --skip-cache --batch-size 2 --accum-steps 8 --run-id roi128_m3_seed1234
-python run_all.py --dataset myopspp_roi128_80 --config training/config/models/cmspa_net.yaml --skip-cache --batch-size 2 --accum-steps 8 --run-id roi128_80_m3_seed1234
-python run_all.py --dataset myopspp_roi160_80 --config training/config/models/cmspa_net.yaml --skip-cache --batch-size 2 --accum-steps 8 --run-id roi160_m3_seed1234
+python run_all.py --dataset myopspp_roi128_76 --config training/config/models/m2_plus.yaml --skip-cache --batch-size 2 --accum-steps 8 --run-id roi128_m2_plus_seed1234
+python run_all.py --dataset myopspp_roi128_80 --config training/config/models/m2_plus.yaml --skip-cache --batch-size 2 --accum-steps 8 --run-id roi128_80_m2_plus_seed1234
+python run_all.py --dataset myopspp_roi160_80 --config training/config/models/m2_plus.yaml --skip-cache --batch-size 2 --accum-steps 8 --run-id roi160_m2_plus_seed1234
 ```
 
-Use an existing model YAML instead of `cmspa_net.yaml` to select another model. The default input size is 128×128. `testing.yaml` intentionally uses a smaller network and 32×32 model input for software smoke tests and should not be used for reported research experiments. Batch size can be lowered with `--batch-size`; use `--accum-steps` to preserve the desired effective batch size. GPU memory needs depend on the selected model.
+M2-Plus is the only supported architecture. The default input is 128×128. `testing.yaml` uses a smaller M2-Plus and 32×32 input for software checks; it is not a research configuration. Lower `--batch-size` and increase `--accum-steps` as needed. CE/Dice class weights and optional AAR/scar losses can be set in YAML or the train CLI. Selecting an ROI profile does not enable auxiliary losses.
 
-For example, train V7 using its existing model configuration:
+The new ROI profiles default to `loss.pathology_reduction: sample`: conditional AAR/scar Dice contributes zero for negative slices and is averaged over all samples, so sample-weighted gradient accumulation preserves the objective. Existing MyoPS380 and native MyoPS++ runs keep `positive` reduction by default. BatchNorm and stochastic operations can still make microbatch training differ from a large physical batch. This change only fixes the loss denominator.
 
-```powershell
-python run_all.py --dataset myopspp_roi160_80 --config training/config/models/m2_max_v7.yaml --skip-cache --batch-size 2 --accum-steps 8 --run-id roi160_v7_seed1234
-```
-
-Auxiliary loss weights continue to come from the chosen model YAML or train CLI; selecting an ROI profile does not enable auxiliary losses. For V6/V7, wall/inclusion loss may be enabled explicitly. The new ROI profiles default to `loss.pathology_reduction: sample`: conditional AAR/scar Dice contributes zero for negative slices and is averaged over all samples, so sample-weighted gradient accumulation preserves the objective. Existing MyoPS380 and native MyoPS++ runs keep `positive` reduction by default. BatchNorm and stochastic operations can still make microbatch training differ from a large physical batch. This change only fixes the loss denominator.
-
-To change that choice explicitly, set `loss.pathology_reduction` in a custom model YAML, or pass `--pathology-reduction` to `training/train.py`. Resume locks that setting; a checkpoint cannot silently switch modes. `--init-weights` transfers compatible canonical model weights into a new experiment without carrying optimizer state, old splits or scores. Hierarchical base classifiers transfer to and from ordinary classifiers; additional anatomy heads remain architecture-specific.
+To change that choice explicitly, set `loss.pathology_reduction` in a custom model YAML, or pass `--pathology-reduction` to `training/train.py`. Resume locks that setting; a checkpoint cannot silently switch modes. `--init-weights` transfers compatible canonical model weights into a new experiment without carrying optimizer state, old splits or scores. Initialization requires a complete M2-Plus state dict with matching canonical labels; partial parameter loading is rejected.
 
 Resume with the same dataset, model configuration and loss settings:
 
 ```powershell
-python training/train.py --dataset myopspp_roi160_80 --config training/config/models/cmspa_net.yaml --batch-size 2 --accum-steps 8 --resume outputs/myopspp_roi160_80/runs/roi160_m3_seed1234/checkpoints/last.pth --output-dir outputs/myopspp_roi160_80/runs/roi160_m3_seed1234
-python training/evaluate.py --checkpoint outputs/myopspp_roi160_80/runs/roi160_m3_seed1234/checkpoints/best.pth --data-root data/myopspp_roi160_80/cache
+python training/train.py --dataset myopspp_roi160_80 --config training/config/models/m2_plus.yaml --batch-size 2 --accum-steps 8 --resume outputs/myopspp_roi160_80/runs/roi160_m2_plus_seed1234/checkpoints/last.pt --output-dir outputs/myopspp_roi160_80/runs/roi160_m2_plus_seed1234
+python training/evaluate.py --checkpoint outputs/myopspp_roi160_80/runs/roi160_m2_plus_seed1234/checkpoints/best.pt --data-root data/myopspp_roi160_80/cache
 ```
 
 Dataset identity, fixed split IDs, cache-byte fingerprint, class semantics and metric protocol are stored in checkpoints and checked on resume/evaluation. Do not edit caches in place between runs.
@@ -62,3 +56,5 @@ These datasets use **GT-centered oracle ROIs**, including validation/test. Predi
 This measures segmentation given a cardiac ROI. It does not measure automatic heart localization or performance on uncropped MRI. `training/predict.py` rejects these checkpoints on its raw-NIfTI path to prevent silently using the wrong preprocessing. Use the ROI cache evaluator for this protocol. Native restoration and a deployable localizer are separate work.
 
 MyoPS380 retains its existing voxel-distance benchmark, label-order conversion, split and default loss behavior. Its commands remain unchanged, or choose it explicitly with `--dataset myops380`. Neither ROI cohort is the published 95-patient MyoPS++ cohort, and their results should be named separately in comparisons.
+
+Các profile ROI chọn `best.pt` bằng trung bình patient-mean Dice scar và edema-inclusive `{2,3}` trên validation volumes; early stopping dùng cùng điểm này. Mỗi run chỉ lưu `best.pt` và `last.pt`. Protocol ROI v2 giữ nguyên hình học và nhãn nên cache v1 vẫn dùng được. Checkpoint M2-Plus protocol cũ vẫn evaluate được hoặc dùng `--init-weights` cho run mới; không resume trạng thái chọn best/patience theo edema-exclusive.
