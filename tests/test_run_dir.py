@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 
 from training.config.config_utils import generate_run_dir
 
@@ -54,6 +55,27 @@ class RunDirNamingTests(unittest.TestCase):
             )
             self.assertEqual(dir2.name, "M2-Plus_seed1234_17h05_01")
             self.assertTrue(dir2.is_dir())
+
+    def test_empty_run_directories_remain_reserved(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            directories = [generate_run_dir(tmp_dir, "M2-Plus", 1234, "17h05")
+                           for _ in range(3)]
+            self.assertEqual([path.name for path in directories], [
+                "M2-Plus_seed1234_17h05",
+                "M2-Plus_seed1234_17h05_01",
+                "M2-Plus_seed1234_17h05_02",
+            ])
+            self.assertTrue(all(not any(path.iterdir()) for path in directories))
+
+    def test_concurrent_runs_receive_distinct_directories(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            def reserve(_):
+                return generate_run_dir(tmp_dir, "M2-Plus", 1234, "17h05")
+
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                directories = list(pool.map(reserve, range(16)))
+            self.assertEqual(len(set(directories)), 16)
+            self.assertTrue(all(path.is_dir() for path in directories))
 
 
 if __name__ == "__main__":

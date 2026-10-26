@@ -52,6 +52,40 @@ class RunLayoutTests(unittest.TestCase):
             self.assertEqual(layout.evaluation('test_vol'), layout.logs / 'test_results')
             self.assertEqual(layout.evaluation('val_vol'), layout.logs / 'validation_results')
 
+    def test_run_all_shares_yaml_runtime_settings_and_cli_overrides(self):
+        import run_all
+
+        cases = [
+            ([], {'device': 'cpu', 'amp': 'none', 'cpu-threads': '2'}),
+            (['--device', 'cuda:1', '--amp', 'bf16', '--cpu-threads', '3'],
+             {'device': 'cuda:1', 'amp': 'bf16', 'cpu-threads': '3'}),
+            (['--cpu-threads', '3'], {'device': 'cpu', 'amp': 'none', 'cpu-threads': '3'}),
+        ]
+        for flags, expected in cases:
+            with self.subTest(flags=flags), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                data = root / 'data'
+                for modality in ('bSSFP', 'LGE', 'T2w'):
+                    (data / modality / 'train_npz').mkdir(parents=True)
+                config = root / 'runtime.yaml'
+                config.write_text('device: cpu\namp: none\ncpu_threads: 2\n', encoding='utf-8')
+                commands = []
+
+                def run(command, description):
+                    commands.append(command)
+                    if command[1] == 'training/train.py':
+                        layout = RunLayout.create(root / 'runs' / 'demo', 'M2-Plus', 1234)
+                        (layout.checkpoints / 'best.pt').touch()
+
+                with patch('run_all.run_command', side_effect=run):
+                    run_all.main(['--config', str(config), '--data-root', str(data),
+                                  '--run-root', str(root / 'runs'), '--run-id', 'demo',
+                                  '--skip-cache', *flags])
+                training, evaluation = commands[-2:]
+                for command in (training, evaluation):
+                    for name, value in expected.items():
+                        self.assertEqual(command[command.index('--' + name) + 1], value)
+
     def test_legacy_flat_run(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -67,6 +67,10 @@ def main(argv=None) -> Path:
     from training.models import validate_model_config
     validate_model_config(config["model"])
     args.dataset = config["data"]["dataset_id"]
+    # Share CLI > merged YAML runtime settings between training and evaluation.
+    for name in ("device", "amp", "cpu_threads"):
+        if getattr(args, name) is None:
+            setattr(args, name, config[name])
     with (ROOT / "preprocessing/config.yaml").open(encoding="utf-8") as stream:
         prep_config = yaml.safe_load(stream)
     data_root = project_path(args.data_root or config["data"]["data_root"])

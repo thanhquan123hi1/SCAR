@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime
+from itertools import count
 from pathlib import Path
 from typing import Any
 
@@ -142,7 +143,7 @@ def generate_run_dir(
     seed: int | str | None = None,
     timestamp: str | None = None,
 ) -> Path:
-    """Generate collision-defended timestamped run directory in <model>_seed<seed>_<YYYY-MM-DD_HHhMM> format."""
+    """Atomically reserve a new timestamped run directory, suffixing collisions."""
     run_root = Path(run_root)
     run_root.mkdir(parents=True, exist_ok=True)
     clean_model_name = str(model_name).replace(" ", "-").replace("/", "-")
@@ -156,27 +157,13 @@ def generate_run_dir(
         seed_part = ""
 
     base_name = f"{clean_model_name}{seed_part}_{timestamp}"
-    candidate = run_root / base_name
-    try:
-        candidate.mkdir(parents=True, exist_ok=False)
-        return candidate
-    except FileExistsError:
-        if not any(candidate.iterdir()):
-            return candidate
-
-    for counter in range(1, 100):
-        candidate = run_root / f"{base_name}_{counter:02d}"
+    for counter in count():
+        candidate = run_root / (base_name if counter == 0 else f"{base_name}_{counter:02d}")
         try:
             candidate.mkdir(parents=True, exist_ok=False)
             return candidate
         except FileExistsError:
-            if not any(candidate.iterdir()):
-                return candidate
-
-    micro = datetime.now().strftime("%f")
-    candidate = run_root / f"{base_name}_{micro}"
-    candidate.mkdir(parents=True, exist_ok=True)
-    return candidate
+            continue
 
 
 
