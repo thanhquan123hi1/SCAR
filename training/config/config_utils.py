@@ -89,6 +89,7 @@ MODEL_KEYS = {
     "model.cross_attention_heads", "model.resnet.num_layers", "model.resnet.width_factor",
     "model.decoder_channels", "model.skip_channels", "model.n_skip",
     "model.activation", "model.classifier", "model.transformer.dropout_rate",
+    "model.in_channels", "model.base_channels", "model.bilinear",
 }
 
 
@@ -97,7 +98,7 @@ def coerce_config_to_parser_types(flat_config: dict[str, Any], parser: argparse.
     actions = {action.dest: action for action in parser._actions}
     defaults = {}
     for key, value in flat_config.items():
-        if key in MODEL_KEYS:
+        if key in MODEL_KEYS or key.startswith("model."):
             continue
         if key not in YAML_KEY_TO_DEST:
             raise ValueError(f"Unknown configuration key: {key}")

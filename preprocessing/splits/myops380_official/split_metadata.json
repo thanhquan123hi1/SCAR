@@ -1,0 +1,11 @@
+{
+  "seed": 1234,
+  "val_fraction_of_non_test_patients": 0.2,
+  "data_root": "E:\\STUDY\\DATASET\\MyoPS380\\Processed_data",
+  "fixed_test_list": "D:\\NCKH\\SCAR\\preprocessing\\splits\\test_vol.txt",
+  "patient_counts": {
+    "train": 243,
+    "val": 61,
+    "test_vol": 76
+  }
+}

@@ -18,7 +18,7 @@ from training.config.config_utils import (
     generate_run_dir,
     load_merged_config,
 )
-from training.models import get_config, model_from_config, validate_model_config
+from training.models import get_config, get_unet_config, model_from_config, validate_model_config
 from training.dataset.benchmark_profiles import DATASET_IDS
 from training.run_layout import RunLayout
 from training.trainer.trainer import Trainer, load_checkpoint, seed_everything
@@ -32,7 +32,7 @@ def build_parser():
     parser.add_argument(
         "--config",
         default="training/config/models/m2_plus.yaml",
-        help="Path to M2-Plus YAML config, or testing for small CPU checks",
+        help="Path to YAML model config (e.g. m2_plus.yaml, unet.yaml), or testing for small CPU checks",
     )
     parser.add_argument(
         "--base-config",
@@ -93,7 +93,7 @@ def build_parser():
     parser.add_argument("--sampler", choices=("none", "rare"), default="none")
     parser.add_argument("--rare-boost", type=float, default=2.0)
     parser.add_argument("--foreground-boost", type=float, default=1.3)
-    parser.add_argument("--ablation", type=str.upper, choices=["M2-PLUS"], default="M2-PLUS")
+    parser.add_argument("--ablation", type=str.upper, choices=["M2-PLUS", "UNET"], default="M2-PLUS")
     parser.add_argument("--epochs", "--max_epochs", dest="max_epochs", type=int, default=300)
     parser.add_argument(
         "--batch-size",
@@ -254,18 +254,29 @@ def main(argv=None):
     args.output_dir = str(output)
     args.model_name = merged["model"].get("model_name", "M2-Plus")
     section = merged["model"]
-    config = get_config()
-    config.resnet.num_layers = tuple(section["resnet"]["num_layers"])
-    config.resnet.width_factor = float(section["resnet"]["width_factor"])
-    config.transformer.dropout_rate = float(section.get("transformer", {}).get("dropout_rate", 0.1))
-    for key in ("decoder_channels", "skip_channels", "fused_channels", "n_skip", "cross_attention_heads", "classifier", "activation"):
-        if key in section:
-            config[key] = tuple(section[key]) if key == "decoder_channels" else section[key]
-    config.ablation = args.ablation
-    config.gradient_checkpointing = args.gradient_checkpointing
-    config.n_classes = 4
-    if "architecture" in section:
-        config.architecture = section["architecture"]
+    arch = str(section.get("architecture", "m2_plus")).lower().replace("-", "_")
+    if arch in {"unet", "u_net"}:
+        config = get_unet_config()
+        config.update(section)
+        config.ablation = args.ablation
+        config.architecture = "unet"
+        config.gradient_checkpointing = args.gradient_checkpointing
+        config.n_classes = 4
+        if "num_classes" in section:
+            config.num_classes = section["num_classes"]
+    else:
+        config = get_config()
+        config.resnet.num_layers = tuple(section["resnet"]["num_layers"])
+        config.resnet.width_factor = float(section["resnet"]["width_factor"])
+        config.transformer.dropout_rate = float(section.get("transformer", {}).get("dropout_rate", 0.1))
+        for key in ("decoder_channels", "skip_channels", "fused_channels", "n_skip", "cross_attention_heads", "classifier", "activation"):
+            if key in section:
+                config[key] = tuple(section[key]) if key == "decoder_channels" else section[key]
+        config.ablation = args.ablation
+        config.gradient_checkpointing = args.gradient_checkpointing
+        config.n_classes = 4
+        if "architecture" in section:
+            config.architecture = section["architecture"]
     torch.set_num_threads(args.cpu_threads)
     seed_everything(args.seed, args.deterministic)
     model = model_from_config(config, img_size=args.img_size, num_classes=4, ablation=args.ablation)

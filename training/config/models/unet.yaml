@@ -1,0 +1,8 @@
+model:
+  architecture: unet
+  model_name: U-Net
+  ablation: UNET
+  num_classes: 4
+  in_channels: 3
+  base_channels: 64
+  bilinear: false
