@@ -92,6 +92,8 @@ else
         "/content/drive/MyDrive/google_drive/MyoPS380_dataset.zip"
         "/content/drive/MyDrive/NCKH_V2/i_mmseg/MyoPS380_dataset.zip"
         "/content/MyoPS380_dataset.zip"
+        "/content/MyoPS380.zip"
+        "/content/drive/MyDrive/MyoPS380.zip"
     )
 
     FOUND_DATA_DIR=""
@@ -228,7 +230,7 @@ for SEED in "${SEEDS[@]}"; do
     mkdir -p "$SEED_TARGET_DIR"
     cp -r "$OUT_DIR/checkpoints" "$SEED_TARGET_DIR/"
     cp -r "$OUT_DIR/test_results" "$SEED_TARGET_DIR/"
-    cp -r "$OUT_DIR/logs" "$SEED_TARGET_DIR/"
+    cp -r "$OUT_DIR"/logs_* "$SEED_TARGET_DIR/" 2>/dev/null || cp -r "$OUT_DIR/logs" "$SEED_TARGET_DIR/" 2>/dev/null || true
 
     echo "✅ [Seed ${SEED}] ĐÃ HOÀN TẤT THÀNH CÔNG!"
 done
@@ -251,7 +253,9 @@ seeds = [1234, 1098, 1024, 2026, 6868]
 
 rows = []
 for s in seeds:
-    p = master_dir / f'seed_{s}' / 'test_results' / 'summary.json'
+    p = master_dir / f'seed_{s}' / 'test_results' / 'metrics.json'
+    if not p.is_file():
+        p = master_dir / f'seed_{s}' / 'test_results' / 'summary.json'
     if not p.is_file():
         print(f'⚠️ Thiếu file summary.json của seed {s}')
         continue

@@ -94,6 +94,8 @@ else
         "/content/drive/MyDrive/google_drive/MyoPS380_dataset.zip"
         "/content/drive/MyDrive/NCKH_V2/i_mmseg/MyoPS380_dataset.zip"
         "/content/MyoPS380_dataset.zip"
+        "/content/MyoPS380.zip"
+        "/content/drive/MyDrive/MyoPS380.zip"
     )
 
     FOUND_DATA_DIR=""
