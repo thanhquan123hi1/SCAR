@@ -19,3 +19,9 @@ model:
     attention_dropout_rate: 0.0
   decoder_channels: [256, 128, 64, 16]
   skip_channels: [512, 256, 64, 16]
+
+loss:
+  ce_weight: 0.2
+  dice_weight: 0.8
+  dice_class_weights: [0.5, 1.0, 1.0, 1.0]
+

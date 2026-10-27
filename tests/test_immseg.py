@@ -1,3 +1,10 @@
+from pathlib import Path
+import sys
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 import numpy as np
 import torch
 
@@ -13,6 +20,11 @@ def test_immseg_config_parsing():
     assert merged["model"]["architecture"] == "immseg"
     assert merged["model"]["model_name"] == "I-MMSeg"
     assert merged["model"]["num_classes"] == 4
+    # Official I-MMSeg native loss configuration: 0.2 CE + 0.8 SoftDice with background weight 0.5
+    assert args.ce_weight == 0.2
+    assert args.dice_weight == 0.8
+    assert args.dice_class_weights == [0.5, 1.0, 1.0, 1.0]
+
 
 
 def test_immseg_validation_rules():
@@ -79,7 +91,12 @@ def test_immseg_gradients_flow():
     t2 = torch.randn(2, 1, 128, 128)
     target = torch.randint(0, 4, (2, 128, 128))
 
-    criterion = SegmentationLoss(n_classes=4, ce_weight=0.5, dice_weight=0.5)
+    criterion = SegmentationLoss(
+        n_classes=4,
+        ce_weight=0.2,
+        dice_weight=0.8,
+        dice_class_weights=[0.5, 1.0, 1.0, 1.0],
+    )
     logits = model(c0, lge, t2)
     loss = criterion(logits, target)["loss"]
 
