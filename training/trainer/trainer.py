@@ -224,11 +224,16 @@ def _validate_resume_loss_config(saved_args: dict, args, saved_version: int | No
 
 
 def _resume_model_config(config):
-    """Canonicalize only equivalent M2-Plus identity metadata for resume."""
+    """Canonicalize model identity metadata for resume."""
     validate_model_config(config)
     normalized = dict(config)
-    normalized["ablation"] = "M2-PLUS"
-    normalized["architecture"] = "m2_plus"
+    arch = str(config.get("architecture", "m2_plus")).lower().replace("-", "_")
+    if arch in {"immseg", "i_mmseg"}:
+        normalized["ablation"] = "IMMSEG"
+        normalized["architecture"] = "immseg"
+    else:
+        normalized["ablation"] = "M2-PLUS"
+        normalized["architecture"] = "m2_plus"
     return normalized
 
 

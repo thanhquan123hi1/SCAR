@@ -1,0 +1,21 @@
+model:
+  architecture: immseg
+  model_name: I-MMSeg
+  ablation: IMMSEG
+  num_classes: 4
+  n_classes: 4
+  n_skip: 3
+  hidden_size: 768
+  vit_name: R50-ViT-B_16
+  vit_patches_size: 16
+  classifier: seg
+  resnet:
+    num_layers: [3, 4, 9]
+    width_factor: 1.0
+  transformer:
+    dropout_rate: 0.1
+    num_heads: 12
+    mlp_dim: 3072
+    attention_dropout_rate: 0.0
+  decoder_channels: [256, 128, 64, 16]
+  skip_channels: [512, 256, 64, 16]

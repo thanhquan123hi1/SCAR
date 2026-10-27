@@ -11,6 +11,7 @@ outputs/
 runs/
 *.pt
 *.pth
+!training/models/text_features/*.pth
 *.npz
 *.npy
 *.h5
