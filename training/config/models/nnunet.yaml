@@ -1,0 +1,5 @@
+model:
+  architecture: nnunet
+  model_name: nnU-Net
+  ablation: NNUNET
+  num_classes: 4

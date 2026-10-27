@@ -1,0 +1,12 @@
+model:
+  architecture: lightweight_m2_plus
+  model_name: Lightweight-M2-Plus
+  ablation: LIGHTWEIGHT_M2_PLUS
+  decoder_channels: [128, 64, 32, 32]
+  latent_dim: 256
+  fusion_version: spatial_v2
+  use_pos_enc: true
+  sspanet_gate: optimized
+  sspanet_reduction: 16
+  transformer:
+    dropout_rate: 0.0
