@@ -40,6 +40,10 @@ model:
   gradient_checkpointing: false
   fused_channels: 512
   cross_attention_heads: 8
+  fusion_version: spatial_v2
+  latent_dim: 256
+  use_pos_enc: true
+  sspanet_gate: centered_tanh_v2
   resnet:
     num_layers: [3, 4, 9]
     width_factor: 1.0

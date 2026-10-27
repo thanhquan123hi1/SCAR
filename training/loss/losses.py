@@ -2,23 +2,70 @@
 from __future__ import annotations
 
 import math
+from typing import Any
 
 import torch
 from torch import nn
 from torch.nn import functional as F
 
-# Keep version 2: the weighted CE reduction is unchanged for M2-Plus.
-LOSS_PROTOCOL_VERSION = 2
+# Version 3 fixes foreground selection and uses per-image masked Dice reduction.
+LOSS_PROTOCOL_VERSION = 3
 
 
-class DiceLoss(nn.Module):
-    """Per-image equally weighted class Dice with squared denominator.
+def _reduce_dice(losses, weight, n_classes, include_background, mask=None):
+    """Mean per-image class losses, with differentiable zero for empty images."""
+    weights = torch.ones(n_classes, device=losses.device, dtype=torch.float32)
+    if weight is not None:
+        weights = torch.as_tensor(weight, device=losses.device, dtype=torch.float32)
+        if (weights.shape != (n_classes,) or not torch.isfinite(weights).all()
+                or (weights < 0).any() or not torch.isfinite(weights.sum()) or weights.sum() <= 0):
+            raise ValueError("Dice weights must be finite, nonnegative with positive sum.")
+    start = 0 if include_background else 1
+    selected = losses[:, start:]
+    weights = weights[start:].unsqueeze(0).expand_as(selected)
+    if mask is not None:
+        weights = weights * mask[:, start:]
+    denominator = weights.sum(1)
+    return ((selected * weights).sum(1) / denominator.masked_fill(denominator == 0, 1)).mean()
 
-    Includes background; reductions are float32 even under autocast. Per-image
-    reduction makes sample-weighted gradient accumulation well-defined.
+
+def validate_microlesion_resolution(
+    img_size: int | tuple[int, int],
+    min_resolution: int = 192,
+    strict: bool = True,
+) -> bool:
+    """Check an optional configured size limit, not anatomical preservation.
+
+    Pixel dimensions alone cannot establish preservation: spacing, resampling
+    scale and crop coverage must be evaluated separately.
+    """
+    h = img_size if isinstance(img_size, int) else img_size[0]
+    w = img_size if isinstance(img_size, int) else img_size[1]
+    if min(h, w) < min_resolution:
+        if strict:
+            raise ValueError(
+                f"Resolution ({h}x{w}) is below the configured minimum "
+                f"{min_resolution}x{min_resolution}."
+            )
+        return False
+    return True
+
+
+class MaskedSliceDiceLoss(nn.Module):
+    """Slice-wise Dice loss with foreground-presence masking (Finding G-01).
+
+    For each class c, loss on slice i is only accumulated if class c is actually
+    present in the ground truth for that slice (has_fg > 0).
+    Reduces over classes within each image, then images. Empty images contribute
+    differentiable zero; CE is still needed to penalize their false positives.
     """
 
-    def __init__(self, n_classes=4, smooth=1e-5):
+    def __init__(
+        self,
+        n_classes: int = 4,
+        smooth: float = 1e-5,
+        include_background: bool = False,
+    ):
         super().__init__()
         if not isinstance(n_classes, int) or n_classes < 2:
             raise ValueError("n_classes must be an integer >= 2")
@@ -26,8 +73,15 @@ class DiceLoss(nn.Module):
             raise ValueError("Dice smooth must be finite and positive")
         self.n_classes = n_classes
         self.smooth = smooth
+        self.include_background = include_background
 
-    def forward(self, inputs, target, weight=None, softmax=False):
+    def forward(
+        self,
+        inputs: torch.Tensor,
+        target: torch.Tensor,
+        weight: Any = None,
+        softmax: bool = True,
+    ) -> torch.Tensor:
         probabilities = inputs.float().softmax(1) if softmax else inputs.float()
         labels = F.one_hot(target.long(), self.n_classes).movedim(-1, 1).float()
         if labels.shape != probabilities.shape:
@@ -36,14 +90,118 @@ class DiceLoss(nn.Module):
         scores = (2 * (probabilities * labels).sum(dims) + self.smooth) / (
             probabilities.square().sum(dims) + labels.sum(dims) + self.smooth
         )
-        losses = 1 - scores
-        if weight is not None:
-            weights = torch.as_tensor(weight, device=inputs.device, dtype=torch.float32)
-            if (weights.shape != (self.n_classes,) or not torch.isfinite(weights).all()
-                    or (weights < 0).any() or weights.sum() <= 0):
-                raise ValueError("Dice weights must be nonnegative with positive sum.")
-            return (losses * weights).sum(1).mean() / weights.sum()
-        return losses.mean()
+        slice_losses = 1 - scores  # shape (B, C)
+
+        has_fg = (labels.sum(dims) > 0).float()  # shape (B, C)
+        return _reduce_dice(slice_losses, weight, self.n_classes, self.include_background, has_fg)
+
+
+class BatchSoftDiceLoss(nn.Module):
+    """Batch-level Soft Dice loss (Finding G-01 alternative).
+
+    Instead of reducing over 2D slice spatial dimensions independently,
+    reductions are computed across the entire batch (B, H, W).
+    This aggregates gradient evidence across slices, naturally suppressing
+    spikes from isolated empty slices in 3D volumes.
+    """
+
+    def __init__(
+        self,
+        n_classes: int = 4,
+        smooth: float = 1e-5,
+        include_background: bool = False,
+    ):
+        super().__init__()
+        if not isinstance(n_classes, int) or n_classes < 2:
+            raise ValueError("n_classes must be an integer >= 2")
+        if not math.isfinite(smooth) or smooth <= 0:
+            raise ValueError("Dice smooth must be finite and positive")
+        self.n_classes = n_classes
+        self.smooth = smooth
+        self.include_background = include_background
+
+    def forward(
+        self,
+        inputs: torch.Tensor,
+        target: torch.Tensor,
+        weight: Any = None,
+        softmax: bool = True,
+    ) -> torch.Tensor:
+        probabilities = inputs.float().softmax(1) if softmax else inputs.float()
+        labels = F.one_hot(target.long(), self.n_classes).movedim(-1, 1).float()
+        if labels.shape != probabilities.shape:
+            raise ValueError(f"Logits/target shape mismatch: {inputs.shape}, {target.shape}")
+
+        dims = (0,) + tuple(range(2, inputs.ndim))
+        inter = 2 * (probabilities * labels).sum(dims) + self.smooth
+        denom = probabilities.square().sum(dims) + labels.sum(dims) + self.smooth
+        class_losses = 1 - (inter / denom)  # shape (C,)
+
+        return _reduce_dice(class_losses.unsqueeze(0), weight, self.n_classes, self.include_background)
+
+
+class DiceLoss(nn.Module):
+    """Per-image equally weighted class Dice with squared denominator.
+
+    Includes background by default; reductions are float32 even under autocast. Per-image
+    reduction makes sample-weighted gradient accumulation well-defined.
+
+    Supports negative slice masking (masked_negative_slices=True or negative_slice_handling='mask')
+    and batch-level aggregation (batch_dice=True or negative_slice_handling='batch')
+    with explicit, checkpointed reduction semantics.
+    """
+
+    def __init__(
+        self,
+        n_classes: int = 4,
+        smooth: float = 1e-5,
+        masked_negative_slices: bool = False,
+        negative_slice_handling: str | None = None,
+        batch_dice: bool = False,
+        include_background: bool | None = None,
+    ):
+        super().__init__()
+        if not isinstance(n_classes, int) or n_classes < 2:
+            raise ValueError("n_classes must be an integer >= 2")
+        if not math.isfinite(smooth) or smooth <= 0:
+            raise ValueError("Dice smooth must be finite and positive")
+        if negative_slice_handling not in (None, "mask", "batch", "none"):
+            raise ValueError("negative_slice_handling must be None, 'mask', 'batch', or 'none'")
+        self.n_classes = n_classes
+        self.smooth = smooth
+        self.masked_negative_slices = masked_negative_slices or (negative_slice_handling == "mask")
+        self.batch_dice = batch_dice or (negative_slice_handling == "batch")
+        if self.batch_dice and self.masked_negative_slices:
+            raise ValueError("Choose either batch Dice or masked per-image Dice")
+        self.negative_slice_handling = negative_slice_handling
+        if include_background is None:
+            self.include_background = False if (self.masked_negative_slices or self.batch_dice) else True
+        else:
+            self.include_background = include_background
+
+    def forward(self, inputs, target, weight=None, softmax=False):
+        probabilities = inputs.float().softmax(1) if softmax else inputs.float()
+        labels = F.one_hot(target.long(), self.n_classes).movedim(-1, 1).float()
+        if labels.shape != probabilities.shape:
+            raise ValueError(f"Logits/target shape mismatch: {inputs.shape}, {target.shape}")
+
+        if self.batch_dice:
+            dims = (0,) + tuple(range(2, inputs.ndim))
+            inter = 2 * (probabilities * labels).sum(dims) + self.smooth
+            denom = probabilities.square().sum(dims) + labels.sum(dims) + self.smooth
+            losses = 1 - (inter / denom)
+            return _reduce_dice(losses.unsqueeze(0), weight, self.n_classes, self.include_background)
+
+        dims = tuple(range(2, inputs.ndim))
+        scores = (2 * (probabilities * labels).sum(dims) + self.smooth) / (
+            probabilities.square().sum(dims) + labels.sum(dims) + self.smooth
+        )
+        slice_losses = 1 - scores
+
+        if self.masked_negative_slices:
+            has_fg = (labels.sum(dims) > 0).float()
+            return _reduce_dice(slice_losses, weight, self.n_classes, self.include_background, has_fg)
+        return _reduce_dice(slice_losses, weight, self.n_classes, self.include_background)
 
 
 class SegmentationLoss(nn.Module):
@@ -59,6 +217,10 @@ class SegmentationLoss(nn.Module):
         dice_class_weights=None,
         ce_class_weights=None,
         pathology_reduction="positive",
+        masked_negative_slices=False,
+        negative_slice_handling=None,
+        batch_dice=False,
+        include_background=None,
     ):
         super().__init__()
         if pathology_reduction not in ("positive", "sample"):
@@ -80,7 +242,23 @@ class SegmentationLoss(nn.Module):
         self.scar_weight = scar_weight
         self.dice_class_weights = dice_class_weights
         self.ce_class_weights = ce_class_weights
-        self.dice = DiceLoss(n_classes)
+        self.masked_negative_slices = masked_negative_slices
+        self.negative_slice_handling = negative_slice_handling
+        self.batch_dice = batch_dice
+        self.dice = DiceLoss(
+            n_classes=n_classes,
+            masked_negative_slices=masked_negative_slices,
+            negative_slice_handling=negative_slice_handling,
+            batch_dice=batch_dice,
+            include_background=include_background,
+        )
+
+    def validate_accumulation(self, accum_steps):
+        if accum_steps > 1 and self.dice.batch_dice and self.dice_weight > 0:
+            raise ValueError("Batch Dice requires accum_steps=1; use per-image Dice for gradient accumulation")
+        if (accum_steps > 1 and self.pathology_reduction == "positive"
+                and (self.aar_weight > 0 or self.scar_weight > 0)):
+            raise ValueError("Auxiliary positive reduction requires accum_steps=1; use pathology_reduction='sample'")
 
     def forward(self, logits, target):
         # 1. Cross-Entropy (with optional class weights)
@@ -95,7 +273,7 @@ class SegmentationLoss(nn.Module):
         else:
             ce = F.cross_entropy(logits.float(), target.long())
 
-        # 2. Standard Unbiased Multi-Class Soft Dice (with optional class weighting)
+        # 2. Multi-Class Soft Dice (with optional class weighting and negative-slice handling)
         dice = self.dice(logits, target, weight=self.dice_class_weights, softmax=True)
 
         # 3. Conditional Area-at-Risk (AAR / Edema-Inclusive) Auxiliary Dice Loss
@@ -147,3 +325,13 @@ class SegmentationLoss(nn.Module):
             "aar_loss": aar_loss,
             "scar_loss": scar_loss,
         }
+
+
+__all__ = [
+    "DiceLoss",
+    "SegmentationLoss",
+    "MaskedSliceDiceLoss",
+    "BatchSoftDiceLoss",
+    "validate_microlesion_resolution",
+    "LOSS_PROTOCOL_VERSION",
+]

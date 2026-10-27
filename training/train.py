@@ -18,7 +18,8 @@ from training.config.config_utils import (
     generate_run_dir,
     load_merged_config,
 )
-from training.models import get_config, model_from_config, validate_model_config
+from training.models import get_config, get_lightweight_config, model_architecture, model_from_config, validate_model_config
+from training.loss.losses import SegmentationLoss
 from training.dataset.benchmark_profiles import DATASET_IDS
 from training.run_layout import RunLayout
 from training.trainer.trainer import Trainer, load_checkpoint, seed_everything
@@ -64,6 +65,11 @@ def build_parser():
     parser.add_argument("--pathology-reduction", choices=("positive", "sample"), default="positive",
                         help="Conditional AAR/scar mean: legacy positive slices, or all samples for stable accumulation")
     parser.add_argument("--dice-weight", type=float, default=0.5)
+    parser.add_argument("--negative-slice-handling", choices=("none", "mask", "batch"), default="none")
+    parser.add_argument("--masked-negative-slices", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--batch-dice", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--include-background", action=argparse.BooleanOptionalAction, default=None,
+                        help="Include background in Dice; default true for ordinary Dice, false for masked/batch")
     parser.add_argument(
         "--aar-weight",
         type=float,
@@ -93,7 +99,7 @@ def build_parser():
     parser.add_argument("--sampler", choices=("none", "rare"), default="none")
     parser.add_argument("--rare-boost", type=float, default=2.0)
     parser.add_argument("--foreground-boost", type=float, default=1.3)
-    parser.add_argument("--ablation", type=str.upper, choices=["M2-PLUS", "NNUNET"], default="M2-PLUS")
+    parser.add_argument("--ablation", type=str.upper, choices=["M2-PLUS", "LIGHTWEIGHT_M2_PLUS", "NNUNET"], default="M2-PLUS")
     parser.add_argument("--epochs", "--max_epochs", dest="max_epochs", type=int, default=300)
     parser.add_argument(
         "--batch-size",
@@ -211,7 +217,21 @@ def parse_args(argv=None):
         parser.error("Use either --run-id or --output-dir")
     if merged["model"].get("num_classes", 4) != 4:
         parser.error("This data contract requires four canonical classes")
+    selected = dict(merged["model"]) | {"ablation": args.ablation}
+    validate_model_config(selected)
+    # Validate the YAML identity too, so CLI cannot hide a retired architecture.
     validate_model_config(merged["model"])
+    try:
+        SegmentationLoss(
+            ce_weight=args.ce_weight, dice_weight=args.dice_weight,
+            aar_weight=args.aar_weight, scar_weight=args.scar_weight,
+            pathology_reduction=args.pathology_reduction,
+            negative_slice_handling=args.negative_slice_handling,
+            masked_negative_slices=args.masked_negative_slices,
+            batch_dice=args.batch_dice, include_background=args.include_background,
+        ).validate_accumulation(args.accum_steps)
+    except ValueError as exc:
+        parser.error(str(exc))
     return args, merged
 
 
@@ -254,13 +274,15 @@ def main(argv=None):
     args.output_dir = str(output)
     args.model_name = merged["model"].get("model_name", "M2-Plus")
     section = merged["model"]
-    config = get_config()
+    selected = dict(section) | {"ablation": args.ablation}
+    config = get_lightweight_config() if model_architecture(selected) == "lightweight_m2_plus" else get_config()
     if "resnet" in section:
         config.resnet.num_layers = tuple(section["resnet"]["num_layers"])
         config.resnet.width_factor = float(section["resnet"]["width_factor"])
     if "transformer" in section:
         config.transformer.dropout_rate = float(section["transformer"].get("dropout_rate", 0.1))
-    for key in ("decoder_channels", "skip_channels", "fused_channels", "n_skip", "cross_attention_heads", "classifier", "activation"):
+    for key in ("decoder_channels", "skip_channels", "fused_channels", "n_skip", "cross_attention_heads", "classifier", "activation", "sspanet_gate",
+                "latent_dim", "fusion_version", "use_pos_enc", "sspanet_reduction"):
         if key in section:
             config[key] = tuple(section[key]) if key == "decoder_channels" else section[key]
     config.ablation = args.ablation

@@ -37,6 +37,10 @@ YAML_KEY_TO_DEST: dict[str, str] = {
     "loss.scar_weight": "scar_weight",
     "loss.dice_class_weights": "dice_class_weights",
     "loss.ce_class_weights": "ce_class_weights",
+    "loss.negative_slice_handling": "negative_slice_handling",
+    "loss.masked_negative_slices": "masked_negative_slices",
+    "loss.batch_dice": "batch_dice",
+    "loss.include_background": "include_background",
     "data.data_root": "data_root",
     "data.list_dir": "list_dir",
     "data.val_fraction": "val_fraction",
@@ -88,6 +92,8 @@ MODEL_KEYS = {
     "model.cross_attention_heads", "model.resnet.num_layers", "model.resnet.width_factor",
     "model.decoder_channels", "model.skip_channels", "model.n_skip",
     "model.activation", "model.classifier", "model.transformer.dropout_rate",
+    "model.sspanet_gate", "model.sspanet_reduction", "model.latent_dim",
+    "model.fusion_version", "model.use_pos_enc",
 }
 
 
@@ -104,7 +110,7 @@ def coerce_config_to_parser_types(flat_config: dict[str, Any], parser: argparse.
         action = actions[dest]
         if value is None:
             if dest not in {"resume", "pretrained", "init_weights", "dice_class_weights",
-                            "ce_class_weights", "pin_memory", "output_dir", "run_id"}:
+                            "ce_class_weights", "pin_memory", "output_dir", "run_id", "include_background"}:
                 raise ValueError(f"{key} cannot be null")
             defaults[dest] = None
             continue

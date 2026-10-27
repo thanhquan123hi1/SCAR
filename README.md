@@ -1,12 +1,16 @@
 # SCAR — M2-Plus
 
-Phân đoạn cơ tim đa phương thức từ bSSFP/CINE, LGE/PSIR và T2w đã căn chỉnh. Repo chỉ hỗ trợ **M2-Plus** cho train, resume, đánh giá volume và prediction.
+Phân đoạn cơ tim đa phương thức từ bSSFP/CINE, LGE/PSIR và T2w đã căn chỉnh. Pipeline hỗ trợ **M2-Plus**, **Lightweight M2-Plus** và baseline nnU-Net cho train, resume và đánh giá volume.
 
 ## Kiến trúc và nhãn
 
 M2-Plus dùng ba encoder ResNetV2 độc lập, SSPANet trên từng modality, hai nhánh cross-attention riêng cho scar/edema, ba tầng skip fusion concat/project và decoder bốn cấp. CINE cung cấp queries; LGE và T2w cung cấp keys/values cho hai attention stream. Hai stream được kết hợp với đặc trưng CINE trước decoder.
 
 Mã chính: [m2_plus_net.py](training/models/m2_plus_net.py), [m2_plus.py](training/models/modules/m2_plus.py). Input mặc định 128×128; model trả raw logits `(B,4,H,W)` trong cả train và eval. Không có anatomy head hay skip gate của các model nghiên cứu trước đây. File pretrained `R50-ViT-B_16.npz` chỉ khởi tạo phần ResNet tương thích; model không dùng ViT hoặc text encoder.
+
+SSPANet mặc định dùng `model.sspanet_gate: centered_tanh_v2`: `y = x * (1 + 0.5 * tanh(g_channel(x) + g_spatial(x)))`. Hai nhánh cung cấp logits trước sigmoid và trước phép nhân với `x`; hệ số trong khoảng 0.5–1.5 cho phép giảm hoặc tăng đặc trưng, bằng 1 khi tổng logits bằng 0. Đây là biến thể SCAR của SSPANet; ảnh hưởng tới Dice cần được xác nhận bằng ablation.
+
+M2-Plus mặc định có khoảng 63.75M tham số. Bản Lightweight có khoảng 14.67M: shared trunk với FiLM, OptimizedSSPANet và skip gates. Chọn bằng `--config training/config/models/lightweight_m2_plus.yaml`; cấu hình này dùng chung pipeline train/resume/evaluate. Hai tên chỉ rõ biến thể; mức giảm tham số không tự chứng minh cải thiện độ chính xác.
 
 | ID | Nhãn canonical |
 |---:|---|
@@ -76,6 +80,8 @@ python run_all.py --dataset myopspp_roi160_80 --skip-cache --batch-size 2 --accu
 
 Loss mặc định: `0.5 CE + 0.5 Dice`. Hỗ trợ `--aar-weight`, `--scar-weight`, `--ce-class-weights`, `--dice-class-weights`; loss phụ mặc định bằng 0. AAR là edema-inclusive `{2,3}`. ROI dùng `pathology_reduction: sample`; MyoPS380/native MyoPS++ mặc định `positive`. Loss và reduction được khóa khi resume.
 
+Dice hỗ trợ `--no-include-background` và `--negative-slice-handling none|mask|batch` (YAML: `loss.include_background`, `loss.negative_slice_handling`). Mặc định vẫn là Dice per-image có background. Masked Dice tính trung bình các lớp hiện diện trong từng ảnh, sau đó trung bình các ảnh; ảnh rỗng đóng góp zero còn nối đồ thị, CE phạt false positive. Batch Dice yêu cầu `--accum-steps 1`. Khi loss phụ AAR/scar bật và accumulation >1, dùng `--pathology-reduction sample`; `positive` bị từ chối vì phụ thuộc cách chia microbatch. Loss protocol 3 khóa các tùy chọn Dice khi resume; checkpoint cũ dùng Dice mặc định vẫn resume được, còn mục tiêu Dice đã thay đổi cần run mới.
+
 `--config testing` dùng **M2-Plus thu nhỏ**, input 32×32, để kiểm thử phần mềm; không dùng cho bảng kết quả nghiên cứu.
 
 ## Checkpoint và resume
@@ -99,6 +105,10 @@ python train.py --data-root E:/STUDY/DATASET/MyoPS380/Processed_data --list-dir 
 Truyền lại cùng config, seed, batch size, accumulation, LR, tổng epoch, loss và nhãn của run gốc; `--resume` không tự nạp toàn bộ CLI. `--epochs-per-run` dừng sau một số epoch mà giữ lịch LR đã lên kế hoạch. `--init-weights` nạp chính xác trọng số M2-Plus cho run mới, không mang optimizer/split/score cũ. Ba nguồn `--resume`, `--init-weights`, `--pretrained` loại trừ nhau.
 
 Tên tensor M2-Plus được giữ để nạp checkpoint cũ. Metadata `architecture: cmspa_net` chỉ được chấp nhận khi `ablation` xác định M2-PLUS. Model khác bị từ chối. Checkpoint dùng protocol chọn best cũ vẫn có thể evaluate hoặc khởi tạo run mới nếu metadata hợp lệ; không resume trạng thái best/patience theo metric cũ. Các kiểm tra dữ liệu, loss và split vẫn áp dụng.
+
+Fusion được version hóa riêng: `legacy_v1` giữ attention full-width/BatchNorm và tensor cũ; `spatial_v2` dùng projection latent/GroupNorm/PE. Run mới lưu `fusion_version`, `latent_dim`, `use_pos_enc` và `sspanet_reduction`. Loader nhận diện fusion của checkpoint thiếu metadata từ các tensor đã lưu, không chuyển shape trọng số. Muốn resume fusion cũ, chọn `model.fusion_version: legacy_v1` cùng cấu hình run gốc. `--init-weights` vẫn yêu cầu toàn bộ trọng số tương thích; chuyển sang fusion khác cần run mới với khởi tạo encoder tương thích.
+
+Checkpoint M2-Plus thiếu `sspanet_gate` được evaluate/predict bằng công thức `legacy_v1` ban đầu. Run mới mặc định dùng `centered_tanh_v2`; `--resume` từ chối đổi gate giữa chừng. Để chuyển trọng số cũ sang gate mới, dùng `--init-weights` với run mới và huấn luyện lại trước khi đánh giá. Muốn tiếp tục run cũ với gate cũ, đặt `model.sspanet_gate: legacy_v1` trong YAML của run; các điều kiện resume khác vẫn phải khớp.
 
 ## Đánh giá và prediction
 

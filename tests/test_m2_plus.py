@@ -10,6 +10,7 @@ def test_m2_plus_config_selects_model():
     args, merged = parse_args(["--config", "training/config/models/m2_plus.yaml"])
     assert args.ablation.upper() == "M2-PLUS"
     assert merged["model"]["model_name"] == "M2-Plus"
+    assert merged["model"]["sspanet_gate"] == "centered_tanh_v2"
 
     config = get_testing()
     config.ablation = args.ablation
@@ -17,6 +18,8 @@ def test_m2_plus_config_selects_model():
     assert isinstance(model, M2PlusNet)
     assert model.ablation == "M2-PLUS"
     assert type(model.cross_fusion).__name__ == "M2Plus_Fusion"
+    for block in (model.sspanet_cine, model.sspanet_psir, model.sspanet_t2w):
+        assert block.gate_mode == "centered_tanh_v2"
 
 
 def test_m2_plus_separate_attention_streams_receive_gradients():

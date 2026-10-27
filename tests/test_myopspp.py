@@ -189,7 +189,8 @@ def test_training_profile_changes_dataset_but_retains_default_380():
     assert "myopspp_bc80" in args.run_root
 
 
-def test_real_training_resume_and_evaluation_use_separate_profile(packaged, tmp_path):
+@pytest.mark.parametrize("variant", ["m2_plus", "lightweight_m2_plus"])
+def test_real_training_resume_and_evaluation_use_separate_profile(packaged, tmp_path, variant):
     import torch
     from training.train import main as train
     from training.evaluate import main as evaluate
@@ -200,6 +201,18 @@ def test_real_training_resume_and_evaluation_use_separate_profile(packaged, tmp_
             "--list-dir", str(cache / "lists"), "--output-dir", str(run),
             "--epochs", "2", "--epochs-per-run", "1", "--batch-size", "64", "--accum-steps", "1",
             "--num-workers", "0", "--cpu-threads", "2", "--device", "cpu", "--amp", "none", "--no-tensorboard"]
+    if variant == "lightweight_m2_plus":
+        import yaml
+        config = tmp_path / "lightweight.yaml"
+        config.write_text(yaml.safe_dump({"model": {
+            "architecture": variant, "ablation": "LIGHTWEIGHT_M2_PLUS", "img_size": 32,
+            "sspanet_gate": "optimized", "latent_dim": 64,
+            "resnet": {"num_layers": [1, 1, 1], "width_factor": 0.5},
+            "skip_channels": [256, 128, 32, 0], "fused_channels": 64,
+            "decoder_channels": [32, 16, 16, 16],
+        }}), encoding="utf-8")
+        argv[argv.index("testing")] = str(config)
+        argv.extend(["--negative-slice-handling", "mask", "--no-include-background"])
     first = train(argv)
     last = run / "checkpoints/last.pt"
     checkpoint = load_checkpoint(last)
@@ -208,8 +221,9 @@ def test_real_training_resume_and_evaluation_use_separate_profile(packaged, tmp_
     assert checkpoint["benchmark_data"]["dataset_id"] == "myopspp_bc80"
     # An existing M2-Plus checkpoint can carry the previous factory identity and
     # disabled anatomy-loss fields without changing its architecture or objective.
-    checkpoint["model_config"]["architecture"] = "cmspa_net"
-    checkpoint["model_config"]["ablation"] = "M2-Plus"
+    if variant == "m2_plus":
+        checkpoint["model_config"]["architecture"] = "cmspa_net"
+        checkpoint["model_config"]["ablation"] = "M2-Plus"
     checkpoint["args"].update(wall_weight=0.0, inclusion_weight=0.0)
     torch.save(checkpoint, last)
     del checkpoint
@@ -248,7 +262,8 @@ def test_m2_plus_weighted_loss_train_resume_evaluate_myopspp(packaged, tmp_path)
     first = train(argv)
     last = run / "checkpoints/last.pt"
     checkpoint = load_checkpoint(last)
-    assert checkpoint["loss_protocol_version"] == 2
+    from training.loss.losses import LOSS_PROTOCOL_VERSION
+    assert checkpoint["loss_protocol_version"] == LOSS_PROTOCOL_VERSION
     assert checkpoint["benchmark_data"]["dataset_id"] == "myopspp_bc80"
     # A changed objective must fail before another optimizer update.
     with pytest.raises(ValueError, match="scar_weight"):

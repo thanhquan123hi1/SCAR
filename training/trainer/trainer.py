@@ -25,12 +25,14 @@ from training.dataset.myops_dataset import (
     RandomGenerator,
     ResizeGenerator,
 )
-from training.loss.losses import LOSS_PROTOCOL_VERSION, SegmentationLoss
+from training.loss.losses import LOSS_PROTOCOL_VERSION, SegmentationLoss, validate_microlesion_resolution
 from training.metrics.confusion_meter import ConfusionMeter
 from training.dataset.sampler import build_rare_class_sampler
 from training.predict import predict_volume
 from training.run_layout import RunLayout
-from training.models import validate_model_config
+from training.models import validate_model_config, model_architecture, checkpoint_model_config
+from training.models.modules.m2_plus import LEGACY_FUSION, SPATIAL_FUSION
+from training.models.modules.sspanet import LEGACY_SSPA_GATE
 from training.metrics.surface_distance import protocol_for_dataset, benchmark_protocol_matches, dataset_rows, summarize_dataset_rows
 
 
@@ -141,6 +143,7 @@ def load_checkpoint(path: Path | str) -> dict[str, Any]:
     if not isinstance(config, dict) or "ablation" not in config:
         raise ValueError("Checkpoint must contain model_config identifying M2-PLUS")
     validate_model_config(config)
+    checkpoint["model_config"] = checkpoint_model_config(config, checkpoint.get("model", {}))
     return checkpoint
 
 
@@ -217,23 +220,50 @@ def _validate_resume_loss_config(saved_args: dict, args, saved_version: int | No
         previous, current = saved_args.get(key, default), getattr(args, key, default)
         if previous != current:
             raise ValueError(f"Resume changes {key}: {previous} -> {current}. Use the original training settings.")
-    if saved_version is not None and saved_version != LOSS_PROTOCOL_VERSION:
-        if getattr(args, "ce_class_weights", None) is not None:
+    def dice_options(values):
+        mode = values.get("negative_slice_handling") or "none"
+        masked = bool(values.get("masked_negative_slices", False) or mode == "mask")
+        batch = bool(values.get("batch_dice", False) or mode == "batch")
+        background = values.get("include_background")
+        if background is None:
+            background = not (masked or batch)
+        return masked, batch, background
+
+    previous_dice, current_dice = dice_options(saved_args), dice_options(vars(args))
+    if previous_dice != current_dice:
+        raise ValueError("Resume changes Dice masking, batch reduction or include_background")
+    if saved_version is not None:
+        if saved_version > LOSS_PROTOCOL_VERSION:
+            raise ValueError("Checkpoint uses a newer loss protocol")
+        if saved_version < 2 and getattr(args, "ce_class_weights", None) is not None:
             raise ValueError("Resume loss protocol differs: weighted CE semantics were corrected. "
                              "Start a new run with --init-weights to use the updated objective.")
+        masked, batch, background = previous_dice
+        if saved_version < 3 and (masked or (not batch and not background)):
+            raise ValueError("Resume loss protocol differs: Dice reduction was corrected; start a new run")
 
 
 def _resume_model_config(config):
     """Canonicalize equivalent model identity metadata for resume."""
     validate_model_config(config)
     normalized = dict(config)
-    arch = str(normalized.get("architecture", "m2_plus")).lower().replace("-", "_")
-    if arch in {"nnunet", "nn_unet"}:
+    arch = model_architecture(normalized)
+    if arch == "nnunet":
         normalized["ablation"] = "NNUNET"
         normalized["architecture"] = "nnunet"
+        # Shared YAML defaults must not change resume semantics of this baseline.
+        for key in ("sspanet_gate", "sspanet_reduction", "fusion_version", "latent_dim", "use_pos_enc"):
+            normalized.pop(key, None)
     else:
-        normalized["ablation"] = "M2-PLUS"
-        normalized["architecture"] = "m2_plus"
+        lightweight = arch == "lightweight_m2_plus"
+        normalized["ablation"] = "LIGHTWEIGHT_M2_PLUS" if lightweight else "M2-PLUS"
+        normalized["architecture"] = arch
+        normalized.setdefault("sspanet_gate", LEGACY_SSPA_GATE)
+        normalized.setdefault("sspanet_reduction", 16)
+        fusion = normalized.setdefault("fusion_version", SPATIAL_FUSION if lightweight else LEGACY_FUSION)
+        channels = 16 * int(64 * normalized.get("resnet", {}).get("width_factor", 1.0))
+        normalized.setdefault("latent_dim", channels if fusion == LEGACY_FUSION else min(256, channels))
+        normalized.setdefault("use_pos_enc", fusion == SPATIAL_FUSION)
     return normalized
 
 
@@ -269,6 +299,8 @@ def run_epoch(
     training = optimizer is not None
     if accum_steps < 1 or log_every < 1:
         raise ValueError("accum_steps and log_every must be positive")
+    if training and hasattr(criterion, "validate_accumulation"):
+        criterion.validate_accumulation(accum_steps)
     if training and scaler is None:
         scaler = torch.amp.GradScaler("cuda", enabled=False)
     model.train(training)
@@ -410,6 +442,66 @@ class EarlyStopping:
         return improved
 
 
+def build_grouped_optimizer(
+    model: nn.Module,
+    base_lr: float = 1e-4,
+    weight_decay: float = 1e-4,
+) -> torch.optim.AdamW:
+    """AdamW parameter grouping separating GroupNorm / 1D parameters from weight decay (Finding F-01).
+
+    Parameters subject to weight decay (conv/linear kernels >= 2D):
+      - weight_decay = weight_decay (e.g. 1e-4)
+
+    Parameters excluded from weight decay (scale, bias, 1D vectors, normalization):
+      - weight_decay = 0.0 (GroupNorm gamma/beta, LayerNorm, BatchNorm, 1D parameters, biases)
+
+    Ensures zero overlap between parameter groups.
+    """
+    decay_params, no_decay_params = [], []
+    decay_ids, no_decay_ids = set(), set()
+
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        p_id = id(param)
+        if (
+            param.ndim <= 1
+            or name.endswith(".bias")
+            or "gn" in name.lower()
+            or "bn" in name.lower()
+            or "norm" in name.lower()
+            or "film" in name.lower()
+        ):
+            no_decay_params.append(param)
+            no_decay_ids.add(p_id)
+        else:
+            decay_params.append(param)
+            decay_ids.add(p_id)
+
+    # Re-verify all normalization modules directly
+    for m_name, module in model.named_modules():
+        if isinstance(module, (nn.GroupNorm, nn.BatchNorm2d, nn.BatchNorm1d, nn.LayerNorm, nn.InstanceNorm2d)):
+            for p_name, param in module.named_parameters(recurse=False):
+                p_id = id(param)
+                if p_id in decay_ids:
+                    decay_params.remove(param)
+                    decay_ids.remove(p_id)
+                    if p_id not in no_decay_ids:
+                        no_decay_params.append(param)
+                        no_decay_ids.add(p_id)
+
+    # Invariant assertion: zero overlap
+    overlap = decay_ids.intersection(no_decay_ids)
+    if overlap:
+        raise ValueError(f"Integrity violation: {len(overlap)} parameters appear in both decay and no_decay groups")
+
+    param_groups = [
+        {"params": decay_params, "weight_decay": weight_decay},
+        {"params": no_decay_params, "weight_decay": 0.0},
+    ]
+    return torch.optim.AdamW(param_groups, lr=base_lr, foreach=False)
+
+
 class Trainer:
     """Run the configured dataset, optimizer, validation, and checkpoint pipeline.
 
@@ -434,6 +526,8 @@ def trainer_Myops(args, model, snapshot_path):
             resume_checkpoint.get("benchmark_protocol"), dataset_id, allow_legacy_selection=False):
         raise ValueError("Cannot resume a different dataset/selection protocol. Legacy exclusive-edema "
                          "runs remain evaluable; use --init-weights in a new run for inclusive selection.")
+    if getattr(args, "enforce_microlesion_resolution", False) and hasattr(args, "img_size"):
+        validate_microlesion_resolution(args.img_size, min_resolution=getattr(args, "min_resolution", 192), strict=True)
     directory = Path(snapshot_path)
     directory.mkdir(parents=True, exist_ok=True)
     layout = (RunLayout.from_checkpoint(args.resume) if args.resume else
@@ -494,8 +588,13 @@ def trainer_Myops(args, model, snapshot_path):
         dice_class_weights=getattr(args, "dice_class_weights", None),
         ce_class_weights=getattr(args, "ce_class_weights", None),
         pathology_reduction=getattr(args, "pathology_reduction", "positive"),
+        masked_negative_slices=getattr(args, "masked_negative_slices", False),
+        negative_slice_handling=getattr(args, "negative_slice_handling", None),
+        batch_dice=getattr(args, "batch_dice", False),
+        include_background=getattr(args, "include_background", None),
     )
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.base_lr, weight_decay=args.weight_decay, foreach=False)
+    criterion.validate_accumulation(args.accum_steps)
+    optimizer = build_grouped_optimizer(model, base_lr=args.base_lr, weight_decay=args.weight_decay)
     total_updates = args.max_epochs * math.ceil(len(trainloader) / args.accum_steps)
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda step: max(0.0, 1.0 - step / total_updates) ** 0.9)
     scaler = torch.amp.GradScaler("cuda", enabled=amp_dtype == torch.float16)
@@ -539,13 +638,23 @@ def trainer_Myops(args, model, snapshot_path):
                 )
         _validate_resume_loss_config(checkpoint["args"], args, checkpoint.get("loss_protocol_version", 1))
         if not _configs_equal(_resume_model_config(checkpoint["model_config"]), _resume_model_config(model_config)) or checkpoint["split_hashes"] != split_hashes:
-            raise ValueError("Resume architecture or train/val/test manifests differ from checkpoint.")
+            raise ValueError("Resume architecture (including SSPANet gate) or train/val/test manifests differ "
+                             "from checkpoint. Use --init-weights in a new run to change the gate.")
         if checkpoint["total_updates"] != total_updates:
             raise ValueError("Resume data length changes the learning-rate schedule.")
         if checkpoint.get("data_provenance", {}) != data_provenance:
             raise ValueError("Dataset preprocessing metadata changed since the checkpoint")
         model.load_state_dict(checkpoint["model"], strict=True)
-        optimizer.load_state_dict(checkpoint["optimizer"])
+        try:
+            optimizer.load_state_dict(checkpoint["optimizer"])
+        except ValueError:
+            if len(checkpoint["optimizer"].get("param_groups", [])) == 1:
+                optimizer.load_state_dict({
+                    "state": checkpoint["optimizer"]["state"],
+                    "param_groups": optimizer.state_dict()["param_groups"],
+                })
+            else:
+                raise
         scheduler.load_state_dict(checkpoint["scheduler"])
         scaler.load_state_dict(checkpoint["scaler"])
         start_epoch, global_step = checkpoint["epoch"] + 1, checkpoint["global_step"]

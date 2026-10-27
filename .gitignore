@@ -51,8 +51,13 @@ docs/*
 reports/
 
 # ==============================================================================
-# Operating System Files
+# Operating System Files & Local Artifacts
 # ==============================================================================
 .DS_Store
 Thumbs.db
+output/
+.playwright-mcp/
+/*.png
+/*.jpg
+
 

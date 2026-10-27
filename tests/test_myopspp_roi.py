@@ -214,7 +214,7 @@ def test_warm_start_preserves_m2_plus_classifier(tmp_path):
     torch.testing.assert_close(destination.segmentation_head[0].bias, source.segmentation_head[0].bias)
 
 
-def test_roi_train_resume_evaluate_and_objective_guard(roi_export, tmp_path):
+def test_roi_train_resume_evaluate_and_objective_guard(roi_export, tmp_path, capsys):
     from preprocessing.myopspp_roi import preprocess_myopspp_roi
     from training.train import main as train
     from training.evaluate import main as evaluate
@@ -229,8 +229,13 @@ def test_roi_train_resume_evaluate_and_objective_guard(roi_export, tmp_path):
             "--num-workers", "0", "--cpu-threads", "2", "--device", "cpu", "--amp", "none", "--no-tensorboard"]
     first = train(argv)
     last = run / "checkpoints/last.pt"
-    with pytest.raises(ValueError, match="pathology_reduction"):
+    # The incompatible objective is now rejected by CLI preflight, before loading
+    # the checkpoint or allocating another training run.
+    with pytest.raises(SystemExit) as rejected:
         train(argv + ["--resume", str(last), "--pathology-reduction", "positive"])
+    assert rejected.value.code == 2
+    assert "pathology_reduction='sample'" in capsys.readouterr().err
+    assert load_checkpoint(last)["global_step"] == first["global_step"]
     second = train(argv + ["--resume", str(last)])
     assert second["global_step"] > first["global_step"]
     assert load_checkpoint(last)["epoch"] == 1
