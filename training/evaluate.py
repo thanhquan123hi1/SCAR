@@ -94,7 +94,7 @@ def main(argv=None):
             raise ValueError(f"Saved {split_name} manifest was modified after training.")
 
     training_ids = {patient_id(name) for name in read_split_names(saved_splits, "train")}
-    validation_ids = {patient_id(name) for name in read_split_names(saved_splits, "val")}
+    validation_ids = {patient_id(name) for name in read_split_names(saved_splits, "val")} if (saved_splits / "val.txt").is_file() else set()
     evaluation_ids = {patient_id(name) for name in read_split_names(list_dir, args.split)}
     forbidden_ids = training_ids | validation_ids if args.split == "test_vol" else training_ids
     overlap = forbidden_ids & evaluation_ids
@@ -106,7 +106,8 @@ def main(argv=None):
     saved_ids = set(read_split_names(saved_splits, args.split))
     if set(read_split_names(list_dir, args.split)) != saved_ids:
         raise ValueError("Evaluation patients must exactly match the saved split; subsets are not a locked benchmark")
-    data_lock = lock_benchmark_data(args.data_root, saved_splits, label_order, dataset_id=dataset_id)
+    no_val = checkpoint["args"].get("no_val", False)
+    data_lock = lock_benchmark_data(args.data_root, saved_splits, label_order, dataset_id=dataset_id, no_val=no_val)
     if data_lock != checkpoint["benchmark_data"]:
         raise ValueError("Cache bytes or label convention changed since training")
     if output.exists() and any(output.iterdir()):
@@ -184,7 +185,7 @@ def main(argv=None):
             checkpoint=str(checkpoint_path),
             checkpoint_epoch=checkpoint["epoch"] + 1,
             checkpoint_metric_protocol_id=checkpoint["benchmark_protocol"]["id"],
-            checkpoint_selection_metric=checkpoint["benchmark_protocol"]["selection_metric"],
+            checkpoint_selection_metric=checkpoint["benchmark_protocol"]["selection_metric"] if not no_val else "last_completed_epoch",
             ablation=config.ablation,
             architecture=str(getattr(config, "architecture", "m2_plus")),
             split=args.split,

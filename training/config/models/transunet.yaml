@@ -1,0 +1,29 @@
+model:
+  architecture: transunet
+  model_name: TransUNet
+  ablation: TRANSUNET
+  num_classes: 4
+  in_channels: 3
+  img_size: 128
+  vit_name: R50-ViT-B_16
+  vit_patches_size: 16
+  hidden_size: 768
+  transformer:
+    num_layers: 12
+    num_heads: 12
+    mlp_dim: 3072
+    dropout_rate: 0.1
+    attention_dropout_rate: 0.0
+  resnet:
+    num_layers: [3, 4, 9]
+    width_factor: 1.0
+  decoder_channels: [256, 128, 64, 16]
+  skip_channels: [512, 256, 64, 16]
+  n_skip: 3
+  classifier: seg
+  activation: softmax
+  pretrained_path: null
+
+loss:
+  ce_weight: 0.5
+  dice_weight: 0.5

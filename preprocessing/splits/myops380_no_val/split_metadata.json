@@ -1,0 +1,11 @@
+{
+  "protocol_id": "myops380_train304_test76_last_v1",
+  "split_method": "304 non-test patients; original official 76 test patients; no validation",
+  "seed_dependent": false,
+  "patient_counts": {"train": 304, "test_vol": 76},
+  "sample_counts": {"train": 1972, "test_vol": 76},
+  "train_ids_sha256": "16248ec3630bb0493fb421aab5ffb4dc9b1d0fd49c8614d69d3098a92305f919",
+  "test_ids_sha256": "3237b31411833cedcb3ecd86d36edae356bd3f880d3fcfd915066f1c850d9cbc",
+  "provenance": "Union of SCAR myops380_official train and val manifests; verified equal to I_MMSeg/list/train.txt. Test IDs verified equal to I_MMSeg/list/test_vol.txt.",
+  "hash_rule": "SHA256 of lexically sorted IDs, UTF-8, LF after every ID"
+}

@@ -22,7 +22,7 @@ LABEL_ORDERS = {
 OFFICIAL_TEST_IDS_SHA256 = "3237b31411833cedcb3ecd86d36edae356bd3f880d3fcfd915066f1c850d9cbc"
 
 
-def lock_benchmark_data(data_root, list_dir, label_order, dataset_id="myops380"):
+def lock_benchmark_data(data_root, list_dir, label_order, dataset_id="myops380", no_val=False):
     """Validate MyoPS380 cohort and fingerprint cache bytes without changing data.
 
     Persist the returned record in the run/checkpoint. Resume/evaluation compare
@@ -36,32 +36,41 @@ def lock_benchmark_data(data_root, list_dir, label_order, dataset_id="myops380")
     if label_order == "auto":
         raise ValueError("Locked benchmark requires explicit legacy or canonical label order")
     order = resolve_label_order(label_order)
-    splits = {s: read_split_names(list_dir, s) for s in ("train", "val", "test_vol")}
+    if not (Path(list_dir) / "val.txt").is_file():
+        no_val = True
+    split_names = ("train", "test_vol") if no_val else ("train", "val", "test_vol")
+    splits = {s: read_split_names(list_dir, s) for s in split_names}
     patients = validate_patient_splits(splits)
     fixed_hash = hashlib.sha256(("\n".join(sorted(splits["test_vol"])) + "\n").encode()).hexdigest()
     if fixed_hash != OFFICIAL_TEST_IDS_SHA256:
         raise ValueError("Test patients differ from the official MyoPS380 76-case cohort")
-    if not patients["train"] or not patients["val"] or len(patients["train"] | patients["val"]) != 304:
-        raise ValueError("MyoPS380 requires 304 non-test patients split into nonempty train/val sets")
+    if no_val:
+        if len(patients["train"]) != 304:
+            raise ValueError("MyoPS380 requires 304 non-test patients in train set for no-val protocol")
+    else:
+        if not patients["train"] or not patients["val"] or len(patients["train"] | patients["val"]) != 304:
+            raise ValueError("MyoPS380 requires 304 non-test patients split into nonempty train/val sets")
     if set().union(*patients.values()) != {f"case{i:04d}" for i in range(1, 381)}:
         raise ValueError("MyoPS380 cohort must contain exactly case0001 through case0380")
-    if _validate_volume_validation(list_dir, splits["val"]) is None:
+    if not no_val and _validate_volume_validation(list_dir, splits["val"]) is None:
         raise ValueError("Locked patient-level selection requires val_vol.txt")
     root = Path(data_root)
     files = []
+    train_expected = set(splits["train"]) if no_val else set(splits["train"] + splits["val"])
     for modality in ("bSSFP", "LGE", "T2w"):
         for folder, suffix, expected in (
-            ("train_npz", ".npz", set(splits["train"] + splits["val"])),
+            ("train_npz", ".npz", train_expected),
             ("test_vol_h5", ".npy.h5", set(splits["test_vol"])),
         ):
             paths = list((root / modality / folder).glob("*" + suffix))
             if {p.name[:-len(suffix)] for p in paths} != expected:
                 raise ValueError(f"Cache inventory differs from locked manifests: {modality}/{folder}")
             files.extend(paths)
-        volumes = list((root / modality / "val_vol_h5").glob("*.npy.h5"))
-        if volumes and {p.name[:-7] for p in volumes} != patients["val"]:
-            raise ValueError(f"Incomplete validation volume inventory: {modality}")
-        files.extend(volumes)
+        if not no_val:
+            volumes = list((root / modality / "val_vol_h5").glob("*.npy.h5"))
+            if volumes and {p.name[:-7] for p in volumes} != patients["val"]:
+                raise ValueError(f"Incomplete validation volume inventory: {modality}")
+            files.extend(volumes)
     metadata = root / "dataset_metadata.json"
     if metadata.is_file():
         files.append(metadata)
@@ -220,7 +229,7 @@ def _validate_volume_validation(list_dir, validation_names):
     return volumes
 
 
-def ensure_patient_splits(list_dir, val_fraction=0.2, seed=42, output_dir=None):
+def ensure_patient_splits(list_dir, val_fraction=0.2, seed=42, output_dir=None, no_val=False):
     """Return manifests with train/val NPZ IDs and unchanged test IDs.
 
     Hold out whole training patients only when val.txt does not already exist.
@@ -229,6 +238,43 @@ def ensure_patient_splits(list_dir, val_fraction=0.2, seed=42, output_dir=None):
     """
     source = Path(list_dir)
     destination = Path(output_dir) if output_dir is not None else source
+    if not no_val and not (source / "val.txt").is_file():
+        meta_file = source / "split_metadata.json"
+        if meta_file.is_file():
+            try:
+                meta = json.loads(meta_file.read_text(encoding="utf-8"))
+                if meta.get("no_val") or meta.get("protocol") == "myops380_train304_test76_last_v1":
+                    no_val = True
+            except Exception:
+                pass
+    if no_val or not (source / "val.txt").is_file():
+        if (destination / "train.txt").is_file() and (destination / "test_vol.txt").is_file():
+            splits = {s: read_split_names(destination, s) for s in ("train", "test_vol")}
+            validate_patient_splits(splits)
+            if not splits["train"]:
+                raise ValueError("Training split must be nonempty.")
+            return destination
+        train = read_split_names(source, "train")
+        test = read_split_names(source, "test_vol") if (source / "test_vol.txt").exists() else []
+        splits = {"train": train, "test_vol": test}
+        patients = validate_patient_splits(splits)
+        for split, names in splits.items():
+            _write_manifest(destination / f"{split}.txt", names)
+        for stale in ("val.txt", "val_vol.txt"):
+            p = destination / stale
+            if p.is_file():
+                p.unlink()
+        metadata = {
+            "protocol": "myops380_train304_test76_last_v1",
+            "no_val": True,
+            "seed": seed,
+            "source_list_dir": str(source.resolve()),
+            "patient_ids": {split: sorted(ids) for split, ids in patients.items()},
+            "sample_counts": {split: len(names) for split, names in splits.items()},
+        }
+        (destination / "split_metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+        return destination
+
     if all((destination / f"{s}.txt").is_file() for s in ("train", "val", "test_vol")):
         splits = {s: read_split_names(destination, s) for s in ("train", "val", "test_vol")}
         validate_patient_splits(splits)

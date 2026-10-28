@@ -18,7 +18,7 @@ from training.config.config_utils import (
     generate_run_dir,
     load_merged_config,
 )
-from training.models import get_config, get_lightweight_config, model_architecture, model_from_config, validate_model_config
+from training.models import get_config, get_lightweight_config, get_transunet_config, model_architecture, model_from_config, validate_model_config
 from training.loss.losses import SegmentationLoss
 from training.dataset.benchmark_profiles import DATASET_IDS
 from training.run_layout import RunLayout
@@ -99,7 +99,9 @@ def build_parser():
     parser.add_argument("--sampler", choices=("none", "rare"), default="none")
     parser.add_argument("--rare-boost", type=float, default=2.0)
     parser.add_argument("--foreground-boost", type=float, default=1.3)
-    parser.add_argument("--ablation", type=str.upper, choices=["M2-PLUS", "LIGHTWEIGHT_M2_PLUS", "NNUNET"], default="M2-PLUS")
+    parser.add_argument("--ablation", type=str.upper, choices=["M2-PLUS", "LIGHTWEIGHT_M2_PLUS", "NNUNET", "TRANSUNET"], default="M2-PLUS")
+    parser.add_argument("--no-val", "--no_val", dest="no_val", action="store_true", default=False,
+                        help="Disable validation split and per-epoch evaluation (train on all non-test cases)")
     parser.add_argument("--epochs", "--max_epochs", dest="max_epochs", type=int, default=300)
     parser.add_argument(
         "--batch-size",
@@ -275,7 +277,16 @@ def main(argv=None):
     args.model_name = merged["model"].get("model_name", "M2-Plus")
     section = merged["model"]
     selected = dict(section) | {"ablation": args.ablation}
-    config = get_lightweight_config() if model_architecture(selected) == "lightweight_m2_plus" else get_config()
+    arch = model_architecture(selected)
+    if arch == "transunet":
+        config = get_transunet_config()
+        config.update(section)
+    elif arch == "lightweight_m2_plus":
+        config = get_lightweight_config()
+    else:
+        config = get_config()
+    if not (Path(args.list_dir) / "val.txt").is_file():
+        args.no_val = True
     if "resnet" in section:
         config.resnet.num_layers = tuple(section["resnet"]["num_layers"])
         config.resnet.width_factor = float(section["resnet"]["width_factor"])

@@ -540,26 +540,38 @@ def trainer_Myops(args, model, snapshot_path):
         val_fraction=args.val_fraction,
         seed=args.seed,
         output_dir=layout.logs / "splits",
+        no_val=getattr(args, "no_val", False),
     )
     split_hashes = {
         name: hashlib.sha256((split_dir / f"{name}.txt").read_bytes()).hexdigest()
         for name in ("train", "val", "val_vol", "test_vol")
         if (split_dir / f"{name}.txt").is_file()
     }
-    benchmark_data = lock_benchmark_data(args.data_root, split_dir, args.label_order, dataset_id=dataset_id)
+    benchmark_data = lock_benchmark_data(args.data_root, split_dir, args.label_order, dataset_id=dataset_id, no_val=getattr(args, "no_val", False))
     roots = [str(Path(args.data_root) / modality / "train_npz") for modality in ("bSSFP", "LGE", "T2w")]
-    datasets = [
-        MyopsDataset(
-            *roots,
-            str(split_dir),
-            split,
-            transform=(RandomGenerator if split == "train" else ResizeGenerator)([args.img_size, args.img_size]),
-            label_order=args.label_order,
-        )
-        for split in ("train", "val")
-    ]
+    if getattr(args, "no_val", False):
+        datasets = [
+            MyopsDataset(
+                *roots,
+                str(split_dir),
+                "train",
+                transform=RandomGenerator([args.img_size, args.img_size]),
+                label_order=args.label_order,
+            )
+        ]
+    else:
+        datasets = [
+            MyopsDataset(
+                *roots,
+                str(split_dir),
+                split,
+                transform=(RandomGenerator if split == "train" else ResizeGenerator)([args.img_size, args.img_size]),
+                label_order=args.label_order,
+            )
+            for split in ("train", "val")
+        ]
     if any(len(dataset) == 0 for dataset in datasets):
-        raise ValueError("Training and validation must both be nonempty.")
+        raise ValueError("Training dataset must be nonempty.")
     pin = args.pin_memory if args.pin_memory is not None else device.type == "cuda"
     generator = torch.Generator().manual_seed(args.seed)
     common = dict(
@@ -574,11 +586,15 @@ def trainer_Myops(args, model, snapshot_path):
                if args.sampler == "rare" else None)
     trainloader = DataLoader(datasets[0], shuffle=sampler is None, sampler=sampler,
                              generator=generator, **common)
-    valloader = DataLoader(datasets[1], shuffle=False, generator=torch.Generator().manual_seed(args.seed + 1), **common)
-    validation_volumes = MyopsDataset(
-        *[Path(args.data_root) / modality / "val_vol_h5" for modality in ("bSSFP", "LGE", "T2w")],
-        split_dir, "val_vol", label_order=args.label_order,
-    )
+    if not getattr(args, "no_val", False):
+        valloader = DataLoader(datasets[1], shuffle=False, generator=torch.Generator().manual_seed(args.seed + 1), **common)
+        validation_volumes = MyopsDataset(
+            *[Path(args.data_root) / modality / "val_vol_h5" for modality in ("bSSFP", "LGE", "T2w")],
+            split_dir, "val_vol", label_order=args.label_order,
+        )
+    else:
+        valloader = None
+        validation_volumes = None
     model.to(device)
     criterion = SegmentationLoss(
         ce_weight=args.ce_weight,
@@ -658,14 +674,18 @@ def trainer_Myops(args, model, snapshot_path):
         scheduler.load_state_dict(checkpoint["scheduler"])
         scaler.load_state_dict(checkpoint["scaler"])
         start_epoch, global_step = checkpoint["epoch"] + 1, checkpoint["global_step"]
-        best_score, best_epoch, bad_epochs = (
-            checkpoint["best_score"],
-            checkpoint["best_epoch"],
-            checkpoint["bad_epochs"],
-        )
-        if args.patience == 0:
-            bad_epochs = 0
-        patience_score = checkpoint["patience_score"]
+        if not getattr(args, "no_val", False):
+            best_score, best_epoch, bad_epochs = (
+                checkpoint.get("best_score", -float("inf")),
+                checkpoint.get("best_epoch", -1),
+                checkpoint.get("bad_epochs", 0),
+            )
+            if args.patience == 0:
+                bad_epochs = 0
+            patience_score = checkpoint.get("patience_score", -float("inf"))
+        else:
+            best_score, best_epoch, bad_epochs = 0.0, -1, 0
+            patience_score = 0.0
         generator.set_state(checkpoint["loader_rng"])
         restore_rng(checkpoint["rng"])
         logger.info("Resumed complete state at epoch %d, optimizer update %d", start_epoch + 1, global_step)
@@ -695,19 +715,30 @@ def trainer_Myops(args, model, snapshot_path):
         total_optimizer_updates=total_updates,
     )
     write_json(layout.logs / "config.json", config_record)
-    logger.info(
-        "Device %s | AMP %s | parameters %s | train/val slices %d/%d | effective batch <= %d",
-        device,
-        amp_dtype,
-        f"{config_record['parameters']:,}",
-        len(datasets[0]),
-        len(datasets[1]),
-        args.batch_size * args.accum_steps,
-    )
-    logger.info(
-        "Selection: validation patient-mean scar/inclusive-edema Dice (avg_pathology_inclusive_dice); early stopping %s",
-        f"patience={args.patience}" if args.patience else "disabled (fixed training budget)",
-    )
+    if getattr(args, "no_val", False):
+        logger.info(
+            "Device %s | AMP %s | parameters %s | train slices %d (no-val protocol) | effective batch <= %d",
+            device,
+            amp_dtype,
+            f"{config_record['parameters']:,}",
+            len(datasets[0]),
+            args.batch_size * args.accum_steps,
+        )
+        logger.info("Selection: no-val protocol (myops380_train304_test76_last_v1); saving last.pt; evaluating at epoch %d", args.max_epochs)
+    else:
+        logger.info(
+            "Device %s | AMP %s | parameters %s | train/val slices %d/%d | effective batch <= %d",
+            device,
+            amp_dtype,
+            f"{config_record['parameters']:,}",
+            len(datasets[0]),
+            len(datasets[1]),
+            args.batch_size * args.accum_steps,
+        )
+        logger.info(
+            "Selection: validation patient-mean scar/inclusive-edema Dice (avg_pathology_inclusive_dice); early stopping %s",
+            f"patience={args.patience}" if args.patience else "disabled (fixed training budget)",
+        )
     writer = step_writer = None
     if args.tensorboard:
         try:
@@ -750,123 +781,183 @@ def trainer_Myops(args, model, snapshot_path):
                 step_writer,
                 global_step,
             )
-            val_metrics, _ = run_epoch(
-                model,
-                valloader,
-                criterion,
-                device,
-                amp_dtype,
-                log_every=args.log_every,
-                logger=logger,
-            )
-            volume_started = time.perf_counter()
-            volume_metrics = validate_volumes(model, validation_volumes, args.img_size,
-                                               args.batch_size, device, amp_dtype, dataset_id=dataset_id)
-            volume_seconds = time.perf_counter() - volume_started
-            score = inclusive_validation_score(volume_metrics)
-            if score is None:
-                raise ValueError("Pathology selection requires defined validation Dice for both scar and edema-inclusive")
-            if not math.isfinite(score):
-                raise ValueError("Validation foreground Dice undefined: check labels and held-out patients.")
-            meaningful = score > patience_score + args.min_delta
-            improved = score > best_score
-            bad_epochs = 0 if meaningful else bad_epochs + 1
-            if meaningful:
-                patience_score = score
-            if improved:
-                best_score, best_epoch = score, epoch
-            early_stop = bool(args.patience and bad_epochs >= args.patience)
-            record = {
-                "epoch": epoch + 1,
-                "global_step": global_step,
-                "lr_start": lr_start,
-                "lr_next": optimizer.param_groups[0]["lr"],
-                "best_val_dice": best_score,
-                "best_epoch": best_epoch + 1,
-                "bad_epochs": bad_epochs,
-                "early_stop": early_stop,
-                "epoch_compute_seconds": time.perf_counter() - epoch_started,
-                "val/volume_seconds": volume_seconds,
-                "val/avg_pathology_inclusive_dice": score,
-            }
-            record.update({f"train/{key}": value for key, value in train_metrics.items()})
-            record.update({f"val/{key}": value for key, value in val_metrics.items()})
-            record["val/avg_pathology_dice"] = volume_metrics["avg_pathology_dice"]
-            for region in ("scar", "edema", "edema_inclusive"):
-                for metric in ("precision", "recall"):
-                    record[f"val/patient_{metric}/{region}"] = volume_metrics[region][f"mean_{metric}"]
-                    for status in ("defined", "undefined"):
-                        record[f"val/{metric}_{status}_cases/{region}"] = volume_metrics[region][f"{metric}_{status}_cases"]
-                record[f"val/patient_dice/{region}"] = volume_metrics[region]["mean_dice"]
-                record[f"val/defined_cases/{region}"] = volume_metrics[region]["dice_defined_cases"]
-                record[f"val/undefined_cases/{region}"] = volume_metrics[region]["dice_undefined_cases"]
-            payload = dict(
-                loss_protocol_version=LOSS_PROTOCOL_VERSION,
-                benchmark_protocol=benchmark_protocol,
-                benchmark_data=benchmark_data,
-                validation_volume_metrics=volume_metrics,
-                format_version=1,
-                class_names=CLASS_NAMES,
-                model_config=model_config,
-                model=model.state_dict(),
-                optimizer=optimizer.state_dict(),
-                scheduler=scheduler.state_dict(),
-                scaler=scaler.state_dict(),
-                epoch=epoch,
-                global_step=global_step,
-                total_updates=total_updates,
-                best_score=best_score,
-                best_epoch=best_epoch,
-                bad_epochs=bad_epochs,
-                patience_score=patience_score,
-                args=vars(args),
-                data_provenance=data_provenance,
-                split_hashes=split_hashes,
-                rng=rng_state(),
-                loader_rng=generator.get_state(),
-            )
-            checkpoint_started = time.perf_counter()
-            if improved:
-                atomic_checkpoint(layout.checkpoints / "best.pt", payload)
-                logger.info(
-                    "New best checkpoint: epoch %d, validation Dice %.5f -> %s",
-                    epoch + 1,
-                    score,
-                    layout.checkpoints / "best.pt",
+            if not getattr(args, "no_val", False):
+                val_metrics, _ = run_epoch(
+                    model,
+                    valloader,
+                    criterion,
+                    device,
+                    amp_dtype,
+                    log_every=args.log_every,
+                    logger=logger,
                 )
-            # Publish the recovery point after best, so a crash cannot advance
-            # the saved best_score while leaving best.pt missing or stale.
-            atomic_checkpoint(layout.checkpoints / "last.pt", payload)
-            record["checkpoint_seconds"] = time.perf_counter() - checkpoint_started
-            record["epoch_seconds"] = time.perf_counter() - epoch_started
-            with (layout.logs / "metrics.jsonl").open("a", encoding="utf-8") as stream:
-                stream.write(json.dumps(json_safe(record), allow_nan=False) + "\n")
-            csv_path = layout.logs / "metrics.csv"
-            append_metrics_csv(csv_path, json_safe(record))
-            if writer:
-                for key, value in record.items():
-                    if isinstance(value, (float, int)) and math.isfinite(value):
-                        writer.add_scalar(key, value, epoch + 1)
-                writer.flush()
-            logger.info(
-                "Epoch %d/%d | train %.5f val %.5f | val Dice %.5f IoU %.5f | lr %.3g | %.1fs | peak GPU %.0f MiB",
-                epoch + 1,
-                args.max_epochs,
-                train_metrics["loss"],
-                val_metrics["loss"],
-                score,
-                val_metrics["mean_iou"],
-                lr_start,
-                record["epoch_seconds"],
-                train_metrics["gpu_peak_allocated_mb"],
-            )
-            write_json(layout.logs / "summary.json", record)
-            logger.info("Validation scar P/R %.4f/%.4f | edema P/R %.4f/%.4f (pixel-pooled)",
-                        val_metrics["precision/scar"], val_metrics["recall/scar"],
-                        val_metrics["precision/edema"], val_metrics["recall/edema"])
-            if early_stop:
-                logger.info("Early stopping after %d validation epochs without sufficient improvement.", bad_epochs)
-                break
+                volume_started = time.perf_counter()
+                volume_metrics = validate_volumes(model, validation_volumes, args.img_size,
+                                                   args.batch_size, device, amp_dtype, dataset_id=dataset_id)
+                volume_seconds = time.perf_counter() - volume_started
+                score = inclusive_validation_score(volume_metrics)
+                if score is None:
+                    raise ValueError("Pathology selection requires defined validation Dice for both scar and edema-inclusive")
+                if not math.isfinite(score):
+                    raise ValueError("Validation foreground Dice undefined: check labels and held-out patients.")
+                meaningful = score > patience_score + args.min_delta
+                improved = score > best_score
+                bad_epochs = 0 if meaningful else bad_epochs + 1
+                if meaningful:
+                    patience_score = score
+                if improved:
+                    best_score, best_epoch = score, epoch
+                early_stop = bool(args.patience and bad_epochs >= args.patience)
+                record = {
+                    "epoch": epoch + 1,
+                    "global_step": global_step,
+                    "lr_start": lr_start,
+                    "lr_next": optimizer.param_groups[0]["lr"],
+                    "best_val_dice": best_score,
+                    "best_epoch": best_epoch + 1,
+                    "bad_epochs": bad_epochs,
+                    "early_stop": early_stop,
+                    "epoch_compute_seconds": time.perf_counter() - epoch_started,
+                    "val/volume_seconds": volume_seconds,
+                    "val/avg_pathology_inclusive_dice": score,
+                }
+                record.update({f"train/{key}": value for key, value in train_metrics.items()})
+                record.update({f"val/{key}": value for key, value in val_metrics.items()})
+                record["val/avg_pathology_dice"] = volume_metrics["avg_pathology_dice"]
+                for region in ("scar", "edema", "edema_inclusive"):
+                    for metric in ("precision", "recall"):
+                        record[f"val/patient_{metric}/{region}"] = volume_metrics[region][f"mean_{metric}"]
+                        for status in ("defined", "undefined"):
+                            record[f"val/{metric}_{status}_cases/{region}"] = volume_metrics[region][f"{metric}_{status}_cases"]
+                    record[f"val/patient_dice/{region}"] = volume_metrics[region]["mean_dice"]
+                    record[f"val/defined_cases/{region}"] = volume_metrics[region]["dice_defined_cases"]
+                    record[f"val/undefined_cases/{region}"] = volume_metrics[region]["dice_undefined_cases"]
+                payload = dict(
+                    loss_protocol_version=LOSS_PROTOCOL_VERSION,
+                    benchmark_protocol=benchmark_protocol,
+                    benchmark_data=benchmark_data,
+                    validation_volume_metrics=volume_metrics,
+                    format_version=1,
+                    class_names=CLASS_NAMES,
+                    model_config=model_config,
+                    model=model.state_dict(),
+                    optimizer=optimizer.state_dict(),
+                    scheduler=scheduler.state_dict(),
+                    scaler=scaler.state_dict(),
+                    epoch=epoch,
+                    global_step=global_step,
+                    total_updates=total_updates,
+                    best_score=best_score,
+                    best_epoch=best_epoch,
+                    bad_epochs=bad_epochs,
+                    patience_score=patience_score,
+                    args=vars(args),
+                    data_provenance=data_provenance,
+                    split_hashes=split_hashes,
+                    rng=rng_state(),
+                    loader_rng=generator.get_state(),
+                )
+                checkpoint_started = time.perf_counter()
+                if improved:
+                    atomic_checkpoint(layout.checkpoints / "best.pt", payload)
+                    logger.info(
+                        "New best checkpoint: epoch %d, validation Dice %.5f -> %s",
+                        epoch + 1,
+                        score,
+                        layout.checkpoints / "best.pt",
+                    )
+                # Publish the recovery point after best, so a crash cannot advance
+                # the saved best_score while leaving best.pt missing or stale.
+                atomic_checkpoint(layout.checkpoints / "last.pt", payload)
+                record["checkpoint_seconds"] = time.perf_counter() - checkpoint_started
+                record["epoch_seconds"] = time.perf_counter() - epoch_started
+                with (layout.logs / "metrics.jsonl").open("a", encoding="utf-8") as stream:
+                    stream.write(json.dumps(json_safe(record), allow_nan=False) + "\n")
+                csv_path = layout.logs / "metrics.csv"
+                append_metrics_csv(csv_path, json_safe(record))
+                if writer:
+                    for key, value in record.items():
+                        if isinstance(value, (float, int)) and math.isfinite(value):
+                            writer.add_scalar(key, value, epoch + 1)
+                    writer.flush()
+                logger.info(
+                    "Epoch %d/%d | train %.5f val %.5f | val Dice %.5f IoU %.5f | lr %.3g | %.1fs | peak GPU %.0f MiB",
+                    epoch + 1,
+                    args.max_epochs,
+                    train_metrics["loss"],
+                    val_metrics["loss"],
+                    score,
+                    val_metrics["mean_iou"],
+                    lr_start,
+                    record["epoch_seconds"],
+                    train_metrics["gpu_peak_allocated_mb"],
+                )
+                write_json(layout.logs / "summary.json", record)
+                logger.info("Validation scar P/R %.4f/%.4f | edema P/R %.4f/%.4f (pixel-pooled)",
+                            val_metrics["precision/scar"], val_metrics["recall/scar"],
+                            val_metrics["precision/edema"], val_metrics["recall/edema"])
+                if early_stop:
+                    logger.info("Early stopping after %d validation epochs without sufficient improvement.", bad_epochs)
+                    break
+            else:
+                early_stop = False
+                record = {
+                    "epoch": epoch + 1,
+                    "global_step": global_step,
+                    "lr_start": lr_start,
+                    "lr_next": optimizer.param_groups[0]["lr"],
+                    "early_stop": False,
+                    "epoch_compute_seconds": time.perf_counter() - epoch_started,
+                }
+                record.update({f"train/{key}": value for key, value in train_metrics.items()})
+                payload = dict(
+                    loss_protocol_version=LOSS_PROTOCOL_VERSION,
+                    benchmark_protocol=benchmark_protocol,
+                    benchmark_data=benchmark_data,
+                    format_version=1,
+                    class_names=CLASS_NAMES,
+                    model_config=model_config,
+                    model=model.state_dict(),
+                    optimizer=optimizer.state_dict(),
+                    scheduler=scheduler.state_dict(),
+                    scaler=scaler.state_dict(),
+                    epoch=epoch,
+                    global_step=global_step,
+                    total_updates=total_updates,
+                    args=vars(args),
+                    data_provenance=data_provenance,
+                    split_hashes=split_hashes,
+                    rng=rng_state(),
+                    loader_rng=generator.get_state(),
+                    checkpoint_selection="last_completed_epoch",
+                    training_complete=(epoch + 1 == stop_epoch),
+                )
+                checkpoint_started = time.perf_counter()
+                atomic_checkpoint(layout.checkpoints / "last.pt", payload)
+                atomic_checkpoint(layout.checkpoints / "last.pth", payload)
+                record["checkpoint_seconds"] = time.perf_counter() - checkpoint_started
+                record["epoch_seconds"] = time.perf_counter() - epoch_started
+                with (layout.logs / "metrics.jsonl").open("a", encoding="utf-8") as stream:
+                    stream.write(json.dumps(json_safe(record), allow_nan=False) + "\n")
+                csv_path = layout.logs / "metrics.csv"
+                append_metrics_csv(csv_path, json_safe(record))
+                if writer:
+                    for key, value in record.items():
+                        if isinstance(value, (float, int)) and math.isfinite(value):
+                            writer.add_scalar(key, value, epoch + 1)
+                    writer.flush()
+                logger.info(
+                    "Epoch %d/%d | train loss %.5f | ce %.5f | dice %.5f | lr %.3g | %.1fs | peak GPU %.0f MiB",
+                    epoch + 1,
+                    args.max_epochs,
+                    train_metrics["loss"],
+                    train_metrics["ce"],
+                    train_metrics["dice_loss"],
+                    lr_start,
+                    record["epoch_seconds"],
+                    train_metrics["gpu_peak_allocated_mb"],
+                )
+                write_json(layout.logs / "summary.json", record)
     except BaseException:
         logger.exception("Training interrupted/failed; last.pt contains the last completed epoch if available.")
         raise
