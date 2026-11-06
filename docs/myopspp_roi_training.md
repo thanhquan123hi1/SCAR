@@ -29,12 +29,12 @@ The caches have already been created on this computer. Do not run those commands
 `run_all.py` reuses a cache with `--skip-cache`, verifies it, trains with validation-based checkpoint selection, and evaluates the best checkpoint on held-out patient volumes:
 
 ```powershell
-python run_all.py --dataset myopspp_roi128_76 --config training/config/models/m2_plus.yaml --skip-cache --batch-size 2 --accum-steps 8 --run-id roi128_m2_plus_seed1234
-python run_all.py --dataset myopspp_roi128_80 --config training/config/models/m2_plus.yaml --skip-cache --batch-size 2 --accum-steps 8 --run-id roi128_80_m2_plus_seed1234
-python run_all.py --dataset myopspp_roi160_80 --config training/config/models/m2_plus.yaml --skip-cache --batch-size 2 --accum-steps 8 --run-id roi160_m2_plus_seed1234
+python run_all.py --dataset myopspp_roi128_76 --config training/config/models/m2_plus.yaml --skip-cache --batch-size 2 --accum-steps 1 --run-id roi128_m2_plus_seed1234
+python run_all.py --dataset myopspp_roi128_80 --config training/config/models/m2_plus.yaml --skip-cache --batch-size 2 --accum-steps 1 --run-id roi128_80_m2_plus_seed1234
+python run_all.py --dataset myopspp_roi160_80 --config training/config/models/m2_plus.yaml --skip-cache --batch-size 2 --accum-steps 1 --run-id roi160_m2_plus_seed1234
 ```
 
-M2-Plus is the only supported architecture. The default input is 128×128. `testing.yaml` uses a smaller M2-Plus and 32×32 input for software checks; it is not a research configuration. Lower `--batch-size` and increase `--accum-steps` as needed. CE/Dice class weights and optional AAR/scar losses can be set in YAML or the train CLI. Selecting an ROI profile does not enable auxiliary losses.
+M2-Plus is the only supported architecture. The default input is 128×128. `testing.yaml` uses a smaller M2-Plus and 32×32 input for software checks; it is not a research configuration. The shared I-MMSeg recipe uses batch Dice and requires `--accum-steps 1`. The commands above reduce the physical batch for memory; they do not reproduce batch 16. To use accumulation, explicitly select per-image Dice (`loss.negative_slice_handling: none` in YAML, or the train CLI flag); this changes the objective. CE/Dice class weights and optional AAR/scar losses can be set in YAML or the train CLI. Selecting an ROI profile does not enable auxiliary losses.
 
 The new ROI profiles default to `loss.pathology_reduction: sample`: conditional AAR/scar Dice contributes zero for negative slices and is averaged over all samples, so sample-weighted gradient accumulation preserves the objective. Existing MyoPS380 and native MyoPS++ runs keep `positive` reduction by default. BatchNorm and stochastic operations can still make microbatch training differ from a large physical batch. This change only fixes the loss denominator.
 
@@ -43,7 +43,7 @@ To change that choice explicitly, set `loss.pathology_reduction` in a custom mod
 Resume with the same dataset, model configuration and loss settings:
 
 ```powershell
-python training/train.py --dataset myopspp_roi160_80 --config training/config/models/m2_plus.yaml --batch-size 2 --accum-steps 8 --resume outputs/myopspp_roi160_80/runs/roi160_m2_plus_seed1234/checkpoints/last.pt --output-dir outputs/myopspp_roi160_80/runs/roi160_m2_plus_seed1234
+python training/train.py --dataset myopspp_roi160_80 --config training/config/models/m2_plus.yaml --batch-size 2 --accum-steps 1 --resume outputs/myopspp_roi160_80/runs/roi160_m2_plus_seed1234/checkpoints/m2plus_seed1234.pt --output-dir outputs/myopspp_roi160_80/runs/roi160_m2_plus_seed1234
 python training/evaluate.py --checkpoint outputs/myopspp_roi160_80/runs/roi160_m2_plus_seed1234/checkpoints/best.pt --data-root data/myopspp_roi160_80/cache
 ```
 
@@ -57,4 +57,4 @@ This measures segmentation given a cardiac ROI. It does not measure automatic he
 
 MyoPS380 retains its existing voxel-distance benchmark, label-order conversion, split and default loss behavior. Its commands remain unchanged, or choose it explicitly with `--dataset myops380`. Neither ROI cohort is the published 95-patient MyoPS++ cohort, and their results should be named separately in comparisons.
 
-Các profile ROI chọn `best.pt` bằng trung bình patient-mean Dice scar và edema-inclusive `{2,3}` trên validation volumes; early stopping dùng cùng điểm này. Mỗi run chỉ lưu `best.pt` và `last.pt`. Protocol ROI v2 giữ nguyên hình học và nhãn nên cache v1 vẫn dùng được. Checkpoint M2-Plus protocol cũ vẫn evaluate được hoặc dùng `--init-weights` cho run mới; không resume trạng thái chọn best/patience theo edema-exclusive.
+Các profile ROI chọn `best.pt` bằng trung bình patient-mean Dice scar và edema-inclusive `{2,3}` trên validation volumes; early stopping dùng cùng điểm này. Mỗi run chỉ lưu `best.pt` và `m2plus_seed1234.pt`. Protocol ROI v2 giữ nguyên hình học và nhãn nên cache v1 vẫn dùng được. Checkpoint M2-Plus protocol cũ vẫn evaluate được hoặc dùng `--init-weights` cho run mới; không resume trạng thái chọn best/patience theo edema-exclusive.

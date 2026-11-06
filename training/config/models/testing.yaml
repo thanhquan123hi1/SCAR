@@ -13,6 +13,7 @@ model:
     dropout_rate: 0.0
 
 train:
+  no_val: false
   epochs: 2
   batch_size: 2
   accum_steps: 2
@@ -21,3 +22,7 @@ train:
 
 data:
   num_workers: 0
+
+# Exercise per-image accumulation in software smoke tests, not the paper recipe.
+loss:
+  negative_slice_handling: none

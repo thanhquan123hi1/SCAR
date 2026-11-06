@@ -29,7 +29,12 @@ from training.loss.losses import LOSS_PROTOCOL_VERSION, SegmentationLoss, valida
 from training.metrics.confusion_meter import ConfusionMeter
 from training.dataset.sampler import build_rare_class_sampler
 from training.predict import predict_volume
-from training.run_layout import RunLayout
+from training.run_layout import RunLayout, final_checkpoint_name
+from training.protocol import metric_protocol, training_protocol, validate_training_checkpoint
+from training.provenance import code_provenance, initialization_provenance
+from training.optimization import (
+    OPTIMIZATION_PROTOCOL, build_optimizer, build_scheduler, validate_optimization_checkpoint,
+)
 from training.models import validate_model_config, model_architecture, checkpoint_model_config
 from training.models.modules.m2_plus import LEGACY_FUSION, SPATIAL_FUSION
 from training.models.modules.sspanet import LEGACY_SSPA_GATE
@@ -230,11 +235,17 @@ def _validate_resume_loss_config(saved_args: dict, args, saved_version: int | No
         return masked, batch, background
 
     previous_dice, current_dice = dice_options(saved_args), dice_options(vars(args))
+    previous_normalization = saved_args.get("dice_normalization", "weights")
+    current_normalization = getattr(args, "dice_normalization", "weights")
+    if previous_normalization != current_normalization:
+        raise ValueError("Resume changes Dice normalization; start a new run")
     if previous_dice != current_dice:
         raise ValueError("Resume changes Dice masking, batch reduction or include_background")
     if saved_version is not None:
         if saved_version > LOSS_PROTOCOL_VERSION:
             raise ValueError("Checkpoint uses a newer loss protocol")
+        if saved_version < 4 and current_normalization != "weights":
+            raise ValueError("Resume loss protocol differs: fixed-class Dice normalization requires a new run")
         if saved_version < 2 and getattr(args, "ce_class_weights", None) is not None:
             raise ValueError("Resume loss protocol differs: weighted CE semantics were corrected. "
                              "Start a new run with --init-weights to use the updated objective.")
@@ -442,64 +453,6 @@ class EarlyStopping:
         return improved
 
 
-def build_grouped_optimizer(
-    model: nn.Module,
-    base_lr: float = 1e-4,
-    weight_decay: float = 1e-4,
-) -> torch.optim.AdamW:
-    """AdamW parameter grouping separating GroupNorm / 1D parameters from weight decay (Finding F-01).
-
-    Parameters subject to weight decay (conv/linear kernels >= 2D):
-      - weight_decay = weight_decay (e.g. 1e-4)
-
-    Parameters excluded from weight decay (scale, bias, 1D vectors, normalization):
-      - weight_decay = 0.0 (GroupNorm gamma/beta, LayerNorm, BatchNorm, 1D parameters, biases)
-
-    Ensures zero overlap between parameter groups.
-    """
-    decay_params, no_decay_params = [], []
-    decay_ids, no_decay_ids = set(), set()
-
-    for name, param in model.named_parameters():
-        if not param.requires_grad:
-            continue
-        p_id = id(param)
-        if (
-            param.ndim <= 1
-            or name.endswith(".bias")
-            or "gn" in name.lower()
-            or "bn" in name.lower()
-            or "norm" in name.lower()
-            or "film" in name.lower()
-        ):
-            no_decay_params.append(param)
-            no_decay_ids.add(p_id)
-        else:
-            decay_params.append(param)
-            decay_ids.add(p_id)
-
-    # Re-verify all normalization modules directly
-    for m_name, module in model.named_modules():
-        if isinstance(module, (nn.GroupNorm, nn.BatchNorm2d, nn.BatchNorm1d, nn.LayerNorm, nn.InstanceNorm2d)):
-            for p_name, param in module.named_parameters(recurse=False):
-                p_id = id(param)
-                if p_id in decay_ids:
-                    decay_params.remove(param)
-                    decay_ids.remove(p_id)
-                    if p_id not in no_decay_ids:
-                        no_decay_params.append(param)
-                        no_decay_ids.add(p_id)
-
-    # Invariant assertion: zero overlap
-    overlap = decay_ids.intersection(no_decay_ids)
-    if overlap:
-        raise ValueError(f"Integrity violation: {len(overlap)} parameters appear in both decay and no_decay groups")
-
-    param_groups = [
-        {"params": decay_params, "weight_decay": weight_decay},
-        {"params": no_decay_params, "weight_decay": 0.0},
-    ]
-    return torch.optim.AdamW(param_groups, lr=base_lr, foreach=False)
 
 
 class Trainer:
@@ -520,10 +473,19 @@ class Trainer:
 
 def trainer_Myops(args, model, snapshot_path):
     dataset_id = getattr(args, "dataset_id", "myops380")
-    benchmark_protocol = protocol_for_dataset(dataset_id)
+    no_val = getattr(args, "no_val", False)
+    benchmark_protocol = metric_protocol(dataset_id, no_val)
+    if no_val and (args.patience or args.min_delta):
+        raise ValueError("--no-val requires patience=0 and min_delta=0")
     resume_checkpoint = load_checkpoint(args.resume) if args.resume else None
-    if resume_checkpoint is not None and not benchmark_protocol_matches(
-            resume_checkpoint.get("benchmark_protocol"), dataset_id, allow_legacy_selection=False):
+    if resume_checkpoint is not None:
+        validate_optimization_checkpoint(resume_checkpoint)
+        saved_no_val = validate_training_checkpoint(resume_checkpoint)
+        if saved_no_val != no_val:
+            raise ValueError("Resume changes no_val training protocol; start a new run")
+    if resume_checkpoint is not None and not (
+            resume_checkpoint.get("benchmark_protocol") == benchmark_protocol if no_val else benchmark_protocol_matches(
+            resume_checkpoint.get("benchmark_protocol"), dataset_id, allow_legacy_selection=False)):
         raise ValueError("Cannot resume a different dataset/selection protocol. Legacy exclusive-edema "
                          "runs remain evaluable; use --init-weights in a new run for inclusive selection.")
     if getattr(args, "enforce_microlesion_resolution", False) and hasattr(args, "img_size"):
@@ -532,6 +494,7 @@ def trainer_Myops(args, model, snapshot_path):
     directory.mkdir(parents=True, exist_ok=True)
     layout = (RunLayout.from_checkpoint(args.resume) if args.resume else
               RunLayout.create(directory, args.model_name, args.seed))
+    final_checkpoint = layout.checkpoints / final_checkpoint_name(args.model_name, args.seed)
     logger = make_logger(layout.logs)
     device = resolve_device(args.device)
     amp_dtype = resolve_amp(args.amp, device)
@@ -540,13 +503,14 @@ def trainer_Myops(args, model, snapshot_path):
         val_fraction=args.val_fraction,
         seed=args.seed,
         output_dir=layout.logs / "splits",
+        no_val=no_val,
     )
     split_hashes = {
         name: hashlib.sha256((split_dir / f"{name}.txt").read_bytes()).hexdigest()
-        for name in ("train", "val", "val_vol", "test_vol")
+        for name in (("train", "test_vol") if no_val else ("train", "val", "val_vol", "test_vol"))
         if (split_dir / f"{name}.txt").is_file()
     }
-    benchmark_data = lock_benchmark_data(args.data_root, split_dir, args.label_order, dataset_id=dataset_id)
+    benchmark_data = lock_benchmark_data(args.data_root, split_dir, args.label_order, dataset_id=dataset_id, no_val=no_val)
     roots = [str(Path(args.data_root) / modality / "train_npz") for modality in ("bSSFP", "LGE", "T2w")]
     datasets = [
         MyopsDataset(
@@ -556,7 +520,7 @@ def trainer_Myops(args, model, snapshot_path):
             transform=(RandomGenerator if split == "train" else ResizeGenerator)([args.img_size, args.img_size]),
             label_order=args.label_order,
         )
-        for split in ("train", "val")
+        for split in (("train",) if no_val else ("train", "val"))
     ]
     if any(len(dataset) == 0 for dataset in datasets):
         raise ValueError("Training and validation must both be nonempty.")
@@ -574,11 +538,13 @@ def trainer_Myops(args, model, snapshot_path):
                if args.sampler == "rare" else None)
     trainloader = DataLoader(datasets[0], shuffle=sampler is None, sampler=sampler,
                              generator=generator, **common)
-    valloader = DataLoader(datasets[1], shuffle=False, generator=torch.Generator().manual_seed(args.seed + 1), **common)
-    validation_volumes = MyopsDataset(
-        *[Path(args.data_root) / modality / "val_vol_h5" for modality in ("bSSFP", "LGE", "T2w")],
-        split_dir, "val_vol", label_order=args.label_order,
-    )
+    valloader = validation_volumes = None
+    if not no_val:
+        valloader = DataLoader(datasets[1], shuffle=False, generator=torch.Generator().manual_seed(args.seed + 1), **common)
+        validation_volumes = MyopsDataset(
+            *[Path(args.data_root) / modality / "val_vol_h5" for modality in ("bSSFP", "LGE", "T2w")],
+            split_dir, "val_vol", label_order=args.label_order,
+        )
     model.to(device)
     criterion = SegmentationLoss(
         ce_weight=args.ce_weight,
@@ -592,14 +558,17 @@ def trainer_Myops(args, model, snapshot_path):
         negative_slice_handling=getattr(args, "negative_slice_handling", None),
         batch_dice=getattr(args, "batch_dice", False),
         include_background=getattr(args, "include_background", None),
+        dice_normalization=getattr(args, "dice_normalization", "weights"),
     )
     criterion.validate_accumulation(args.accum_steps)
-    optimizer = build_grouped_optimizer(model, base_lr=args.base_lr, weight_decay=args.weight_decay)
+    optimizer = build_optimizer(model, base_lr=args.base_lr, weight_decay=args.weight_decay)
     total_updates = args.max_epochs * math.ceil(len(trainloader) / args.accum_steps)
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda step: max(0.0, 1.0 - step / total_updates) ** 0.9)
+    scheduler = build_scheduler(optimizer, total_updates)
     scaler = torch.amp.GradScaler("cuda", enabled=amp_dtype == torch.float16)
     start_epoch, global_step, best_score, best_epoch, bad_epochs = 0, 0, -float("inf"), -1, 0
     patience_score = -float("inf")
+    cumulative_skipped = 0
+    completed_epochs = 0
     model_config = model.config.to_dict()
     metadata_path = Path(args.data_root) / "dataset_metadata.json"
     data_provenance = {}
@@ -645,34 +614,38 @@ def trainer_Myops(args, model, snapshot_path):
         if checkpoint.get("data_provenance", {}) != data_provenance:
             raise ValueError("Dataset preprocessing metadata changed since the checkpoint")
         model.load_state_dict(checkpoint["model"], strict=True)
-        try:
-            optimizer.load_state_dict(checkpoint["optimizer"])
-        except ValueError:
-            if len(checkpoint["optimizer"].get("param_groups", [])) == 1:
-                optimizer.load_state_dict({
-                    "state": checkpoint["optimizer"]["state"],
-                    "param_groups": optimizer.state_dict()["param_groups"],
-                })
-            else:
-                raise
+        optimizer.load_state_dict(checkpoint["optimizer"])
         scheduler.load_state_dict(checkpoint["scheduler"])
         scaler.load_state_dict(checkpoint["scaler"])
         start_epoch, global_step = checkpoint["epoch"] + 1, checkpoint["global_step"]
-        best_score, best_epoch, bad_epochs = (
-            checkpoint["best_score"],
-            checkpoint["best_epoch"],
-            checkpoint["bad_epochs"],
-        )
-        if args.patience == 0:
-            bad_epochs = 0
-        patience_score = checkpoint["patience_score"]
+        if not no_val:
+            best_score, best_epoch, bad_epochs = (
+                checkpoint["best_score"],
+                checkpoint["best_epoch"],
+                checkpoint["bad_epochs"],
+            )
+            if args.patience == 0:
+                bad_epochs = 0
+            patience_score = checkpoint["patience_score"]
+        completed_epochs = start_epoch
+        cumulative_skipped = checkpoint.get("amp_skipped_updates", 0)
         generator.set_state(checkpoint["loader_rng"])
         restore_rng(checkpoint["rng"])
         logger.info("Resumed complete state at epoch %d, optimizer update %d", start_epoch + 1, global_step)
+        checkpoint_initialization = checkpoint.get("initialization", {"kind": "unknown_legacy"})
+        checkpoint_code = checkpoint.get("code_provenance")
         del checkpoint
         del resume_checkpoint
 
+    source_code = code_provenance()
+    if no_val and args.resume and (checkpoint_code is None or
+            checkpoint_code.get("files_sha256") != source_code["files_sha256"]):
+        raise ValueError("No-val resume source code/config files changed; restore the original files or start a new run")
+    initialization = (checkpoint_initialization if args.resume else initialization_provenance(args))
     config_record = dict(
+        optimization_protocol=OPTIMIZATION_PROTOCOL,
+        code_provenance=source_code,
+        initialization=initialization,
         loss_protocol_version=LOSS_PROTOCOL_VERSION,
         benchmark_protocol=benchmark_protocol,
         benchmark_data=benchmark_data,
@@ -681,6 +654,7 @@ def trainer_Myops(args, model, snapshot_path):
         class_names=CLASS_NAMES,
         data_provenance=data_provenance,
         split_hashes=split_hashes,
+        training_protocol=training_protocol(no_val),
         parameters=sum(p.numel() for p in model.parameters()),
         torch_version=str(torch.__version__),
         numpy_version=np.__version__,
@@ -701,13 +675,16 @@ def trainer_Myops(args, model, snapshot_path):
         amp_dtype,
         f"{config_record['parameters']:,}",
         len(datasets[0]),
-        len(datasets[1]),
+        0 if no_val else len(datasets[1]),
         args.batch_size * args.accum_steps,
     )
-    logger.info(
-        "Selection: validation patient-mean scar/inclusive-edema Dice (avg_pathology_inclusive_dice); early stopping %s",
-        f"patience={args.patience}" if args.patience else "disabled (fixed training budget)",
-    )
+    if no_val:
+        logger.info("Selection: last completed epoch of fixed budget %d; validation disabled; val_fraction ignored", args.max_epochs)
+    else:
+        logger.info(
+            "Selection: validation patient-mean scar/inclusive-edema Dice (avg_pathology_inclusive_dice); early stopping %s",
+            f"patience={args.patience}" if args.patience else "disabled (fixed training budget)",
+        )
     writer = step_writer = None
     if args.tensorboard:
         try:
@@ -750,57 +727,73 @@ def trainer_Myops(args, model, snapshot_path):
                 step_writer,
                 global_step,
             )
-            val_metrics, _ = run_epoch(
-                model,
-                valloader,
-                criterion,
-                device,
-                amp_dtype,
-                log_every=args.log_every,
-                logger=logger,
-            )
-            volume_started = time.perf_counter()
-            volume_metrics = validate_volumes(model, validation_volumes, args.img_size,
-                                               args.batch_size, device, amp_dtype, dataset_id=dataset_id)
-            volume_seconds = time.perf_counter() - volume_started
-            score = inclusive_validation_score(volume_metrics)
-            if score is None:
-                raise ValueError("Pathology selection requires defined validation Dice for both scar and edema-inclusive")
-            if not math.isfinite(score):
-                raise ValueError("Validation foreground Dice undefined: check labels and held-out patients.")
-            meaningful = score > patience_score + args.min_delta
-            improved = score > best_score
-            bad_epochs = 0 if meaningful else bad_epochs + 1
-            if meaningful:
-                patience_score = score
-            if improved:
-                best_score, best_epoch = score, epoch
-            early_stop = bool(args.patience and bad_epochs >= args.patience)
-            record = {
-                "epoch": epoch + 1,
-                "global_step": global_step,
-                "lr_start": lr_start,
-                "lr_next": optimizer.param_groups[0]["lr"],
-                "best_val_dice": best_score,
-                "best_epoch": best_epoch + 1,
-                "bad_epochs": bad_epochs,
-                "early_stop": early_stop,
-                "epoch_compute_seconds": time.perf_counter() - epoch_started,
-                "val/volume_seconds": volume_seconds,
-                "val/avg_pathology_inclusive_dice": score,
-            }
-            record.update({f"train/{key}": value for key, value in train_metrics.items()})
-            record.update({f"val/{key}": value for key, value in val_metrics.items()})
-            record["val/avg_pathology_dice"] = volume_metrics["avg_pathology_dice"]
-            for region in ("scar", "edema", "edema_inclusive"):
-                for metric in ("precision", "recall"):
-                    record[f"val/patient_{metric}/{region}"] = volume_metrics[region][f"mean_{metric}"]
-                    for status in ("defined", "undefined"):
-                        record[f"val/{metric}_{status}_cases/{region}"] = volume_metrics[region][f"{metric}_{status}_cases"]
-                record[f"val/patient_dice/{region}"] = volume_metrics[region]["mean_dice"]
-                record[f"val/defined_cases/{region}"] = volume_metrics[region]["dice_defined_cases"]
-                record[f"val/undefined_cases/{region}"] = volume_metrics[region]["dice_undefined_cases"]
+            completed_epochs = epoch + 1
+            cumulative_skipped += train_metrics["amp_skipped_steps"]
+            if no_val:
+                improved = early_stop = False
+                volume_metrics = None
+                record = {
+                    "epoch": completed_epochs, "global_step": global_step,
+                    "lr_start": lr_start, "lr_next": optimizer.param_groups[0]["lr"],
+                    "training_complete": completed_epochs == args.max_epochs,
+                    "planned_epochs": args.max_epochs,
+                    "amp_skipped_updates": cumulative_skipped,
+                    "epoch_compute_seconds": time.perf_counter() - epoch_started,
+                }
+                record.update({f"train/{key}": value for key, value in train_metrics.items()})
+            else:
+                val_metrics, _ = run_epoch(
+                    model,
+                    valloader,
+                    criterion,
+                    device,
+                    amp_dtype,
+                    log_every=args.log_every,
+                    logger=logger,
+                )
+                volume_started = time.perf_counter()
+                volume_metrics = validate_volumes(model, validation_volumes, args.img_size,
+                                                   args.batch_size, device, amp_dtype, dataset_id=dataset_id)
+                volume_seconds = time.perf_counter() - volume_started
+                score = inclusive_validation_score(volume_metrics)
+                if score is None:
+                    raise ValueError("Pathology selection requires defined validation Dice for both scar and edema-inclusive")
+                if not math.isfinite(score):
+                    raise ValueError("Validation foreground Dice undefined: check labels and held-out patients.")
+                meaningful = score > patience_score + args.min_delta
+                improved = score > best_score
+                bad_epochs = 0 if meaningful else bad_epochs + 1
+                if meaningful:
+                    patience_score = score
+                if improved:
+                    best_score, best_epoch = score, epoch
+                early_stop = bool(args.patience and bad_epochs >= args.patience)
+                record = {
+                    "epoch": epoch + 1,
+                    "global_step": global_step,
+                    "lr_start": lr_start,
+                    "lr_next": optimizer.param_groups[0]["lr"],
+                    "best_val_dice": best_score,
+                    "best_epoch": best_epoch + 1,
+                    "bad_epochs": bad_epochs,
+                    "early_stop": early_stop,
+                    "epoch_compute_seconds": time.perf_counter() - epoch_started,
+                    "val/volume_seconds": volume_seconds,
+                    "val/avg_pathology_inclusive_dice": score,
+                }
+                record.update({f"train/{key}": value for key, value in train_metrics.items()})
+                record.update({f"val/{key}": value for key, value in val_metrics.items()})
+                record["val/avg_pathology_dice"] = volume_metrics["avg_pathology_dice"]
+                for region in ("scar", "edema", "edema_inclusive"):
+                    for metric in ("precision", "recall"):
+                        record[f"val/patient_{metric}/{region}"] = volume_metrics[region][f"mean_{metric}"]
+                        for status in ("defined", "undefined"):
+                            record[f"val/{metric}_{status}_cases/{region}"] = volume_metrics[region][f"{metric}_{status}_cases"]
+                    record[f"val/patient_dice/{region}"] = volume_metrics[region]["mean_dice"]
+                    record[f"val/defined_cases/{region}"] = volume_metrics[region]["dice_defined_cases"]
+                    record[f"val/undefined_cases/{region}"] = volume_metrics[region]["dice_undefined_cases"]
             payload = dict(
+                optimization_protocol=OPTIMIZATION_PROTOCOL,
                 loss_protocol_version=LOSS_PROTOCOL_VERSION,
                 benchmark_protocol=benchmark_protocol,
                 benchmark_data=benchmark_data,
@@ -825,6 +818,16 @@ def trainer_Myops(args, model, snapshot_path):
                 rng=rng_state(),
                 loader_rng=generator.get_state(),
             )
+            payload["training_protocol"] = training_protocol(no_val)
+            payload["code_provenance"] = source_code
+            payload["initialization"] = initialization
+            if no_val:
+                for key in ("best_score", "best_epoch", "bad_epochs", "patience_score", "validation_volume_metrics"):
+                    payload.pop(key)
+                payload.update(planned_epochs=args.max_epochs, completed_epochs=completed_epochs,
+                               training_complete=completed_epochs == args.max_epochs,
+                               amp_skipped_updates=cumulative_skipped)
+                validate_training_checkpoint(payload)
             checkpoint_started = time.perf_counter()
             if improved:
                 atomic_checkpoint(layout.checkpoints / "best.pt", payload)
@@ -836,7 +839,7 @@ def trainer_Myops(args, model, snapshot_path):
                 )
             # Publish the recovery point after best, so a crash cannot advance
             # the saved best_score while leaving best.pt missing or stale.
-            atomic_checkpoint(layout.checkpoints / "last.pt", payload)
+            atomic_checkpoint(final_checkpoint, payload)
             record["checkpoint_seconds"] = time.perf_counter() - checkpoint_started
             record["epoch_seconds"] = time.perf_counter() - epoch_started
             with (layout.logs / "metrics.jsonl").open("a", encoding="utf-8") as stream:
@@ -848,31 +851,40 @@ def trainer_Myops(args, model, snapshot_path):
                     if isinstance(value, (float, int)) and math.isfinite(value):
                         writer.add_scalar(key, value, epoch + 1)
                 writer.flush()
-            logger.info(
-                "Epoch %d/%d | train %.5f val %.5f | val Dice %.5f IoU %.5f | lr %.3g | %.1fs | peak GPU %.0f MiB",
-                epoch + 1,
-                args.max_epochs,
-                train_metrics["loss"],
-                val_metrics["loss"],
-                score,
-                val_metrics["mean_iou"],
-                lr_start,
-                record["epoch_seconds"],
-                train_metrics["gpu_peak_allocated_mb"],
-            )
-            write_json(layout.logs / "summary.json", record)
-            logger.info("Validation scar P/R %.4f/%.4f | edema P/R %.4f/%.4f (pixel-pooled)",
-                        val_metrics["precision/scar"], val_metrics["recall/scar"],
-                        val_metrics["precision/edema"], val_metrics["recall/edema"])
+            if no_val:
+                logger.info("Epoch %d/%d | train loss %.5f | lr %.3g | %.1fs | completed=%s",
+                            completed_epochs, args.max_epochs, train_metrics["loss"], lr_start,
+                            record["epoch_seconds"], completed_epochs == args.max_epochs)
+                write_json(layout.logs / "summary.json", record)
+            else:
+                logger.info(
+                    "Epoch %d/%d | train %.5f val %.5f | val Dice %.5f IoU %.5f | lr %.3g | %.1fs | peak GPU %.0f MiB",
+                    epoch + 1,
+                    args.max_epochs,
+                    train_metrics["loss"],
+                    val_metrics["loss"],
+                    score,
+                    val_metrics["mean_iou"],
+                    lr_start,
+                    record["epoch_seconds"],
+                    train_metrics["gpu_peak_allocated_mb"],
+                )
+                write_json(layout.logs / "summary.json", record)
+                logger.info("Validation scar P/R %.4f/%.4f | edema P/R %.4f/%.4f (pixel-pooled)",
+                            val_metrics["precision/scar"], val_metrics["recall/scar"],
+                            val_metrics["precision/edema"], val_metrics["recall/edema"])
             if early_stop:
                 logger.info("Early stopping after %d validation epochs without sufficient improvement.", bad_epochs)
                 break
     except BaseException:
-        logger.exception("Training interrupted/failed; last.pt contains the last completed epoch if available.")
+        logger.exception("Training interrupted/failed; %s contains the last completed epoch if available.", final_checkpoint)
         raise
     finally:
         if writer:
             writer.close()
         if step_writer:
             step_writer.close()
+    if no_val:
+        return {"completed_epochs": completed_epochs, "training_complete": completed_epochs == args.max_epochs,
+                "global_step": global_step}
     return {"best_score": best_score, "best_epoch": best_epoch, "global_step": global_step}

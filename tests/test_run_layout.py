@@ -3,10 +3,29 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from training.run_layout import RunLayout
+from training.run_layout import RunLayout, final_checkpoint_name, is_final_checkpoint
 
 
 class RunLayoutTests(unittest.TestCase):
+    def test_final_checkpoint_names_include_model_and_seed(self):
+        for model, seed, expected in (
+            ('M2-Plus', 1234, 'm2plus_seed1234.pt'),
+            ('M2-Plus', 1098, 'm2plus_seed1098.pt'),
+            ('Lightweight-M2-Plus', 1234, 'lightweightm2plus_seed1234.pt'),
+            ('nnU-Net', 1024, 'nnunet_seed1024.pt'),
+            ('Testing-Small', 1234, 'testingsmall_seed1234.pt'),
+        ):
+            with self.subTest(model=model, seed=seed):
+                self.assertEqual(final_checkpoint_name(model, seed), expected)
+                self.assertTrue(is_final_checkpoint(Path('checkpoints') / expected, model, seed))
+        self.assertFalse(is_final_checkpoint('best.pt', 'M2-Plus', 1234))
+        self.assertFalse(is_final_checkpoint('m2plus_seed1098.pt', 'M2-Plus', 1234))
+        self.assertFalse(is_final_checkpoint('nnunet_seed1234.pt', 'M2-Plus', 1234))
+        self.assertTrue(is_final_checkpoint('last.pt', 'M2-Plus', 1234))
+        self.assertTrue(is_final_checkpoint('last.pth', 'M2-Plus', 1234))
+        with self.assertRaises(ValueError):
+            final_checkpoint_name('../', 1234)
+
     def test_train_resume_resolves_run_root(self):
         from training.train import main
         with tempfile.TemporaryDirectory() as tmp:
@@ -32,13 +51,13 @@ class RunLayoutTests(unittest.TestCase):
                 commands.append(command)
                 if command[1] == 'training/train.py':
                     layout = RunLayout.create(root / 'runs' / 'demo', 'M2-Plus', 1234)
-                    (layout.checkpoints / 'best.pt').touch()
+                    (layout.checkpoints / 'm2plus_seed1234.pt').touch()
             with patch('run_all.run_command', side_effect=run):
                 run_all.main(['--data-root', str(data), '--run-root', str(root / 'runs'),
                               '--run-id', 'demo', '--skip-cache'])
             evaluation = commands[-1]
             self.assertEqual(Path(evaluation[evaluation.index('--checkpoint') + 1]),
-                             root / 'runs' / 'demo' / 'checkpoints' / 'best.pt')
+                             root / 'runs' / 'demo' / 'checkpoints' / 'm2plus_seed1234.pt')
 
     def test_new_run_and_checkpoint_discovery(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -75,7 +94,7 @@ class RunLayoutTests(unittest.TestCase):
                     commands.append(command)
                     if command[1] == 'training/train.py':
                         layout = RunLayout.create(root / 'runs' / 'demo', 'M2-Plus', 1234)
-                        (layout.checkpoints / 'best.pt').touch()
+                        (layout.checkpoints / 'm2plus_seed1234.pt').touch()
 
                 with patch('run_all.run_command', side_effect=run):
                     run_all.main(['--config', str(config), '--data-root', str(data),

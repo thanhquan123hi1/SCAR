@@ -28,13 +28,21 @@ pip install -r requirements.txt
 python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
 ```
 
-Notebook Colab: [scar_pipeline.ipynb](scar_pipeline.ipynb). Chuẩn bị dataset và pretrained weights riêng; Git không chứa chúng.
+Chuẩn bị dataset và pretrained weights riêng; Git không chứa chúng. Huấn luyện bằng `train.py` hoặc chạy pipeline bằng `run_all.py`.
 
 ## Dataset và split
 
+**Mặc định MyoPS380: 304 train / 76 test, không validation, dùng `m2plus_seed1234.pt`.**
+`base.yaml` đặt `train.no_val: true` và dùng manifest `preprocessing/splits/myops380_no_val`.
+Xem [MYOPS380_NO_VAL.md](MYOPS380_NO_VAL.md); cấu hình riêng
+`training/config/experiments/myops380_no_val.yaml` vẫn dùng được.
+Evaluator từ chối checkpoint chưa hoàn thành số epoch đã định trước.
+Muốn dùng protocol phát triển 243/61/76, thêm `--with-val`; MyoPS++/ROI giữ validation theo profile riêng.
+
 | Profile | Train / val / test (bệnh nhân) | Khoảng cách metric |
 |---|---|---|
-| `myops380` — mặc định | 243 / 61 / 76 với bộ chia hiện có | voxel |
+| `myops380` — mặc định | 304 / 0 / 76 | voxel |
+| `myops380 --with-val` | 243 / 61 / 76 với bộ chia phát triển | voxel |
 | `myopspp_bc80` | 51 / 13 / 16 | mm, native grid |
 | `myopspp_roi128_76` | 48 / 13 / 15 | mm, ROI grid |
 | `myopspp_roi128_80` | 51 / 13 / 16 | mm, ROI grid |
@@ -42,13 +50,13 @@ Notebook Colab: [scar_pipeline.ipynb](scar_pipeline.ipynb). Chuẩn bị dataset
 
 MyoPS++ và ROI dùng patient split cố định đã version-control. MyoPS380 khóa 76 ca test trong [test_vol.txt](preprocessing/splits/test_vol.txt). Không chia lát cắt của cùng bệnh nhân sang nhiều tập.
 
-Chạy nhiều seed với **cùng `--list-dir` có đủ** `train.txt`, `val.txt`, `val_vol.txt`, `test_vol.txt`. `--seed` thay đổi khởi tạo, augmentation và thứ tự batch. Nếu chưa có `val.txt`, trainer có thể tạo validation theo seed; hãy tạo manifest hoàn chỉnh trước thí nghiệm nhiều seed.
+Chạy nhiều seed với **cùng manifest**: mặc định no-val chỉ dùng `train.txt`, `test_vol.txt`; `--with-val` cần thêm `val.txt`, `val_vol.txt`. `--seed` thay đổi khởi tạo, augmentation và thứ tự batch. Với validation, tạo manifest đầy đủ trước thí nghiệm nhiều seed để khóa cùng bệnh nhân.
 
 Tạo/kiểm tra manifest từ cache MyoPS380 đã có:
 
 ```powershell
-python preprocessing/build_splits.py --data-root E:/STUDY/DATASET/MyoPS380/Processed_data --list-dir data/processed/splits --test-list preprocessing/splits/test_vol.txt --seed 1234
-python preprocessing/verify.py --data-root E:/STUDY/DATASET/MyoPS380/Processed_data --list-dir data/processed/splits --label-order legacy
+python preprocessing/build_splits.py --no-val --data-root E:/STUDY/DATASET/MyoPS380/Processed_data --list-dir preprocessing/splits/myops380_no_val --test-list preprocessing/splits/test_vol.txt --seed 1234
+python preprocessing/verify.py --no-val --data-root E:/STUDY/DATASET/MyoPS380/Processed_data --list-dir preprocessing/splits/myops380_no_val --label-order legacy
 ```
 
 Manifest đầy đủ được dùng lại, không ghi đè khi đổi seed. Cache MyoPS380 chính thức thiếu metadata dùng `legacy` (`2=scar, 3=edema`); cache SCAR mới dùng `canonical`. Pipeline chuyển nhãn về canonical và kiểm tra metadata; `auto` không đoán khi thiếu thông tin.
@@ -59,28 +67,30 @@ Packaging NIfTI đã căn chỉnh dùng `preprocessing/process_and_save.py`; scr
 
 M2-Plus là mặc định của `train.py` và `run_all.py`. Config chính: [m2_plus.yaml](training/config/models/m2_plus.yaml); thông số chung: [base.yaml](training/config/base.yaml). Ưu tiên base YAML → dataset profile → model YAML → CLI.
 
+Augmentation train dùng đúng implementation **I-MMSeg-Fork**: cùng thứ tự RNG, xoay/flip/noise theo `if/elif`, dịch `np.roll`, brightness/gamma chung ba modality, noise σ=0.2 dùng chung, random crop và cubic resize. Giữ nguyên công thức gamma theo 255 và không clip bổ sung sau resize. Xem [protocol augmentation](docs/im_mseg_augmentation.md) và kiểm thử đối chiếu tensor/RNG. Thay đổi này áp dụng cho các profile/model dùng chung `RandomGenerator`; bắt đầu run mới để dùng nhất quán augmentation I-MMSeg từ đầu.
+
 ```powershell
 python run_all.py --skip-cache --label-order legacy --run-id m2_plus_seed1234
 ```
 
-Lệnh trên tạo/kiểm tra manifest, verify cache, train và evaluate `best.pt`. Train riêng:
+Lệnh trên tạo/kiểm tra manifest, verify cache, train và evaluate `m2plus_seed1234.pt` sau đủ ngân sách train. Thêm `--skip-evaluate` để chỉ train. Train riêng:
 
 ```powershell
-python train.py --config training/config/models/m2_plus.yaml --data-root E:/STUDY/DATASET/MyoPS380/Processed_data --list-dir data/processed/splits --run-id m2_plus_seed1234 --seed 1234
+python train.py --config training/config/models/m2_plus.yaml --data-root E:/STUDY/DATASET/MyoPS380/Processed_data --run-id m2_plus_seed1234 --seed 1234
 ```
 
-Pretrained encoder là tùy chọn: thêm `--pretrained training/pretrained/R50-ViT-B_16.npz`. GPU ít VRAM có thể giảm `--batch-size` và tăng `--accum-steps`; batch hiệu dụng là tích hai tham số này. BatchNorm và phép toán ngẫu nhiên vẫn có thể làm microbatch khác batch vật lý lớn.
+Pretrained encoder là tùy chọn: thêm `--pretrained training/pretrained/R50-ViT-B_16.npz`. Mặc định batch vật lý 16, accumulation 1. GPU ít VRAM có thể giảm `--batch-size` hoặc bật `--gradient-checkpointing`; batch Dice yêu cầu accumulation 1. Nếu cần accumulation, chọn rõ `--negative-slice-handling none` để dùng per-image Dice; đây là mục tiêu khác recipe I-MMSeg. Batch hiệu dụng giống nhau không bảo đảm batch Dice/BatchNorm tương đương.
 
 Các profile khác giữ cùng M2-Plus:
 
 ```powershell
 python train.py --dataset myopspp_bc80 --run-id m2_plus_seed1234
-python run_all.py --dataset myopspp_roi160_80 --skip-cache --batch-size 2 --accum-steps 8 --run-id m2_plus_seed1234
+python run_all.py --dataset myopspp_roi160_80 --skip-cache --batch-size 2 --accum-steps 1 --run-id m2_plus_seed1234
 ```
 
-Loss mặc định: `0.5 CE + 0.5 Dice`. Hỗ trợ `--aar-weight`, `--scar-weight`, `--ce-class-weights`, `--dice-class-weights`; loss phụ mặc định bằng 0. AAR là edema-inclusive `{2,3}`. ROI dùng `pathology_reduction: sample`; MyoPS380/native MyoPS++ mặc định `positive`. Loss và reduction được khóa khi resume.
+Recipe train mặc định khớp phần tối ưu hóa chung của **I-MMSeg**: LR `0.0003333`, AdamW một nhóm tham số, weight decay `0.0001` cho cả kernel/bias/norm, không gradient clipping (`clip_grad: 0`). Scheduler polynomial mũ 0.9 cập nhật sau optimizer: lần cập nhật đầu vẫn giữ base LR, hai optimizer updates đầu dùng cùng base LR; LR sau update cuối là `base_lr * (1 / total_updates)^0.9`. AMP tự động và 4 workers được giữ nguyên.
 
-Dice hỗ trợ `--no-include-background` và `--negative-slice-handling none|mask|batch` (YAML: `loss.include_background`, `loss.negative_slice_handling`). Mặc định vẫn là Dice per-image có background. Masked Dice tính trung bình các lớp hiện diện trong từng ảnh, sau đó trung bình các ảnh; ảnh rỗng đóng góp zero còn nối đồ thị, CE phạt false positive. Batch Dice yêu cầu `--accum-steps 1`. Khi loss phụ AAR/scar bật và accumulation >1, dùng `--pathology-reduction sample`; `positive` bị từ chối vì phụ thuộc cách chia microbatch. Loss protocol 3 khóa các tùy chọn Dice khi resume; checkpoint cũ dùng Dice mặc định vẫn resume được, còn mục tiêu Dice đã thay đổi cần run mới.
+Loss mặc định: `0.2 CE + 0.8 Dice`. Dice gộp batch, mẫu số bình phương, smooth `1e-5`, có background, trọng số `[0.5,1,1,1]` và tổng loss lớp **chia 4** (`loss.dice_normalization: classes`), đúng I-MMSeg. `weights` giữ cách chia tổng trọng số cho thí nghiệm riêng. Hỗ trợ `--negative-slice-handling none|mask|batch`, `--no-include-background` và class weights; loss phụ AAR/scar mặc định bằng 0. AAR là edema-inclusive `{2,3}`. Khi bật loss phụ và accumulation >1, chọn `pathology_reduction: sample`. Loss protocol 4 khóa cả normalization khi resume. Optimizer/scheduler được khóa bằng `optimization_protocol`; checkpoint recipe cũ cần run mới hoặc `--init-weights`, không chuyển recipe giữa chừng bằng resume.
 
 `--config testing` dùng **M2-Plus thu nhỏ**, input 32×32, để kiểm thử phần mềm; không dùng cho bảng kết quả nghiên cứu.
 
@@ -88,7 +98,7 @@ Dice hỗ trợ `--no-include-background` và `--negative-slice-handling none|ma
 
 ```text
 outputs/runs/M2-Plus_seed1234_<timestamp>/
-├── checkpoints/{best.pt,last.pt}
+├── checkpoints/m2plus_seed1234.pt      # Có thêm best.pt khi bật validation
 ├── tensorboard/
 └── logs_M2-Plus_seed1234/
     ├── config.json, train.log, metrics.csv, metrics.jsonl, summary.json
@@ -96,10 +106,12 @@ outputs/runs/M2-Plus_seed1234_<timestamp>/
     └── test_results/
 ```
 
-`best.pt` chọn bằng trung bình patient-mean Dice scar và edema-inclusive trên **validation volumes**. Early stopping dùng cùng điểm; `patience: 0` tắt early stopping. `min_delta` chỉ điều khiển patience, mọi cải thiện điểm tốt nhất vẫn cập nhật `best.pt`. `last.pt` giữ optimizer, scheduler, scaler và RNG. Không lưu checkpoint theo chu kỳ.
+Mặc định no-val chỉ lưu `m2plus_seed1234.pt` sau mỗi epoch; không chọn best hoặc early stopping. Với `--with-val`, `best.pt` chọn bằng trung bình patient-mean Dice scar và edema-inclusive trên **validation volumes**. Early stopping dùng cùng điểm; `patience: 0` tắt early stopping. `m2plus_seed1234.pt` giữ optimizer, scheduler, scaler và RNG.
+
+Tên checkpoint cuối theo `<model>_seed<seed>.pt`: `M2-Plus` → `m2plus_seed1234.pt`, `Lightweight-M2-Plus` → `lightweightm2plus_seed1234.pt`, `nnU-Net` → `nnunet_seed1234.pt` (ví dụ seed 1234). File này cũng là điểm khôi phục sau mỗi epoch; metadata xác định run đã hoàn thành ngân sách hay chưa. CLI vẫn nhận tên cũ `last.pt`/`last.pth` theo các điều kiện resume/evaluate hiện có.
 
 ```powershell
-python train.py --data-root E:/STUDY/DATASET/MyoPS380/Processed_data --list-dir data/processed/splits --run-id m2_plus_seed1234 --resume outputs/runs/m2_plus_seed1234/checkpoints/last.pt
+python train.py --data-root E:/STUDY/DATASET/MyoPS380/Processed_data --run-id m2_plus_seed1234 --resume outputs/runs/m2_plus_seed1234/checkpoints/m2plus_seed1234.pt
 ```
 
 Truyền lại cùng config, seed, batch size, accumulation, LR, tổng epoch, loss và nhãn của run gốc; `--resume` không tự nạp toàn bộ CLI. `--epochs-per-run` dừng sau một số epoch mà giữ lịch LR đã lên kế hoạch. `--init-weights` nạp chính xác trọng số M2-Plus cho run mới, không mang optimizer/split/score cũ. Ba nguồn `--resume`, `--init-weights`, `--pretrained` loại trừ nhau.
@@ -113,7 +125,7 @@ Checkpoint M2-Plus thiếu `sspanet_gate` được evaluate/predict bằng công
 ## Đánh giá và prediction
 
 ```powershell
-python test.py --checkpoint outputs/runs/m2_plus_seed1234/checkpoints/best.pt --data-root E:/STUDY/DATASET/MyoPS380/Processed_data --split test_vol --batch-size 8 --save-predictions
+python test.py --checkpoint outputs/runs/m2_plus_seed1234/checkpoints/m2plus_seed1234.pt --data-root E:/STUDY/DATASET/MyoPS380/Processed_data --split test_vol --batch-size 8 --save-predictions
 ```
 
 Evaluator xuất `test.log`, `per_case.csv`, `metrics.json` và mask `.npz`. Chỉ xuất NIfTI khi cache có affine hợp lệ. Evaluation không cần TensorBoard. Chọn thư mục mới nếu kết quả đã tồn tại.
@@ -164,8 +176,7 @@ SCAR/
 ├── docs/
 ├── train.py                # CLI wrapper
 ├── test.py                 # CLI wrapper
-├── run_all.py
-└── scar_pipeline.ipynb
+└── run_all.py
 ```
 
 `data/`, `outputs/`, `reports/` và weights không được đưa vào Git. Kết quả/checkpoint lịch sử được giữ trên máy; implementation model khác đã bỏ khỏi phiên bản repo này.

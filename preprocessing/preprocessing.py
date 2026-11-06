@@ -83,7 +83,15 @@ def load_aligned_case(paths, label_order="legacy", normalization="unit255"):
     return images, label, spacing, np.asarray(reference.affine, dtype=np.float64)
 
 
-def create_patient_splits(case_ids, seed=42, test_fraction=0.2, val_fraction=0.2, test_ids=None):
+def create_patient_splits(case_ids, seed=42, test_fraction=0.2, val_fraction=0.2, test_ids=None, no_val=False):
+    if no_val:
+        from training.dataset.no_val import REFERENCE_DIR
+        from training.dataset.data_contract import read_split_names
+        official = set(read_split_names(REFERENCE_DIR, "test_vol"))
+        if (len(case_ids) != 380 or set(case_ids) != {f"case{i:04d}" for i in range(1, 381)}
+                or test_ids is None or len(test_ids) != 76 or set(test_ids) != official):
+            raise ValueError("--no-val requires the complete MyoPS380 cohort and fixed official test list")
+        return {"train": sorted(set(case_ids) - official), "test_vol": sorted(official)}
     if not 0 < val_fraction < 1 or not 0 <= test_fraction < 1:
         raise ValueError("val_fraction must be in (0,1) and test_fraction in [0,1).")
     cases = sorted(set(case_ids))

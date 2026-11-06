@@ -228,7 +228,7 @@ def test_roi_train_resume_evaluate_and_objective_guard(roi_export, tmp_path, cap
             "--ablation", "M2-PLUS", "--aar-weight", "0.2", "--scar-weight", "0.2",
             "--num-workers", "0", "--cpu-threads", "2", "--device", "cpu", "--amp", "none", "--no-tensorboard"]
     first = train(argv)
-    last = run / "checkpoints/last.pt"
+    last = run / "checkpoints/testingsmall_seed1234.pt"
     # The incompatible objective is now rejected by CLI preflight, before loading
     # the checkpoint or allocating another training run.
     with pytest.raises(SystemExit) as rejected:

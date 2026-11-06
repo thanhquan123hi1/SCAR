@@ -11,6 +11,7 @@ import yaml
 from training.dataset.benchmark_profiles import DATASET_IDS
 
 YAML_KEY_TO_DEST: dict[str, str] = {
+    "train.no_val": "no_val",
     "data.sampler": "sampler",
     "data.rare_boost": "rare_boost",
     "data.foreground_boost": "foreground_boost",
@@ -37,6 +38,7 @@ YAML_KEY_TO_DEST: dict[str, str] = {
     "loss.aar_weight": "aar_weight",
     "loss.scar_weight": "scar_weight",
     "loss.dice_class_weights": "dice_class_weights",
+    "loss.dice_normalization": "dice_normalization",
     "loss.ce_class_weights": "ce_class_weights",
     "loss.negative_slice_handling": "negative_slice_handling",
     "loss.masked_negative_slices": "masked_negative_slices",
@@ -87,6 +89,17 @@ def flatten_config(config: dict[str, Any], parent_key: str = "", sep: str = ".")
     return dict(items)
 
 
+def resolve_training_list_dir(list_dir, dataset_id, no_val):
+    """Keep the versioned no-val manifests out of validation development runs."""
+    root = Path(__file__).resolve().parents[2]
+    path = Path(list_dir)
+    resolved = path.resolve() if path.is_absolute() else (root / path).resolve()
+    if (dataset_id == "myops380" and not no_val
+            and resolved == root / "preprocessing/splits/myops380_no_val"):
+        return str(root / "data/processed/splits")
+    return list_dir
+
+
 MODEL_KEYS = {
     "model.architecture",
     "model.model_name", "model.num_classes", "model.fused_channels",
@@ -115,7 +128,7 @@ def coerce_config_to_parser_types(flat_config: dict[str, Any], parser: argparse.
                 raise ValueError(f"{key} cannot be null")
             defaults[dest] = None
             continue
-        if isinstance(action, (argparse.BooleanOptionalAction, argparse._StoreTrueAction)):
+        if isinstance(action, (argparse.BooleanOptionalAction, argparse._StoreTrueAction, argparse._StoreFalseAction)):
             if isinstance(value, str):
                 choices = {"true": True, "false": False, "yes": True, "no": False, "1": True, "0": False}
                 if value.lower() not in choices:

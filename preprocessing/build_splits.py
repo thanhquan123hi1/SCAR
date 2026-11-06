@@ -32,7 +32,7 @@ def cache_inventory(data_root):
     return result
 
 
-def build_splits(data_root, list_dir, test_list=None, seed=1234, val_fraction=0.2, raw_root=None):
+def build_splits(data_root, list_dir, test_list=None, seed=1234, val_fraction=0.2, raw_root=None, no_val=False):
     inventory = cache_inventory(data_root)
     slices, tests = inventory["train_npz"], inventory["test_vol_h5"]
     cases = {patient_id(name) for name in slices} | tests
@@ -44,6 +44,19 @@ def build_splits(data_root, list_dir, test_list=None, seed=1234, val_fraction=0.
     if raw_root and set(discover_cases(raw_root)) != cases:
         raise ValueError("Raw patient IDs differ from cached patients")
     destination = Path(list_dir)
+    if no_val:
+        from training.dataset.no_val import validate_no_val_splits, read_no_val_splits
+        splits = {"train": sorted(slices), "test_vol": sorted(tests)}
+        patients = validate_no_val_splits(splits)
+        if any((destination / f"{name}.txt").exists() for name in ("train", "test_vol", "val", "val_vol")):
+            if read_no_val_splits(destination) != splits:
+                raise ValueError("Existing no-val manifests differ from the complete cache inventory")
+        else:
+            for name, values in splits.items():
+                _write_manifest(destination / f"{name}.txt", values)
+        return {"patient_counts": {k: len(v) for k, v in patients.items()},
+                "sample_counts": {k: len(v) for k, v in splits.items()},
+                "list_dir": str(destination.resolve()), "no_val": True}
     names = ("train", "val", "val_vol", "test_vol")
     present = [(destination / f"{name}.txt").is_file() for name in names]
     if any(present):
@@ -83,6 +96,7 @@ def main(argv=None):
     parser.add_argument("--raw-root", default=None)
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--val-fraction", type=float, default=0.2)
+    parser.add_argument("--no-val", action="store_true")
     result = build_splits(**vars(parser.parse_args(argv)))
     print(json.dumps(result, indent=2))
     return result

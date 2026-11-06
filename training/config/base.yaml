@@ -6,12 +6,13 @@ amp: auto
 cpu_threads: 4
 
 train:
+  no_val: true
   epochs: 300
   batch_size: 16
   accum_steps: 1
-  lr: 0.0003
+  lr: 0.0003333
   weight_decay: 0.0001
-  clip_grad: 1.0
+  clip_grad: 0.0
   patience: 0
   min_delta: 0.0
   save_every: 0
@@ -23,7 +24,7 @@ train:
 
 data:
   data_root: E:/STUDY/DATASET/MyoPS380/Processed_data
-  list_dir: data/processed/splits
+  list_dir: preprocessing/splits/myops380_no_val
   val_fraction: 0.2
   label_order: legacy  # Official metadata-free MyoPS380 cache; new packaged cache is canonical.
   num_workers: 4
@@ -54,8 +55,12 @@ model:
   classifier: seg
 
 loss:
-  ce_weight: 0.5
-  dice_weight: 0.5
+  ce_weight: 0.2
+  dice_weight: 0.8
+  negative_slice_handling: batch
+  include_background: true
+  dice_class_weights: [0.5, 1.0, 1.0, 1.0]
+  dice_normalization: classes
   aar_weight: 0.0
 
 outputs:

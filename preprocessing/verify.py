@@ -10,27 +10,32 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from preprocessing.preprocessing import MODALITIES
 from training.dataset.data_contract import read_split_names, validate_patient_splits, patient_id, lock_benchmark_data
-from training.metrics.surface_distance import protocol_for_dataset
+from training.protocol import metric_protocol, training_protocol
 from training.dataset.myops_dataset import MyopsDataset
 from training.dataset.benchmark_profiles import DATASET_IDS, ROI_PROFILES
 import numpy as np
 
 
-def verify_dataset(data_root, list_dir, label_order="legacy", dataset_id="myops380"):
-    data_lock = lock_benchmark_data(data_root, list_dir, label_order, dataset_id=dataset_id)
-    splits = {s: read_split_names(list_dir, s) for s in ("train", "val", "test_vol")}
+def verify_dataset(data_root, list_dir, label_order="legacy", dataset_id="myops380", no_val=False):
+    data_lock = lock_benchmark_data(data_root, list_dir, label_order, dataset_id=dataset_id, no_val=no_val)
+    split_names = ("train", "test_vol") if no_val else ("train", "val", "test_vol")
+    splits = {s: read_split_names(list_dir, s) for s in split_names}
     patients = validate_patient_splits(splits)
     if not all(splits.values()):
         raise ValueError("All train/val/test splits must be nonempty")
-    volumes = read_split_names(list_dir, "val_vol")
-    if set(volumes) != {patient_id(n) for n in splits["val"]}:
-        raise ValueError("Validation volume IDs differ from validation patients")
+    if not no_val:
+        volumes = read_split_names(list_dir, "val_vol")
+        if set(volumes) != {patient_id(n) for n in splits["val"]}:
+            raise ValueError("Validation volume IDs differ from validation patients")
     counts, with_mm, total = {}, 0, 0
-    for split in ("train", "val", "val_vol", "test_vol"):
+    class_counts = {}
+    for split in (("train", "test_vol") if no_val else ("train", "val", "val_vol", "test_vol")):
         folder = split + "_h5" if split.endswith("vol") else "train_npz"
         roots = [Path(data_root) / m / folder for m in MODALITIES]
         dataset = MyopsDataset(*roots, list_dir, split, label_order=label_order)
+        voxels = np.zeros(4, dtype=np.int64)
         for sample in dataset:
+            voxels += np.bincount(sample["label"].reshape(-1), minlength=4)
             if dataset_id != "myops380" and not sample["has_geometry"]:
                 raise ValueError("MyoPS++ benchmark requires mm geometry for every sample")
             if dataset_id in ROI_PROFILES:
@@ -43,8 +48,11 @@ def verify_dataset(data_root, list_dir, label_order="legacy", dataset_id="myops3
             with_mm += int(sample["has_geometry"])
             total += 1
         counts[split] = len(dataset)
+        class_counts[split] = voxels.tolist()
     result = {"status": "passed", "sample_counts": counts,
-              "benchmark_protocol": protocol_for_dataset(dataset_id), "benchmark_data": data_lock,
+              "benchmark_protocol": metric_protocol(dataset_id, no_val), "benchmark_data": data_lock,
+              "training_protocol": training_protocol(no_val),
+              "canonical_class_voxel_counts": class_counts,
               "patient_counts": {k: len(v) for k, v in patients.items()},
               "samples_with_mm_geometry": with_mm,
               "samples_without_mm_geometry": total - with_mm,
@@ -61,6 +69,7 @@ def main(argv=None):
     parser.add_argument("--list-dir", default=str(ROOT / "data/processed/splits"))
     parser.add_argument("--label-order", choices=("legacy", "canonical"), default="legacy")
     parser.add_argument("--dataset", dest="dataset_id", choices=DATASET_IDS, default="myops380")
+    parser.add_argument("--no-val", action="store_true")
     result = verify_dataset(**vars(parser.parse_args(argv)))
     print(json.dumps(result, indent=2))
     return result

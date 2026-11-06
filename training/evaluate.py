@@ -22,7 +22,9 @@ from training.dataset.myops_dataset import MyopsDataset
 from training.predict import predict_volume
 from training.metrics.surface_distance import protocol_for_dataset, benchmark_protocol_matches, dataset_rows, summarize_dataset_rows
 from training.models import model_from_config
-from training.run_layout import RunLayout
+from training.run_layout import RunLayout, is_final_checkpoint
+from training.protocol import metric_protocol, validate_training_checkpoint
+from training.provenance import code_provenance
 from training.evaluation_logging import evaluation_logger
 from training.trainer.trainer import (
     json_safe,
@@ -63,12 +65,18 @@ def main(argv=None):
         raise ValueError("batch-size and cpu-threads must be positive")
     torch.set_num_threads(args.cpu_threads)
     checkpoint = load_checkpoint(args.checkpoint)
+    no_val = validate_training_checkpoint(checkpoint, require_complete=True)
+    if no_val and (args.split != "test_vol" or not is_final_checkpoint(
+            args.checkpoint, checkpoint["args"].get("model_name", "M2-Plus"), checkpoint["args"]["seed"])):
+        raise ValueError("No-val reporting requires the final model/seed checkpoint on the fixed test_vol split")
     dataset_id = checkpoint["args"].get("dataset_id", "myops380")
     if args.dataset is not None and args.dataset != dataset_id:
         raise ValueError("Evaluation dataset differs from the checkpoint benchmark")
-    benchmark_protocol = protocol_for_dataset(dataset_id)
+    benchmark_protocol = metric_protocol(dataset_id, no_val)
     distance_unit = benchmark_protocol["distance_unit"]
-    if not benchmark_protocol_matches(checkpoint.get("benchmark_protocol"), dataset_id) or "benchmark_data" not in checkpoint:
+    compatible = (checkpoint.get("benchmark_protocol") == benchmark_protocol if no_val else
+                  benchmark_protocol_matches(checkpoint.get("benchmark_protocol"), dataset_id))
+    if not compatible or "benchmark_data" not in checkpoint:
         raise ValueError("Checkpoint dataset/metric protocol is incompatible with this benchmark")
     label_order = args.label_order or checkpoint["args"]["label_order"]
     if resolve_label_order(label_order) != checkpoint["benchmark_data"]["source_label_order"]:
@@ -82,6 +90,8 @@ def main(argv=None):
     model.to(device).eval()
 
     checkpoint_path = Path(args.checkpoint).resolve()
+    with checkpoint_path.open("rb") as stream:
+        checkpoint_sha256 = hashlib.file_digest(stream, "sha256").hexdigest()
     layout = RunLayout.from_checkpoint(checkpoint_path)
     saved_splits = layout.logs / "splits"
     list_dir = Path(args.list_dir) if args.list_dir else saved_splits
@@ -94,7 +104,7 @@ def main(argv=None):
             raise ValueError(f"Saved {split_name} manifest was modified after training.")
 
     training_ids = {patient_id(name) for name in read_split_names(saved_splits, "train")}
-    validation_ids = {patient_id(name) for name in read_split_names(saved_splits, "val")}
+    validation_ids = set() if no_val else {patient_id(name) for name in read_split_names(saved_splits, "val")}
     evaluation_ids = {patient_id(name) for name in read_split_names(list_dir, args.split)}
     forbidden_ids = training_ids | validation_ids if args.split == "test_vol" else training_ids
     overlap = forbidden_ids & evaluation_ids
@@ -106,7 +116,9 @@ def main(argv=None):
     saved_ids = set(read_split_names(saved_splits, args.split))
     if set(read_split_names(list_dir, args.split)) != saved_ids:
         raise ValueError("Evaluation patients must exactly match the saved split; subsets are not a locked benchmark")
-    data_lock = lock_benchmark_data(args.data_root, saved_splits, label_order, dataset_id=dataset_id)
+    if no_val and set(checkpoint["split_hashes"]) != {"train", "test_vol"}:
+        raise ValueError("No-val checkpoint must lock exactly train and test_vol manifests")
+    data_lock = lock_benchmark_data(args.data_root, saved_splits, label_order, dataset_id=dataset_id, no_val=no_val)
     if data_lock != checkpoint["benchmark_data"]:
         raise ValueError("Cache bytes or label convention changed since training")
     if output.exists() and any(output.iterdir()):
@@ -184,7 +196,17 @@ def main(argv=None):
             checkpoint=str(checkpoint_path),
             checkpoint_epoch=checkpoint["epoch"] + 1,
             checkpoint_metric_protocol_id=checkpoint["benchmark_protocol"]["id"],
-            checkpoint_selection_metric=checkpoint["benchmark_protocol"]["selection_metric"],
+            checkpoint_selection_metric=checkpoint["benchmark_protocol"].get("selection_metric"),
+            training_protocol=checkpoint.get("training_protocol"),
+            training_complete=checkpoint.get("training_complete"),
+            planned_epochs=checkpoint["args"].get("max_epochs"),
+            checkpoint_sha256=checkpoint_sha256,
+            training_config=checkpoint["args"],
+            code_provenance=checkpoint.get("code_provenance"),
+            evaluation_code_provenance=code_provenance(),
+            optimizer_updates=checkpoint.get("global_step"),
+            amp_skipped_updates=checkpoint.get("amp_skipped_updates"),
+            initialization=checkpoint.get("initialization"),
             ablation=config.ablation,
             architecture=str(getattr(config, "architecture", "m2_plus")),
             split=args.split,

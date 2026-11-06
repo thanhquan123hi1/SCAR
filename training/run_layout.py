@@ -1,6 +1,20 @@
 """Shared output paths for new runs and existing checkpoint layouts."""
 from dataclasses import dataclass
 from pathlib import Path
+import re
+
+
+def final_checkpoint_name(model_name, seed):
+    """Portable model/seed filename, e.g. M2-Plus -> m2plus_seed1234.pt."""
+    name = re.sub(r"[^a-z0-9]", "", str(model_name).lower())
+    if not name:
+        raise ValueError("model_name must contain a letter or digit")
+    return f"{name}_seed{int(seed)}.pt"
+
+
+def is_final_checkpoint(path, model_name, seed):
+    """Recognize the current filename and legacy recovery checkpoint names."""
+    return Path(path).name in {final_checkpoint_name(model_name, seed), "last.pt", "last.pth"}
 
 
 @dataclass(frozen=True)

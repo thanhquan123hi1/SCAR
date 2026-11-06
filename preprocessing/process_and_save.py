@@ -56,7 +56,7 @@ def _write_volume(path, image, label, metadata):
 
 def preprocess_dataset(src_path, dst_path, list_dir=None, test_list=None, seed=42,
                        test_fraction=0.2, val_fraction=0.2, label_order="legacy",
-                       normalization="unit255", show_progress=True, spatial_unit=None):
+                       normalization="unit255", show_progress=True, spatial_unit=None, no_val=False):
     """Write a new dataset directory; never overwrite an existing dataset."""
     src_path, dst_path = Path(src_path).resolve(), Path(dst_path).resolve()
     list_dir = Path(list_dir).resolve() if list_dir else dst_path / "lists"
@@ -64,17 +64,24 @@ def preprocess_dataset(src_path, dst_path, list_dir=None, test_list=None, seed=4
         raise ValueError("Destination must not be the raw source or inside it.")
     if dst_path.exists() and any(dst_path.iterdir()):
         raise FileExistsError(f"Refusing to overwrite nonempty dataset directory: {dst_path}")
+    existing_splits = None
     if list_dir.exists() and any(list_dir.iterdir()):
-        raise FileExistsError(f"Refusing to overwrite existing split manifests: {list_dir}")
+        if not no_val:
+            raise FileExistsError(f"Refusing to overwrite existing split manifests: {list_dir}")
+        from training.dataset.no_val import read_no_val_splits
+        # The paper config points at versioned manifests. Reuse these read-only;
+        # never rewrite their IDs/order or metadata when packaging a new cache.
+        existing_splits = read_no_val_splits(list_dir)
     cases = discover_cases(src_path)
     test_ids = None
     if test_list:
         path = Path(test_list)
         test_ids = read_split_names(path.parent, path.stem)
-    patient_splits = create_patient_splits(list(cases), seed, test_fraction, val_fraction, test_ids)
+    patient_splits = create_patient_splits(list(cases), seed, test_fraction, val_fraction, test_ids, no_val=no_val)
     validate_patient_splits(patient_splits)
     assignment = {case: split for split, names in patient_splits.items() for case in names}
-    lists = {"train": [], "val": [], "val_vol": patient_splits["val"], "test_vol": patient_splits["test_vol"]}
+    lists = ({"train": [], "test_vol": patient_splits["test_vol"]} if no_val else
+             {"train": [], "val": [], "val_vol": patient_splits["val"], "test_vol": patient_splits["test_vol"]})
     dst_path.mkdir(parents=True, exist_ok=True)
     for case in tqdm(cases, desc="Package aligned CMR", disable=not show_progress):
         try:
@@ -115,8 +122,15 @@ def preprocess_dataset(src_path, dst_path, list_dir=None, test_list=None, seed=4
             folder = "val_vol_h5" if split == "val" else "test_vol_h5"
             for modality in MODALITIES:
                 _write_volume(dst_path / modality / folder / f"{case}.npy.h5", images[modality], label, metadata)
-    for split, names in lists.items():
-        _write_manifest(list_dir / f"{split}.txt", names)
+    if no_val:
+        from training.dataset.no_val import validate_no_val_splits
+        validate_no_val_splits(lists)
+    if existing_splits is not None:
+        if any(set(lists[name]) != set(existing_splits[name]) for name in lists):
+            raise ValueError("Packaged slices differ from the fixed no-val manifests")
+    else:
+        for split, names in lists.items():
+            _write_manifest(list_dir / f"{split}.txt", names)
     info = {
         "schema_version": 1,
         "class_names": CLASS_NAMES,
@@ -129,7 +143,8 @@ def preprocess_dataset(src_path, dst_path, list_dir=None, test_list=None, seed=4
         "seed": seed,
         "test_fraction": test_fraction if test_ids is None else None,
         "test_manifest": str(Path(test_list).resolve()) if test_list else None,
-        "val_fraction_of_non_test_patients": val_fraction,
+        "val_fraction_of_non_test_patients": None if no_val else val_fraction,
+        "no_val": no_val,
         "patients": patient_splits,
         "sample_counts": {split: len(names) for split, names in lists.items()},
         "source_checksums_sha256": {case: {modality: source_sha256(path) for modality, path in paths.items()} for case, paths in cases.items()},
@@ -151,6 +166,7 @@ def build_parser():
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--test-fraction", type=float, default=0.2)
     parser.add_argument("--val-fraction", type=float, default=0.2, help="Fraction of non-test patients held out for validation.")
+    parser.add_argument("--no-val", action="store_true")
     return parser
 
 

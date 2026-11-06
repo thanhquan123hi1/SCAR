@@ -50,6 +50,8 @@ class EvaluationLoggingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             layout = RunLayout.create(tmp, 'Model', 1)
             layout.tensorboard.rmdir()
+            # Reports now fingerprint the actual checkpoint bytes, including legacy runs.
+            torch.save(checkpoint, layout.checkpoints / 'best.pt')
             with patch('training.evaluate.load_checkpoint', return_value=checkpoint), \
                  patch('training.evaluate.model_from_config', return_value=Mock()), \
                  patch('training.evaluate.resolve_device', return_value=torch.device('cpu')), \

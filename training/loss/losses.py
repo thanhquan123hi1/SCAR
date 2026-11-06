@@ -8,11 +8,11 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-# Version 3 fixes foreground selection and uses per-image masked Dice reduction.
-LOSS_PROTOCOL_VERSION = 3
+# Version 4 adds I-MMSeg's fixed-class-count normalization.
+LOSS_PROTOCOL_VERSION = 4
 
 
-def _reduce_dice(losses, weight, n_classes, include_background, mask=None):
+def _reduce_dice(losses, weight, n_classes, include_background, mask=None, normalization="weights"):
     """Mean per-image class losses, with differentiable zero for empty images."""
     weights = torch.ones(n_classes, device=losses.device, dtype=torch.float32)
     if weight is not None:
@@ -25,7 +25,7 @@ def _reduce_dice(losses, weight, n_classes, include_background, mask=None):
     weights = weights[start:].unsqueeze(0).expand_as(selected)
     if mask is not None:
         weights = weights * mask[:, start:]
-    denominator = weights.sum(1)
+    denominator = weights.sum(1) if normalization == "weights" else weights.new_full((len(losses),), n_classes)
     return ((selected * weights).sum(1) / denominator.masked_fill(denominator == 0, 1)).mean()
 
 
@@ -159,6 +159,7 @@ class DiceLoss(nn.Module):
         negative_slice_handling: str | None = None,
         batch_dice: bool = False,
         include_background: bool | None = None,
+        normalization: str = "weights",
     ):
         super().__init__()
         if not isinstance(n_classes, int) or n_classes < 2:
@@ -169,6 +170,9 @@ class DiceLoss(nn.Module):
             raise ValueError("negative_slice_handling must be None, 'mask', 'batch', or 'none'")
         self.n_classes = n_classes
         self.smooth = smooth
+        if normalization not in {"weights", "classes"}:
+            raise ValueError("Dice normalization must be weights or classes")
+        self.normalization = normalization
         self.masked_negative_slices = masked_negative_slices or (negative_slice_handling == "mask")
         self.batch_dice = batch_dice or (negative_slice_handling == "batch")
         if self.batch_dice and self.masked_negative_slices:
@@ -186,6 +190,21 @@ class DiceLoss(nn.Module):
             raise ValueError(f"Logits/target shape mismatch: {inputs.shape}, {target.shape}")
 
         if self.batch_dice:
+            if self.normalization == "classes":
+                # Match I-MMSeg's per-class operation order and divisor exactly.
+                weights = [1.0] * self.n_classes if weight is None else weight
+                if (len(weights) != self.n_classes or
+                        any(not math.isfinite(float(v)) or v < 0 for v in weights) or sum(weights) <= 0):
+                    raise ValueError("Dice weights must be finite, nonnegative with positive sum")
+                loss = 0.0
+                for index in range(0 if self.include_background else 1, self.n_classes):
+                    score, label = probabilities[:, index], labels[:, index]
+                    intersect = torch.sum(score * label)
+                    y_sum = torch.sum(label * label)
+                    z_sum = torch.sum(score * score)
+                    dice = (2 * intersect + self.smooth) / (z_sum + y_sum + self.smooth)
+                    loss = loss + (1 - dice) * weights[index]
+                return loss / self.n_classes
             dims = (0,) + tuple(range(2, inputs.ndim))
             inter = 2 * (probabilities * labels).sum(dims) + self.smooth
             denom = probabilities.square().sum(dims) + labels.sum(dims) + self.smooth
@@ -200,8 +219,10 @@ class DiceLoss(nn.Module):
 
         if self.masked_negative_slices:
             has_fg = (labels.sum(dims) > 0).float()
-            return _reduce_dice(slice_losses, weight, self.n_classes, self.include_background, has_fg)
-        return _reduce_dice(slice_losses, weight, self.n_classes, self.include_background)
+            return _reduce_dice(slice_losses, weight, self.n_classes, self.include_background, has_fg,
+                                normalization=self.normalization)
+        return _reduce_dice(slice_losses, weight, self.n_classes, self.include_background,
+                            normalization=self.normalization)
 
 
 class SegmentationLoss(nn.Module):
@@ -221,6 +242,7 @@ class SegmentationLoss(nn.Module):
         negative_slice_handling=None,
         batch_dice=False,
         include_background=None,
+        dice_normalization="weights",
     ):
         super().__init__()
         if pathology_reduction not in ("positive", "sample"):
@@ -251,6 +273,7 @@ class SegmentationLoss(nn.Module):
             negative_slice_handling=negative_slice_handling,
             batch_dice=batch_dice,
             include_background=include_background,
+            normalization=dice_normalization,
         )
 
     def validate_accumulation(self, accum_steps):

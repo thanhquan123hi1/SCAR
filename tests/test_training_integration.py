@@ -6,7 +6,7 @@ import torch
 import yaml
 
 from training.dataset.data_contract import CLASS_NAMES
-from training.loss.losses import DiceLoss, MaskedSliceDiceLoss, BatchSoftDiceLoss, SegmentationLoss
+from training.loss.losses import DiceLoss, MaskedSliceDiceLoss, BatchSoftDiceLoss, SegmentationLoss, LOSS_PROTOCOL_VERSION
 from training.models import M2PlusNet, build_model, get_testing, model_from_config
 from training.train import _load_initial_weights, parse_args
 
@@ -283,11 +283,13 @@ def test_loss_flags_yaml_and_resume_lock_the_same_objective(tmp_path):
     args, _ = parse_args(["--config", str(config), "--accum-steps", "2"])
     for key, value in options.items():
         assert getattr(args, key) == value
-    _validate_resume_loss_config(vars(args), args, saved_version=3)
+    _validate_resume_loss_config(vars(args), args, saved_version=LOSS_PROTOCOL_VERSION)
+    with pytest.raises(ValueError, match="loss protocol"):
+        _validate_resume_loss_config(vars(args), args, saved_version=3)
     with pytest.raises(ValueError, match="loss protocol"):
         _validate_resume_loss_config(vars(args), args, saved_version=2)
     with pytest.raises(ValueError, match="Dice"):
-        _validate_resume_loss_config(vars(args), Namespace(**(vars(args) | {"include_background": True})), saved_version=3)
+        _validate_resume_loss_config(vars(args), Namespace(**(vars(args) | {"include_background": True})), saved_version=LOSS_PROTOCOL_VERSION)
 
 
 @pytest.mark.parametrize("fusion", ["legacy_v1", "spatial_v2"])

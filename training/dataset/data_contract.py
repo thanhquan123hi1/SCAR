@@ -22,12 +22,17 @@ LABEL_ORDERS = {
 OFFICIAL_TEST_IDS_SHA256 = "3237b31411833cedcb3ecd86d36edae356bd3f880d3fcfd915066f1c850d9cbc"
 
 
-def lock_benchmark_data(data_root, list_dir, label_order, dataset_id="myops380"):
+def lock_benchmark_data(data_root, list_dir, label_order, dataset_id="myops380", no_val=False):
     """Validate MyoPS380 cohort and fingerprint cache bytes without changing data.
 
     Persist the returned record in the run/checkpoint. Resume/evaluation compare
     this record, so changing files in place cannot silently change a benchmark.
     """
+    if no_val:
+        if dataset_id != "myops380":
+            raise ValueError("--no-val currently supports only myops380")
+        from training.dataset.no_val import lock_no_val_data
+        return lock_no_val_data(data_root, list_dir, label_order)
     from training.dataset.benchmark_profiles import ROI_PROFILES
     if dataset_id == "myopspp_bc80" or dataset_id in ROI_PROFILES:
         return _lock_myopspp_data(data_root, list_dir, label_order, dataset_id)
@@ -220,13 +225,16 @@ def _validate_volume_validation(list_dir, validation_names):
     return volumes
 
 
-def ensure_patient_splits(list_dir, val_fraction=0.2, seed=42, output_dir=None):
+def ensure_patient_splits(list_dir, val_fraction=0.2, seed=42, output_dir=None, no_val=False):
     """Return manifests with train/val NPZ IDs and unchanged test IDs.
 
     Hold out whole training patients only when val.txt does not already exist.
     A complete output directory is validated and reused, making resume stable.
     Use an experiment output_dir to keep original dataset manifests untouched.
     """
+    if no_val:
+        from training.dataset.no_val import ensure_no_val_splits
+        return ensure_no_val_splits(list_dir, output_dir)
     source = Path(list_dir)
     destination = Path(output_dir) if output_dir is not None else source
     if all((destination / f"{s}.txt").is_file() for s in ("train", "val", "test_vol")):

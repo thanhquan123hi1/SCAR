@@ -1,3 +1,5 @@
+train:
+  no_val: false
 data:
   dataset_id: myopspp_roi128_80
   data_root: data/myopspp_roi128_80/cache

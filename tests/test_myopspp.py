@@ -214,7 +214,7 @@ def test_real_training_resume_and_evaluation_use_separate_profile(packaged, tmp_
         argv[argv.index("testing")] = str(config)
         argv.extend(["--negative-slice-handling", "mask", "--no-include-background"])
     first = train(argv)
-    last = run / "checkpoints/last.pt"
+    last = run / "checkpoints" / ("testingsmall_seed1234.pt" if variant == "m2_plus" else "m2plus_seed1234.pt")
     checkpoint = load_checkpoint(last)
     assert checkpoint["epoch"] == 0
     assert checkpoint["benchmark_protocol"]["distance_unit"] == "mm"
@@ -260,7 +260,7 @@ def test_m2_plus_weighted_loss_train_resume_evaluate_myopspp(packaged, tmp_path)
             "--scar-weight", "0.2", "--ce-class-weights", "0.2", "1", "2", "2",
             "--num-workers", "0", "--cpu-threads", "2", "--device", "cpu", "--amp", "none", "--no-tensorboard"]
     first = train(argv)
-    last = run / "checkpoints/last.pt"
+    last = run / "checkpoints/testingsmall_seed1234.pt"
     checkpoint = load_checkpoint(last)
     from training.loss.losses import LOSS_PROTOCOL_VERSION
     assert checkpoint["loss_protocol_version"] == LOSS_PROTOCOL_VERSION
@@ -324,7 +324,7 @@ def test_best_and_early_stopping_follow_inclusive_not_exclusive_dice(packaged, t
         train(argv)
     best = run / "checkpoints/best.pt"
     assert load_checkpoint(best)["epoch"] == 0
-    last = run / "checkpoints/last.pt"
+    last = run / "checkpoints/testingsmall_seed1234.pt"
     before = best.read_bytes()
     with patch("training.trainer.trainer.validate_volumes", return_value=metrics[1]):
         train(argv + ["--resume", str(last)])
@@ -335,7 +335,7 @@ def test_best_and_early_stopping_follow_inclusive_not_exclusive_dice(packaged, t
     assert saved["best_epoch"] == expected_epoch
     assert saved["bad_epochs"] == (0 if inclusive_improves else 1)
     assert saved["benchmark_protocol"]["selection_metric"] == "avg_pathology_inclusive_dice"
-    assert {p.name for p in best.parent.iterdir()} == {"best.pt", "last.pt"}
+    assert {p.name for p in best.parent.iterdir()} == {"best.pt", "testingsmall_seed1234.pt"}
     assert "best_inclusive_score" not in saved
     if not inclusive_improves:
         assert best.read_bytes() == before
@@ -422,7 +422,7 @@ def test_resume_of_early_stopped_checkpoint_performs_no_more_updates(packaged, t
                                     dataset_id="myopspp_bc80")
     with patch("training.trainer.trainer.validate_volumes", return_value=metrics):
         first = train(argv)
-    last = run / "checkpoints/last.pt"
+    last = run / "checkpoints/testingsmall_seed1234.pt"
     before = last.read_bytes()
     assert load_checkpoint(last)["bad_epochs"] == 1
     second = train(argv + ["--resume", str(last)])

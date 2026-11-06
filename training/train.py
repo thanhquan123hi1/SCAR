@@ -17,11 +17,12 @@ from training.config.config_utils import (
     flatten_config,
     generate_run_dir,
     load_merged_config,
+    resolve_training_list_dir,
 )
 from training.models import get_config, get_lightweight_config, model_architecture, model_from_config, validate_model_config
 from training.loss.losses import SegmentationLoss
 from training.dataset.benchmark_profiles import DATASET_IDS
-from training.run_layout import RunLayout
+from training.run_layout import RunLayout, is_final_checkpoint
 from training.trainer.trainer import Trainer, load_checkpoint, seed_everything
 
 
@@ -48,7 +49,7 @@ def build_parser():
     parser.add_argument(
         "--list-dir",
         "--list_dir",
-        default=str(PROJECT_ROOT / "data" / "processed" / "splits"),
+        default=str(PROJECT_ROOT / "preprocessing" / "splits" / "myops380_no_val"),
     )
     parser.add_argument(
         "--output-dir",
@@ -61,15 +62,17 @@ def build_parser():
         help="Root directory for automated timestamped runs",
     )
     parser.add_argument("--run-id", default=None, help="Named run directory under --run-root")
-    parser.add_argument("--ce-weight", type=float, default=0.5)
+    parser.add_argument("--ce-weight", type=float, default=0.2)
     parser.add_argument("--pathology-reduction", choices=("positive", "sample"), default="positive",
                         help="Conditional AAR/scar mean: legacy positive slices, or all samples for stable accumulation")
-    parser.add_argument("--dice-weight", type=float, default=0.5)
-    parser.add_argument("--negative-slice-handling", choices=("none", "mask", "batch"), default="none")
+    parser.add_argument("--dice-weight", type=float, default=0.8)
+    parser.add_argument("--negative-slice-handling", choices=("none", "mask", "batch"), default="batch")
+    parser.add_argument("--dice-normalization", choices=("weights", "classes"), default="classes",
+                        help="Dice divisor: sum of selected weights, or number of classes as in I-MMSeg")
     parser.add_argument("--masked-negative-slices", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--batch-dice", action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument("--include-background", action=argparse.BooleanOptionalAction, default=None,
-                        help="Include background in Dice; default true for ordinary Dice, false for masked/batch")
+    parser.add_argument("--include-background", action=argparse.BooleanOptionalAction, default=True,
+                        help="Include background in Dice (I-MMSeg default: true)")
     parser.add_argument(
         "--aar-weight",
         type=float,
@@ -86,8 +89,8 @@ def build_parser():
         "--dice-class-weights",
         nargs="+",
         type=float,
-        default=None,
-        help="Class weights for Dice loss, e.g. 0.0 1.0 2.0 2.0 (default: equal weights)",
+        default=[0.5, 1.0, 1.0, 1.0],
+        help="Class weights for Dice loss; I-MMSeg halves background weight",
     )
     parser.add_argument(
         "--ce-class-weights",
@@ -110,7 +113,7 @@ def build_parser():
         help="microbatch on one device",
     )
     parser.add_argument("--accum-steps", type=int, default=1)
-    parser.add_argument("--lr", "--base_lr", dest="base_lr", type=float, default=0.0003)
+    parser.add_argument("--lr", "--base_lr", dest="base_lr", type=float, default=0.0003333)
     parser.add_argument("--weight-decay", type=float, default=0.0001)
     parser.add_argument("--img-size", "--img_size", dest="img_size", type=int, default=128)
     parser.add_argument("--device", default="auto", help="auto, cpu, cuda, cuda:0, ...")
@@ -121,10 +124,15 @@ def build_parser():
         default=False,
         help="recompute encoder blocks to reduce activation memory",
     )
-    parser.add_argument("--clip-grad", type=float, default=1.0)
+    parser.add_argument("--clip-grad", type=float, default=0.0)
     parser.add_argument("--num-workers", "--num_workers", dest="num_workers", type=int, default=4)
     parser.add_argument("--pin-memory", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--seed", type=int, default=1234)
+    validation = parser.add_mutually_exclusive_group()
+    validation.add_argument("--no-val", "--no_val", action="store_true", default=True,
+                            help="MyoPS380 default: fixed 304 train / 76 test, final model/seed checkpoint only")
+    validation.add_argument("--with-val", dest="no_val", action="store_false", default=argparse.SUPPRESS,
+                            help="Opt into validation; supply a train/val/test --list-dir")
     parser.add_argument("--deterministic", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--cpu-threads", type=int, default=4)
     parser.add_argument(
@@ -148,7 +156,7 @@ def build_parser():
         type=int,
         default=0,
         choices=[0],
-        help="compatibility option; only 0 is supported (save best.pt and last.pt only)",
+        help="compatibility option; only 0 is supported (save final checkpoint, plus best.pt with validation)",
     )
     parser.add_argument("--log-every", type=int, default=20)
     parser.add_argument("--tensorboard", action=argparse.BooleanOptionalAction, default=True)
@@ -174,6 +182,10 @@ def parse_args(argv=None):
     pre_parser.add_argument("--config", default="training/config/models/m2_plus.yaml")
     pre_parser.add_argument("--base-config", default=str(PROJECT_ROOT / "training/config/base.yaml"))
     pre_parser.add_argument("--dataset", dest="dataset_id", choices=DATASET_IDS, default=None)
+    # Track explicit CLI initialization separately from YAML defaults. A resume
+    # restores initialized weights/state from the checkpoint, not the source file.
+    pre_parser.add_argument("--pretrained", default=None)
+    pre_parser.add_argument("--init-weights", default=None)
     pre_args, _ = pre_parser.parse_known_args(argv)
     config_name = pre_args.config
     if config_name == "testing":
@@ -185,14 +197,21 @@ def parse_args(argv=None):
     parser = build_parser()
     parser.set_defaults(**coerce_config_to_parser_types(flatten_config(merged), parser))
     args = parser.parse_args(argv)
+    args.list_dir = resolve_training_list_dir(args.list_dir, args.dataset_id, args.no_val)
+    if args.resume:
+        if pre_args.pretrained is not None or pre_args.init_weights is not None:
+            parser.error("--resume, --pretrained and --init-weights are mutually exclusive on the CLI")
+        args.pretrained = args.init_weights = None
+    if args.no_val and (args.dataset_id != "myops380" or args.patience != 0 or args.min_delta != 0):
+        parser.error("--no-val requires myops380, patience=0 and min_delta=0")
     if args.save_every != 0:
-        parser.error("save_every must be 0: only best.pt and last.pt are saved")
+        parser.error("save_every must be 0: save final checkpoint, plus best.pt with validation")
     for key in ("max_epochs", "batch_size", "accum_steps", "img_size", "cpu_threads", "log_every"):
         if getattr(args, key) < 1:
             parser.error(f"{key} must be positive")
     if args.img_size < 32 or args.img_size % 16:
         parser.error("img_size must be a multiple of 16 and >=32")
-    if args.base_lr <= 0 or args.weight_decay < 0 or not 0 < args.val_fraction < 1:
+    if args.base_lr <= 0 or args.weight_decay < 0 or (not args.no_val and not 0 < args.val_fraction < 1):
         parser.error("Require lr>0, weight_decay>=0, 0<val_fraction<1")
     for key in ("base_lr", "weight_decay", "val_fraction", "min_delta", "clip_grad", "ce_weight", "dice_weight", "aar_weight", "scar_weight"):
         if not math.isfinite(getattr(args, key)):
@@ -229,6 +248,7 @@ def parse_args(argv=None):
             negative_slice_handling=args.negative_slice_handling,
             masked_negative_slices=args.masked_negative_slices,
             batch_dice=args.batch_dice, include_background=args.include_background,
+            dice_normalization=args.dice_normalization,
         ).validate_accumulation(args.accum_steps)
     except ValueError as exc:
         parser.error(str(exc))
@@ -269,8 +289,9 @@ def main(argv=None):
     if not args.resume and output.exists() and any(output.iterdir()):
         raise FileExistsError("Run directory is not empty; choose a new run-id or use --resume")
     if args.resume:
-        if RunLayout.from_checkpoint(args.resume).root != output or Path(args.resume).name not in {"last.pt", "last.pth"}:
-            raise ValueError("Resume from last.pt into its original run directory")
+        if (RunLayout.from_checkpoint(args.resume).root != output or not is_final_checkpoint(
+                args.resume, merged["model"].get("model_name", "M2-Plus"), args.seed)):
+            raise ValueError("Resume from the final model/seed checkpoint into its original run directory")
     args.output_dir = str(output)
     args.model_name = merged["model"].get("model_name", "M2-Plus")
     section = merged["model"]

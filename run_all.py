@@ -10,7 +10,8 @@ import sys
 
 import yaml
 
-from training.config.config_utils import load_merged_config
+from training.config.config_utils import load_merged_config, resolve_training_list_dir
+from training.run_layout import final_checkpoint_name
 
 ROOT = Path(__file__).resolve().parent
 LOGGER = logging.getLogger("scar.pipeline")
@@ -37,6 +38,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--raw-root", help="Aligned raw NIfTI root, used only to create a new cache")
     parser.add_argument("--list-dir", help="Patient manifests; defaults to training YAML")
     parser.add_argument("--test-list", default="preprocessing/splits/test_vol.txt")
+    validation = parser.add_mutually_exclusive_group()
+    validation.add_argument("--no-val", "--no_val", dest="no_val", action="store_true", default=None)
+    validation.add_argument("--with-val", dest="no_val", action="store_false", default=argparse.SUPPRESS)
     parser.add_argument("--skip-cache", action="store_true", help="Require and reuse an existing cache")
     parser.add_argument("--skip-evaluate", action="store_true")
     parser.add_argument("--eval-split", choices=["test_vol", "val_vol"], default="test_vol")
@@ -67,6 +71,13 @@ def main(argv=None) -> Path:
     from training.models import validate_model_config
     validate_model_config(config["model"])
     args.dataset = config["data"]["dataset_id"]
+    no_val = args.no_val if args.no_val is not None else config.get("train", {}).get("no_val", False)
+    if not isinstance(no_val, bool):
+        parser.error("train.no_val must be a boolean")
+    if no_val and (args.dataset != "myops380" or args.eval_split != "test_vol"
+                   or config["train"].get("patience", 0) or config["train"].get("min_delta", 0)):
+        parser.error("--no-val requires myops380, test_vol, patience=0 and min_delta=0")
+    mode_flags = ["--no-val"] if no_val else []
     # Share CLI > merged YAML runtime settings between training and evaluation.
     for name in ("device", "amp", "cpu_threads"):
         if getattr(args, name) is None:
@@ -76,7 +87,7 @@ def main(argv=None) -> Path:
     data_root = project_path(args.data_root or config["data"]["data_root"])
     list_default = (data_root / "lists" if args.dataset != "myops380" and args.data_root is not None
                     else config["data"]["list_dir"])
-    list_dir = project_path(args.list_dir or list_default)
+    list_dir = project_path(resolve_training_list_dir(args.list_dir or list_default, args.dataset, no_val))
     raw_default = "E:/STUDY/DATASET/Myo_train" if args.dataset == "myopspp_bc80" else prep_config["data"]["raw_root"]
     from training.dataset.benchmark_profiles import ROI_PROFILES
     if args.dataset in ROI_PROFILES:
@@ -126,7 +137,7 @@ def main(argv=None) -> Path:
     elif cache_present:
         run_command([python, "preprocessing/build_splits.py", "--data-root", str(data_root),
                      "--list-dir", str(list_dir), "--test-list", str(test_list),
-                     "--seed", str(seed), "--val-fraction", str(config["data"]["val_fraction"])],
+                     "--seed", str(seed), "--val-fraction", str(config["data"]["val_fraction"])] + mode_flags,
                     "1/4: Validate or create patient manifests for the existing cache")
     else:
         normalization = args.normalization or prep_config["normalization"]
@@ -137,17 +148,18 @@ def main(argv=None) -> Path:
                      "--dst-path", str(data_root), "--list-dir", str(list_dir),
                      "--test-list", str(test_list), "--label-order", raw_label_order,
                      "--normalization", normalization, "--seed", str(seed),
-                     "--val-fraction", str(config["data"]["val_fraction"])],
+                     "--val-fraction", str(config["data"]["val_fraction"])] + mode_flags,
                     "1/4: Package aligned NIfTI into a new cache and patient manifests")
     # Newly packaged files are canonical regardless of the raw encoding.
     label_order = (args.label_order or config["data"]["label_order"]) if cache_present else "canonical"
     run_command([python, "preprocessing/verify.py", "--data-root", str(data_root),
-                 "--list-dir", str(list_dir), "--label-order", label_order, "--dataset", args.dataset],
+                 "--list-dir", str(list_dir), "--label-order", label_order, "--dataset", args.dataset] + mode_flags,
                 "2/4: Check synchronized modalities, labels, splits and geometry")
     train_command = [python, "training/train.py", "--config", config_name,
                      "--run-root", str(run_root), "--data-root", str(data_root),
                      "--list-dir", str(list_dir), "--label-order", label_order,
                      "--seed", str(seed), "--dataset", args.dataset]
+    train_command.append("--no-val" if no_val else "--with-val")
     if use_output_dir:
         train_command.extend(["--output-dir", str(run_dir)])
     else:
@@ -160,10 +172,11 @@ def main(argv=None) -> Path:
         value = getattr(args, name)
         if value is not None:
             train_command.append("--" + ("" if value else "no-") + name.replace("_", "-"))
-    run_command(train_command, "3/4: Train with validation-based checkpoint selection")
-    checkpoint = run_dir / "checkpoints" / "best.pt"
+    run_command(train_command, "3/4: Train fixed budget, final model/seed checkpoint only" if no_val else
+                "3/4: Train with validation-based checkpoint selection")
+    checkpoint = run_dir / "checkpoints" / (final_checkpoint_name(model_name, seed) if no_val else "best.pt")
     if not checkpoint.is_file():
-        raise FileNotFoundError(f"Training did not produce the best checkpoint: {checkpoint}")
+        raise FileNotFoundError(f"Training did not produce the selected checkpoint: {checkpoint}")
     if not args.skip_evaluate:
         evaluation = [python, "training/evaluate.py", "--checkpoint", str(checkpoint),
                       "--data-root", str(data_root), "--split", args.eval_split,

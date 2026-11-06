@@ -1,0 +1,14 @@
+# Fixed-budget paper protocol. Freeze all hyperparameters before the final run.
+# Model defaults are inherited from base.yaml (M2-Plus).
+data:
+  dataset_id: myops380
+  data_root: E:/STUDY/DATASET/MyoPS380/Processed_data
+  list_dir: preprocessing/splits/myops380_no_val
+  label_order: legacy
+train:
+  no_val: true
+  epochs: 300
+  patience: 0
+  min_delta: 0.0
+outputs:
+  run_root: outputs/myops380_no_val/runs
