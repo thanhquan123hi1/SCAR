@@ -34,7 +34,7 @@ def build_parser():
     parser.add_argument(
         "--config",
         default="training/config/models/m2_plus.yaml",
-        help="Path to YAML config (e.g. m2_plus.yaml or nnunet.yaml), or testing for small CPU checks",
+        help="Path to YAML config (e.g. m2_plus.yaml or lightweight_m2_plus.yaml), or testing for small CPU checks",
     )
     parser.add_argument(
         "--base-config",
@@ -102,7 +102,7 @@ def build_parser():
     parser.add_argument("--sampler", choices=("none", "rare"), default="none")
     parser.add_argument("--rare-boost", type=float, default=2.0)
     parser.add_argument("--foreground-boost", type=float, default=1.3)
-    parser.add_argument("--ablation", type=str.upper, choices=["M2-PLUS", "LIGHTWEIGHT_M2_PLUS", "NNUNET"], default="M2-PLUS")
+    parser.add_argument("--ablation", type=str.upper, choices=["M2-PLUS", "LIGHTWEIGHT_M2_PLUS"], default="M2-PLUS")
     parser.add_argument("--epochs", "--max_epochs", dest="max_epochs", type=int, default=300)
     parser.add_argument(
         "--batch-size",

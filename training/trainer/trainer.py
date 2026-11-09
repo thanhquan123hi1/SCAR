@@ -259,22 +259,15 @@ def _resume_model_config(config):
     validate_model_config(config)
     normalized = dict(config)
     arch = model_architecture(normalized)
-    if arch == "nnunet":
-        normalized["ablation"] = "NNUNET"
-        normalized["architecture"] = "nnunet"
-        # Shared YAML defaults must not change resume semantics of this baseline.
-        for key in ("sspanet_gate", "sspanet_reduction", "fusion_version", "latent_dim", "use_pos_enc"):
-            normalized.pop(key, None)
-    else:
-        lightweight = arch == "lightweight_m2_plus"
-        normalized["ablation"] = "LIGHTWEIGHT_M2_PLUS" if lightweight else "M2-PLUS"
-        normalized["architecture"] = arch
-        normalized.setdefault("sspanet_gate", LEGACY_SSPA_GATE)
-        normalized.setdefault("sspanet_reduction", 16)
-        fusion = normalized.setdefault("fusion_version", SPATIAL_FUSION if lightweight else LEGACY_FUSION)
-        channels = 16 * int(64 * normalized.get("resnet", {}).get("width_factor", 1.0))
-        normalized.setdefault("latent_dim", channels if fusion == LEGACY_FUSION else min(256, channels))
-        normalized.setdefault("use_pos_enc", fusion == SPATIAL_FUSION)
+    lightweight = arch == "lightweight_m2_plus"
+    normalized["ablation"] = "LIGHTWEIGHT_M2_PLUS" if lightweight else "M2-PLUS"
+    normalized["architecture"] = arch
+    normalized.setdefault("sspanet_gate", LEGACY_SSPA_GATE)
+    normalized.setdefault("sspanet_reduction", 16)
+    fusion = normalized.setdefault("fusion_version", SPATIAL_FUSION if lightweight else LEGACY_FUSION)
+    channels = 16 * int(64 * normalized.get("resnet", {}).get("width_factor", 1.0))
+    normalized.setdefault("latent_dim", channels if fusion == LEGACY_FUSION else min(256, channels))
+    normalized.setdefault("use_pos_enc", fusion == SPATIAL_FUSION)
     return normalized
 
 

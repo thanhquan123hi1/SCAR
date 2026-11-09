@@ -1,19 +1,16 @@
-"""M2-Plus & nnU-Net baseline construction and compatibility with checkpoint metadata."""
+"""M2-Plus construction and compatibility with checkpoint metadata."""
 from __future__ import annotations
 
 from training.models.m2_plus_net import (
     M2PlusNet, LightweightM2PlusNet, get_config, get_testing,
     get_lightweight_config, get_lightweight_testing,
 )
-from training.models.nnunet import NNUNet2D
 from training.models.modules.sspanet import LEGACY_SSPA_GATE, SSPA_GATE_MODES
 from training.models.modules.m2_plus import LEGACY_FUSION, SPATIAL_FUSION, FUSION_VERSIONS
 
 
 def model_architecture(config):
     architecture = str(config.get("architecture", "m2_plus")).lower().replace("-", "_")
-    if architecture in {"nnunet", "nn_unet"}:
-        return "nnunet"
     if (architecture in {"lightweight_m2_plus", "lightweight"}
             or str(config.get("ablation", "")).upper() in {"LIGHTWEIGHT_M2_PLUS", "LIGHTWEIGHT"}):
         return "lightweight_m2_plus"
@@ -23,13 +20,8 @@ def model_architecture(config):
 def validate_model_config(config):
     """Reject retired architectures before loading weights or modifying a run."""
     architecture = str(config.get("architecture", "m2_plus")).lower().replace("-", "_")
-    if architecture in {"nnunet", "nn_unet"}:
-        ablation = str(config.get("ablation", "NNUNET")).upper()
-        if ablation != "NNUNET":
-            raise ValueError(f"nnU-Net requires ablation 'NNUNET'; received {ablation!r}")
-        return
     if architecture not in {"m2_plus", "m2plus", "cmspa_net", "lightweight_m2_plus", "lightweight"}:
-        raise ValueError(f"Only M2-Plus and nnU-Net are supported; received architecture {architecture!r}")
+        raise ValueError(f"Only M2-Plus is supported; received architecture {architecture!r}")
     # cmspa_net was shared by several architectures. Its ablation must identify
     # M2-Plus explicitly rather than silently interpreting an old model as M2-Plus.
     if architecture == "cmspa_net" and "ablation" not in config:
@@ -51,8 +43,6 @@ def validate_model_config(config):
 def checkpoint_model_config(config, state_dict):
     """Recover omitted fusion metadata from saved tensors, without changing weights."""
     validate_model_config(config)
-    if model_architecture(config) == "nnunet":
-        return dict(config)
     resolved = dict(config)
     prefix = "cross_attention." if model_architecture(config) == "lightweight_m2_plus" else "cross_fusion."
     projection = state_dict.get(prefix + "proj_in.0.weight")
@@ -81,12 +71,12 @@ def model_from_config(config, **kwargs):
         selected["ablation"] = kwargs["ablation"]
     validate_model_config(selected)
     architecture = model_architecture(selected)
-    cls = {"nnunet": NNUNet2D, "lightweight_m2_plus": LightweightM2PlusNet, "m2_plus": M2PlusNet}[architecture]
+    cls = {"lightweight_m2_plus": LightweightM2PlusNet, "m2_plus": M2PlusNet}[architecture]
     return cls(config=selected, **kwargs)
 
 
 def build_model(model_name="m2_plus", **kwargs):
-    """Build M2-Plus or nnU-Net; cmspa_net is accepted only with explicit M2-Plus metadata."""
+    """Build M2-Plus; cmspa_net is accepted only with explicit M2-Plus metadata."""
     config = kwargs.get("config", {})
     selected = dict(config)
     selected["architecture"] = model_name
@@ -103,6 +93,6 @@ def build_model(model_name="m2_plus", **kwargs):
     return model_from_config(selected, **kwargs)
 
 
-__all__ = ["M2PlusNet", "LightweightM2PlusNet", "NNUNet2D", "get_config", "get_testing", "build_model",
+__all__ = ["M2PlusNet", "LightweightM2PlusNet", "get_config", "get_testing", "build_model",
            "get_lightweight_config", "get_lightweight_testing", "model_from_config",
            "model_architecture", "checkpoint_model_config", "validate_model_config"]

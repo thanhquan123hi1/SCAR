@@ -162,14 +162,6 @@ def test_invalid_gate_is_rejected_before_loading_weights():
         model_from_config(config)
 
 
-def test_shared_sspanet_default_does_not_change_nnunet_resume_metadata():
-    config = {"architecture": "nnunet", "ablation": "NNUNET", "num_classes": 4}
-    with_shared_default = config | {"sspanet_gate": DEFAULT_SSPA_GATE,
-                                   "fusion_version": "spatial_v2", "latent_dim": 256,
-                                   "sspanet_reduction": 16, "use_pos_enc": True}
-    assert _configs_equal(_resume_model_config(config), _resume_model_config(with_shared_default))
-
-
 def test_optimized_attribute_inspection_keeps_architecture_and_optimizer_parameters():
     block = SSPANet_Block(32, gate_mode="optimized").double().eval()
     optimizer = torch.optim.AdamW(block.parameters())

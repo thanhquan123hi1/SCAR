@@ -12,7 +12,6 @@ class RunLayoutTests(unittest.TestCase):
             ('M2-Plus', 1234, 'm2plus_seed1234.pt'),
             ('M2-Plus', 1098, 'm2plus_seed1098.pt'),
             ('Lightweight-M2-Plus', 1234, 'lightweightm2plus_seed1234.pt'),
-            ('nnU-Net', 1024, 'nnunet_seed1024.pt'),
             ('Testing-Small', 1234, 'testingsmall_seed1234.pt'),
         ):
             with self.subTest(model=model, seed=seed):
@@ -20,7 +19,7 @@ class RunLayoutTests(unittest.TestCase):
                 self.assertTrue(is_final_checkpoint(Path('checkpoints') / expected, model, seed))
         self.assertFalse(is_final_checkpoint('best.pt', 'M2-Plus', 1234))
         self.assertFalse(is_final_checkpoint('m2plus_seed1098.pt', 'M2-Plus', 1234))
-        self.assertFalse(is_final_checkpoint('nnunet_seed1234.pt', 'M2-Plus', 1234))
+        self.assertFalse(is_final_checkpoint('lightweightm2plus_seed1234.pt', 'M2-Plus', 1234))
         self.assertTrue(is_final_checkpoint('last.pt', 'M2-Plus', 1234))
         self.assertTrue(is_final_checkpoint('last.pth', 'M2-Plus', 1234))
         with self.assertRaises(ValueError):

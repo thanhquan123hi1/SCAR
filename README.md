@@ -1,6 +1,6 @@
 # SCAR — M2-Plus
 
-Phân đoạn cơ tim đa phương thức từ bSSFP/CINE, LGE/PSIR và T2w đã căn chỉnh. Pipeline hỗ trợ **M2-Plus**, **Lightweight M2-Plus** và baseline nnU-Net cho train, resume và đánh giá volume.
+Phân đoạn cơ tim đa phương thức từ bSSFP/CINE, LGE/PSIR và T2w đã căn chỉnh. Pipeline hỗ trợ **M2-Plus** và **Lightweight M2-Plus** cho train, resume và đánh giá volume.
 
 ## Kiến trúc và nhãn
 
@@ -108,7 +108,7 @@ outputs/runs/M2-Plus_seed1234_<timestamp>/
 
 Mặc định no-val chỉ lưu `m2plus_seed1234.pt` sau mỗi epoch; không chọn best hoặc early stopping. Với `--with-val`, `best.pt` chọn bằng trung bình patient-mean Dice scar và edema-inclusive trên **validation volumes**. Early stopping dùng cùng điểm; `patience: 0` tắt early stopping. `m2plus_seed1234.pt` giữ optimizer, scheduler, scaler và RNG.
 
-Tên checkpoint cuối theo `<model>_seed<seed>.pt`: `M2-Plus` → `m2plus_seed1234.pt`, `Lightweight-M2-Plus` → `lightweightm2plus_seed1234.pt`, `nnU-Net` → `nnunet_seed1234.pt` (ví dụ seed 1234). File này cũng là điểm khôi phục sau mỗi epoch; metadata xác định run đã hoàn thành ngân sách hay chưa. CLI vẫn nhận tên cũ `last.pt`/`last.pth` theo các điều kiện resume/evaluate hiện có.
+Tên checkpoint cuối theo `<model>_seed<seed>.pt`: `M2-Plus` → `m2plus_seed1234.pt`, `Lightweight-M2-Plus` → `lightweightm2plus_seed1234.pt` (ví dụ seed 1234). File này cũng là điểm khôi phục sau mỗi epoch; metadata xác định run đã hoàn thành ngân sách hay chưa. CLI vẫn nhận tên cũ `last.pt`/`last.pth` theo các điều kiện resume/evaluate hiện có.
 
 ```powershell
 python train.py --data-root E:/STUDY/DATASET/MyoPS380/Processed_data --run-id m2_plus_seed1234 --resume outputs/runs/m2_plus_seed1234/checkpoints/m2plus_seed1234.pt
