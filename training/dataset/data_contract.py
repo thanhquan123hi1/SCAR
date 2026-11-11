@@ -23,19 +23,22 @@ OFFICIAL_TEST_IDS_SHA256 = "3237b31411833cedcb3ecd86d36edae356bd3f880d3fcfd91506
 
 
 def lock_benchmark_data(data_root, list_dir, label_order, dataset_id="myops380", no_val=False):
-    """Validate MyoPS380 cohort and fingerprint cache bytes without changing data.
+    """Validate the selected cohort and fingerprint cache bytes without changing data.
 
     Persist the returned record in the run/checkpoint. Resume/evaluation compare
     this record, so changing files in place cannot silently change a benchmark.
     """
+    from training.dataset.benchmark_profiles import MYOPSPP_DATASET
+    if dataset_id == MYOPSPP_DATASET:
+        if not no_val:
+            raise ValueError("MyoPS++ predicted ROI requires no-val 64/16 training")
+        from training.dataset.myopspp_contract import lock_myopspp_data
+        return lock_myopspp_data(data_root, list_dir, label_order)
     if no_val:
         if dataset_id != "myops380":
-            raise ValueError("--no-val currently supports only myops380")
+            raise ValueError(f"Unsupported no-val dataset: {dataset_id}")
         from training.dataset.no_val import lock_no_val_data
         return lock_no_val_data(data_root, list_dir, label_order)
-    from training.dataset.benchmark_profiles import ROI_PROFILES
-    if dataset_id == "myopspp_bc80" or dataset_id in ROI_PROFILES:
-        return _lock_myopspp_data(data_root, list_dir, label_order, dataset_id)
     if dataset_id != "myops380":
         raise ValueError(f"Unknown benchmark dataset: {dataset_id}")
     if label_order == "auto":
@@ -79,67 +82,6 @@ def lock_benchmark_data(data_root, list_dir, label_order, dataset_id="myops380",
             "canonical_class_names": list(CLASS_NAMES), "cache_sha256": digest.hexdigest(),
             "cache_files": len(files), "official_test_ids_sha256": fixed_hash,
             "patient_counts": {s: len(ids) for s, ids in patients.items()}}
-
-
-def _lock_myopspp_data(data_root, list_dir, label_order, dataset_id="myopspp_bc80"):
-    from training.dataset.benchmark_profiles import fixed_myopspp_splits, MYOPSPP_IDS, ROI_PROFILES, fixed_roi_splits
-
-    if label_order == "auto" or resolve_label_order(label_order) != CANONICAL_LABEL_ORDER:
-        raise ValueError(f"{dataset_id} requires explicit canonical labels")
-    root = Path(data_root)
-    metadata = root / "dataset_metadata.json"
-    info = json.loads(metadata.read_text(encoding="utf-8"))
-    if info.get("dataset_id") != dataset_id or info.get("label_order") != CANONICAL_LABEL_ORDER:
-        raise ValueError("Cache belongs to a different dataset/profile or label convention")
-    roi = ROI_PROFILES.get(dataset_id)
-    normalization = "export_percentile_preserved" if roi else "percentile"
-    if info.get("normalization") != normalization or info.get("spacing_unit") != "mm":
-        raise ValueError(f"{dataset_id} requires {normalization} normalization and mm geometry")
-    fixed = fixed_roi_splits(dataset_id) if roi else fixed_myopspp_splits()
-    cohort = set(c for cases in fixed.values() for c in cases) if roi else MYOPSPP_IDS
-    if info.get("patients") != fixed or set(info.get("case_shapes", {})) != cohort:
-        raise ValueError("Cache cohort/splits differ from the fixed MyoPS++ benchmark")
-    if roi:
-        from training.metrics.surface_distance import benchmark_protocol_matches
-        if not benchmark_protocol_matches(info.get("benchmark_protocol"), dataset_id):
-            raise ValueError("ROI cache preprocessing/evaluation protocol differs from the selected profile")
-        for case, shape in info["case_shapes"].items():
-            if len(shape) != 3 or shape[:2] != [128, 128] or type(shape[2]) is not int or shape[2] <= 0:
-                raise ValueError(f"{case}: ROI requires 128x128xD")
-    splits = {s: read_split_names(list_dir, s) for s in ("train", "val", "val_vol", "test_vol")}
-    patients = validate_patient_splits({s: splits[s] for s in ("train", "val", "test_vol")})
-    for split in ("train", "val"):
-        expected = set()
-        for case in fixed[split]:
-            shape = info["case_shapes"][case]
-            if len(shape) != 3 or any(type(v) is not int or v <= 0 for v in shape):
-                raise ValueError(f"Invalid native shape for {case}")
-            expected.update(f"{case}_slice{i:03d}" for i in range(shape[2]))
-        if set(splits[split]) != expected:
-            raise ValueError(f"Incomplete or changed {split} slices for the fixed MyoPS++ patients")
-    if set(splits["val_vol"]) != set(fixed["val"]) or set(splits["test_vol"]) != set(fixed["test_vol"]):
-        raise ValueError("Validation/test patients differ from the fixed MyoPS++ manifests")
-    files = [metadata]
-    for modality in ("bSSFP", "LGE", "T2w"):
-        for folder, suffix, expected in (
-            ("train_npz", ".npz", set(splits["train"] + splits["val"])),
-            ("val_vol_h5", ".npy.h5", set(fixed["val"])),
-            ("test_vol_h5", ".npy.h5", set(fixed["test_vol"])),
-        ):
-            paths = list((root / modality / folder).glob("*" + suffix))
-            if {p.name[:-len(suffix)] for p in paths} != expected:
-                raise ValueError(f"Cache inventory differs from MyoPS++ manifests: {modality}/{folder}")
-            files.extend(paths)
-    digest = hashlib.sha256()
-    for path in sorted(files, key=lambda p: p.relative_to(root).as_posix()):
-        with path.open("rb") as stream:
-            file_hash = hashlib.file_digest(stream, "sha256").hexdigest()
-        digest.update(f"{path.relative_to(root).as_posix()}\0{file_hash}\n".encode())
-    return {"schema_version": 1, "dataset_id": dataset_id, "source_label_order": CANONICAL_LABEL_ORDER,
-            "canonical_class_names": list(CLASS_NAMES), "cache_sha256": digest.hexdigest(),
-            "cache_files": len(files), "patient_counts": {s: len(ids) for s, ids in patients.items()},
-            "split_ids_sha256": {s: hashlib.sha256(("\n".join(sorted(names)) + "\n").encode()).hexdigest()
-                                 for s, names in splits.items()}}
 
 
 def resolve_label_order(value):
@@ -225,13 +167,19 @@ def _validate_volume_validation(list_dir, validation_names):
     return volumes
 
 
-def ensure_patient_splits(list_dir, val_fraction=0.2, seed=42, output_dir=None, no_val=False):
+def ensure_patient_splits(list_dir, val_fraction=0.2, seed=42, output_dir=None, no_val=False, dataset_id="myops380"):
     """Return manifests with train/val NPZ IDs and unchanged test IDs.
 
     Hold out whole training patients only when val.txt does not already exist.
     A complete output directory is validated and reused, making resume stable.
     Use an experiment output_dir to keep original dataset manifests untouched.
     """
+    from training.dataset.benchmark_profiles import MYOPSPP_DATASET
+    if dataset_id == MYOPSPP_DATASET:
+        if not no_val:
+            raise ValueError("MyoPS++ predicted ROI requires no-val 64/16 training")
+        from training.dataset.myopspp_contract import ensure_myopspp_splits
+        return ensure_myopspp_splits(list_dir, output_dir)
     if no_val:
         from training.dataset.no_val import ensure_no_val_splits
         return ensure_no_val_splits(list_dir, output_dir)

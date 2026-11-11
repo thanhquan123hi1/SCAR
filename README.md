@@ -37,18 +37,29 @@ Chuẩn bị dataset và pretrained weights riêng; Git không chứa chúng. Hu
 Xem [MYOPS380_NO_VAL.md](MYOPS380_NO_VAL.md); cấu hình riêng
 `training/config/experiments/myops380_no_val.yaml` vẫn dùng được.
 Evaluator từ chối checkpoint chưa hoàn thành số epoch đã định trước.
-Muốn dùng protocol phát triển 243/61/76, thêm `--with-val`; MyoPS++/ROI giữ validation theo profile riêng.
+Muốn dùng protocol phát triển 243/61/76, thêm `--with-val`; MyoPS++ dự đoán ROI dùng 64 train / 16 test, không validation.
 
 | Profile | Train / val / test (bệnh nhân) | Khoảng cách metric |
 |---|---|---|
 | `myops380` — mặc định | 304 / 0 / 76 | voxel |
 | `myops380 --with-val` | 243 / 61 / 76 với bộ chia phát triển | voxel |
-| `myopspp_bc80` | 51 / 13 / 16 | mm, native grid |
-| `myopspp_roi128_76` | 48 / 13 / 15 | mm, ROI grid |
-| `myopspp_roi128_80` | 51 / 13 / 16 | mm, ROI grid |
-| `myopspp_roi160_80` | 51 / 13 / 16 | mm, ROI grid |
+| `myopspp_unet2d_roi128_1mm` | 64 / 0 / 16 | mm, predicted ROI grid |
 
-MyoPS++ và ROI dùng patient split cố định đã version-control. MyoPS380 khóa 76 ca test trong [test_vol.txt](preprocessing/splits/test_vol.txt). Không chia lát cắt của cùng bệnh nhân sang nhiều tập.
+MyoPS++ dùng split 64/16 cố định từ export U-Net2D, đã version-control; nguồn `D:/NCKH/Dataset/MyoPSpp_UNet2D_ROI128_1mm`. MyoPS380 khóa 76 ca test trong [test_vol.txt](preprocessing/splits/test_vol.txt). Không chia lát cắt của cùng bệnh nhân sang nhiều tập.
+
+Chỉ hai dataset ID được hỗ trợ: `myops380` và `myopspp_unet2d_roi128_1mm`. Bốn profile MyoPS++ native/oracle cũ đã được gỡ khỏi CLI và cấu hình.
+
+| Dữ liệu | MyoPS380 | MyoPS++ ROI128 1 mm |
+|---|---|---|
+| Lát train / volume test | 1.972 / 76 | 296 / 16 |
+| Cache khi train | Ba file `.npz` mỗi lát, theo thứ tự bSSFP/LGE/T2w | Cùng định dạng; C0/LGE/T2 nguồn tương ứng bSSFP/LGE/T2w |
+| Cache khi test | Ba file `.npy.h5` mỗi bệnh nhân, mảng `(H,W,D)` | Cùng định dạng; kèm spacing và affine ROI |
+| Nhãn trong cache đang dùng | Legacy, `2=scar`, `3=edema`; loader đổi sang canonical | Canonical, `2=edema`, `3=scar`; đã chuyển khi đóng gói |
+| Chuẩn hóa ảnh | Cache đã chuẩn hóa về [0,1] | Giữ nguyên p1/p99 [0,1] của export |
+
+Cả hai dùng chung `MyopsDataset` và augmentation. Loader kiểm tra ảnh/mask khớp giữa ba modality và khoảng giá trị ảnh trước augmentation. Model nhận ba tensor ảnh `(B,1,H,W)` và một mask `(B,H,W)` với nhãn canonical. Cache MyoPS380 chính thức thiếu spacing/affine; metric khoảng cách dùng voxel. MyoPS++ giữ spacing XY 1 mm, Z gốc và affine của ROI.
+
+Đường dẫn MyoPS380 mặc định trong YAML là `E:/STUDY/DATASET/MyoPS380/Processed_data`. Bản dữ liệu đã kiểm tra trên máy này nằm tại `D:/NCKH/Dataset/MyoPS380/Processed_data`; truyền `--data-root D:/NCKH/Dataset/MyoPS380/Processed_data` nếu dùng bản này. Đường dẫn trong các lệnh bên dưới cần khớp nơi lưu cache thực tế.
 
 Chạy nhiều seed với **cùng manifest**: mặc định no-val chỉ dùng `train.txt`, `test_vol.txt`; `--with-val` cần thêm `val.txt`, `val_vol.txt`. `--seed` thay đổi khởi tạo, augmentation và thứ tự batch. Với validation, tạo manifest đầy đủ trước thí nghiệm nhiều seed để khóa cùng bệnh nhân.
 
@@ -61,7 +72,7 @@ python preprocessing/verify.py --no-val --data-root E:/STUDY/DATASET/MyoPS380/Pr
 
 Manifest đầy đủ được dùng lại, không ghi đè khi đổi seed. Cache MyoPS380 chính thức thiếu metadata dùng `legacy` (`2=scar, 3=edema`); cache SCAR mới dùng `canonical`. Pipeline chuyển nhãn về canonical và kiểm tra metadata; `auto` không đoán khi thiếu thông tin.
 
-Packaging NIfTI đã căn chỉnh dùng `preprocessing/process_and_save.py`; script từ chối ghi đè cache có dữ liệu và không thực hiện đăng ký ảnh. MyoPS380 dùng clip(0,255)/255; MyoPS++ native dùng percentile p1/p99 trên volume. Xem [MyoPS++](preprocessing/MYOPSPP.md) và [ROI](docs/myopspp_roi_training.md) cho lệnh chuẩn bị dữ liệu và giới hạn của từng profile.
+Packaging NIfTI đã căn chỉnh dùng `preprocessing/process_and_save.py`; script từ chối ghi đè cache có dữ liệu và không thực hiện đăng ký ảnh. Khi đóng gói NIfTI MyoPS380 bằng mặc định `unit255`, ảnh được clip(0,255)/255. MyoPS++ ROI giữ nguyên ảnh float32 [0,1] đã chuẩn hóa p1/p99 trong export; adapter không crop, resize hay chuẩn hóa lần hai. Nhãn nguồn MyoPS++ được đổi một lần: `0/500/600 → 0`, `200 → 1`, `1220 → 2`, `2221 → 3`. Xem [MyoPS++](preprocessing/MYOPSPP.md) và [ROI](docs/myopspp_roi_training.md) cho lệnh chuẩn bị dữ liệu và giới hạn của profile.
 
 ## Huấn luyện
 
@@ -81,16 +92,32 @@ python train.py --config training/config/models/m2_plus.yaml --data-root E:/STUD
 
 Pretrained encoder là tùy chọn: thêm `--pretrained training/pretrained/R50-ViT-B_16.npz`. Mặc định batch vật lý 16, accumulation 1. GPU ít VRAM có thể giảm `--batch-size` hoặc bật `--gradient-checkpointing`; batch Dice yêu cầu accumulation 1. Nếu cần accumulation, chọn rõ `--negative-slice-handling none` để dùng per-image Dice; đây là mục tiêu khác recipe I-MMSeg. Batch hiệu dụng giống nhau không bảo đảm batch Dice/BatchNorm tương đương.
 
-Các profile khác giữ cùng M2-Plus:
+MyoPS++ predicted ROI dùng cùng M2-Plus (hoặc model YAML Lightweight). Tạo cache một lần khi chưa có:
 
 ```powershell
-python train.py --dataset myopspp_bc80 --run-id m2_plus_seed1234
-python run_all.py --dataset myopspp_roi160_80 --skip-cache --batch-size 2 --accum-steps 1 --run-id m2_plus_seed1234
+python -m preprocessing.myopspp_roi
 ```
+
+Train riêng hoặc chạy cả train và test trên cache có sẵn, dùng batch 16 và accumulation 1 mặc định:
+
+```powershell
+python train.py --dataset myopspp_unet2d_roi128_1mm --run-id myopspp_m2_plus_seed1234
+python run_all.py --dataset myopspp_unet2d_roi128_1mm --skip-cache --run-id myopspp_m2_plus_full
+```
+
+Hai lệnh trên là hai cách khởi chạy run riêng. Với GPU ít VRAM, có thể thêm `--batch-size 1 --accum-steps 1 --gradient-checkpointing`; batch 1 làm thay đổi batch Dice và thống kê BatchNorm so với batch 16. Adapter từ chối thư mục cache đã tồn tại; khi cache đã có, dùng verify hoặc train trực tiếp.
 
 Recipe train mặc định khớp phần tối ưu hóa chung của **I-MMSeg**: LR `0.0003333`, AdamW một nhóm tham số, weight decay `0.0001` cho cả kernel/bias/norm, không gradient clipping (`clip_grad: 0`). Scheduler polynomial mũ 0.9 cập nhật sau optimizer: lần cập nhật đầu vẫn giữ base LR, hai optimizer updates đầu dùng cùng base LR; LR sau update cuối là `base_lr * (1 / total_updates)^0.9`. AMP tự động và 4 workers được giữ nguyên.
 
 Loss mặc định: `0.2 CE + 0.8 Dice`. Dice gộp batch, mẫu số bình phương, smooth `1e-5`, có background, trọng số `[0.5,1,1,1]` và tổng loss lớp **chia 4** (`loss.dice_normalization: classes`), đúng I-MMSeg. `weights` giữ cách chia tổng trọng số cho thí nghiệm riêng. Hỗ trợ `--negative-slice-handling none|mask|batch`, `--no-include-background` và class weights; loss phụ AAR/scar mặc định bằng 0. AAR là edema-inclusive `{2,3}`. Khi bật loss phụ và accumulation >1, chọn `pathology_reduction: sample`. Loss protocol 4 khóa cả normalization khi resume. Optimizer/scheduler được khóa bằng `optimization_protocol`; checkpoint recipe cũ cần run mới hoặc `--init-weights`, không chuyển recipe giữa chừng bằng resume.
+
+| Cấu hình loss hiệu lực mặc định | MyoPS380 | MyoPS++ ROI128 1 mm |
+|---|---|---|
+| `pathology_reduction` | `positive` trong base YAML | `positive` trong dataset YAML |
+| `aar_weight` / `scar_weight` | 0 / 0 | 0 / 0 |
+| Loss được tối ưu | `0.2 CE + 0.8 Dice` | `0.2 CE + 0.8 Dice` |
+
+Hai dataset hiện cùng dùng `positive`. `pathology_reduction` chỉ điều khiển loss phụ AAR/scar. `positive` lấy trung bình trên các lát có vùng tương ứng; `sample` chia tổng loss của các lát đó cho toàn bộ số lát trong batch, các lát âm đóng góp 0 vào thành phần phụ. Ví dụ batch 16 có 4 lát scar, thành phần phụ scar của `sample` bằng 1/4 của `positive` trên cùng logits/GT. Khi hai trọng số phụ bằng 0, đổi reduction giữ nguyên loss và gradient trên cùng batch. Khi bật loss phụ để so sánh hai dataset, cần đặt cùng reduction và trọng số. Tham số này độc lập với nhãn legacy/canonical. `train.py` nhận `--pathology-reduction`; với `run_all.py`, đặt `loss.pathology_reduction` trong YAML. Resume yêu cầu giữ nguyên reduction của run gốc, kể cả khi trọng số phụ bằng 0.
 
 `--config testing` dùng **M2-Plus thu nhỏ**, input 32×32, để kiểm thử phần mềm; không dùng cho bảng kết quả nghiên cứu.
 
@@ -135,7 +162,7 @@ Validation, test và prediction dùng chung `predict_volume`: một forward mỗ
 Prediction NIfTI đã căn chỉnh cho checkpoint thuộc profile native:
 
 ```powershell
-python training/predict.py --checkpoint outputs/runs/m2_plus_seed1234/checkpoints/best.pt --cine /path/case_C0.nii.gz --lge /path/case_LGE.nii.gz --t2w /path/case_T2.nii.gz --normalization unit255 --output /path/prediction.nii.gz
+python training/predict.py --checkpoint outputs/runs/m2_plus_seed1234/checkpoints/m2plus_seed1234.pt --cine /path/case_C0.nii.gz --lge /path/case_LGE.nii.gz --t2w /path/case_T2.nii.gz --normalization unit255 --output /path/prediction.nii.gz
 ```
 
 Dùng normalization đúng với training. Checkpoint ROI phải dùng evaluator trên ROI cache; raw prediction từ chối chúng vì cần localizer/preprocessing riêng.
@@ -144,7 +171,7 @@ Dùng normalization đúng với training. Checkpoint ROI phải dùng evaluator
 
 - Region: normal `{1}`, edema-exclusive `{2}`, scar `{3}`, edema-inclusive `{2,3}`, myocardial ring `{1,2,3}`. Không tự gán edema-inclusive thành cột edema trong paper khác.
 - Metric trung bình theo bệnh nhân. Hai mask rỗng: metric không xác định; một mask rỗng: Dice/IoU bằng 0, distance không xác định. Báo số ca defined/undefined và trạng thái empty.
-- MyoPS380 dùng HD95/ASD trên voxel grid đơn vị, không suy diễn mm từ affine identity. MyoPS++ dùng mm. ROI là **GT-centered oracle crop**, đánh giá trên ROI grid; không đánh giá localizer hoặc khôi phục whole-image grid.
+- MyoPS380 dùng HD95/ASD trên voxel grid đơn vị, không suy diễn mm từ affine identity. MyoPS++ dùng mm. ROI lấy tâm từ **dự đoán U-Net2D**, giữ mọi bệnh nhân, kể cả ca crop mất nhãn. Đánh giá trên ROI grid; không khôi phục prediction về whole-image native grid. Đây là metric segmentation trên ROI đã xuất, không phải metric end-to-end toàn ảnh.
 - Cache bytes, nhãn, split và protocol được khóa trong checkpoint. Resume/evaluation từ chối khi không khớp. Test không dùng để tune hyperparameter/chọn model.
 - Baseline cần cùng bệnh nhân, GT/grid, region, evaluator, ngân sách train và inference. Điểm paper chỉ là tham khảo khi protocol chưa khớp; không suy ra vượt SOTA từ bảng lịch sử.
 
@@ -180,3 +207,13 @@ SCAR/
 ```
 
 `data/`, `outputs/`, `reports/` và weights không được đưa vào Git. Kết quả/checkpoint lịch sử được giữ trên máy; implementation model khác đã bỏ khỏi phiên bản repo này.
+
+## File sinh tự động và dữ liệu lịch sử
+
+`__pycache__/`, `*.pyc` và `.pytest_cache/` là cache sinh tự động, đã được Git ignore và có thể xóa khi dọn workspace. Python/pytest sẽ tạo lại khi chạy.
+
+Các thư mục `data/myopspp_bc80`, `data/myopspp_roi128_76`, `data/myopspp_roi128_80`, `data/myopspp_roi160_80` là cache lịch sử của các profile đã gỡ. Hai profile hiện tại dùng các đường dẫn riêng trong YAML; cache MyoPS++ hiện tại là `data/myopspp_unet2d_roi128_1mm/cache`. Cache lịch sử vẫn có thể cần để đối chiếu các run cũ.
+
+`preprocessing/splits/myopspp_bc80_no_val` là manifest lịch sử, ngoài hai profile được hỗ trợ. `preprocessing/myopspp_unet2d.py` và `preprocessing/myopspp_unet2d_roi192.py` phục vụ tái lập localizer/export và được các test tương ứng sử dụng. `data/processed/splits` phục vụ MyoPS380 `--with-val`. Giữ các manifest đã dùng cho checkpoint cần resume; fingerprint nguồn hiện bao gồm cả file `.py`, `.yaml`, `.txt`, `.json` trong `training/` và `preprocessing/`.
+
+`BENCHMARK_EFFICIENCY_PROTOCOL.txt` và `Bang_So_Sanh_Do_Phuc_Tap_Model.xlsx` là tài liệu benchmark riêng trên máy. Quy ước A100/FP32/0 worker trong tài liệu benchmark cần được cấu hình riêng khi đo; CLI train mặc định dùng AMP tự động và 4 worker.

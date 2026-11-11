@@ -21,7 +21,7 @@ from training.config.config_utils import (
 )
 from training.models import get_config, get_lightweight_config, model_architecture, model_from_config, validate_model_config
 from training.loss.losses import SegmentationLoss
-from training.dataset.benchmark_profiles import DATASET_IDS
+from training.dataset.benchmark_profiles import DATASET_IDS, MYOPSPP_DATASET
 from training.run_layout import RunLayout, is_final_checkpoint
 from training.trainer.trainer import Trainer, load_checkpoint, seed_everything
 
@@ -202,8 +202,10 @@ def parse_args(argv=None):
         if pre_args.pretrained is not None or pre_args.init_weights is not None:
             parser.error("--resume, --pretrained and --init-weights are mutually exclusive on the CLI")
         args.pretrained = args.init_weights = None
-    if args.no_val and (args.dataset_id != "myops380" or args.patience != 0 or args.min_delta != 0):
-        parser.error("--no-val requires myops380, patience=0 and min_delta=0")
+    if args.no_val and (args.patience != 0 or args.min_delta != 0):
+        parser.error("--no-val requires patience=0 and min_delta=0")
+    if args.dataset_id == MYOPSPP_DATASET and (not args.no_val or args.label_order != "canonical"):
+        parser.error("MyoPS++ predicted ROI requires --no-val and canonical labels")
     if args.save_every != 0:
         parser.error("save_every must be 0: save final checkpoint, plus best.pt with validation")
     for key in ("max_epochs", "batch_size", "accum_steps", "img_size", "cpu_threads", "log_every"):

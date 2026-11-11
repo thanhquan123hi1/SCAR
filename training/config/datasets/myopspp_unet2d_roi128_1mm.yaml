@@ -1,0 +1,14 @@
+# Predicted U-Net2D ROI export: fixed 64 train / 16 test; no validation.
+train:
+  no_val: true
+  patience: 0
+  min_delta: 0.0
+data:
+  dataset_id: myopspp_unet2d_roi128_1mm
+  data_root: data/myopspp_unet2d_roi128_1mm/cache
+  list_dir: data/myopspp_unet2d_roi128_1mm/cache/lists
+  label_order: canonical
+loss:
+  pathology_reduction: positive
+outputs:
+  run_root: outputs/myopspp_unet2d_roi128_1mm/runs

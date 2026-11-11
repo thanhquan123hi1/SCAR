@@ -69,9 +69,10 @@ python run_all.py --config training/config/experiments/myops380_no_val.yaml --sk
 Both base.yaml and this YAML enable `train.no_val: true` for MyoPS380. Model
 configs inherit it unless they explicitly override it (the software `testing`
 config opts into validation). `--with-val` enables the development split instead.
-Only MyoPS380 supports no-val. `patience` and `min_delta` must be zero; validation
-fraction is ignored. Requesting `val_vol` fails. Other dataset profiles retain
-their validation split.
+MyoPS380 supports both no-val and validation development runs. The current
+MyoPS++ predicted ROI profile requires no-val with its fixed 64/16 split.
+In no-val mode, `patience` and `min_delta` must be zero; validation fraction is
+ignored and requesting `val_vol` fails.
 
 Adapt physical batch size to GPU memory *before* the final run; the batch-Dice
 recipe requires accumulation=1. Effective batch size alone does not make

@@ -23,42 +23,30 @@ BENCHMARK_PROTOCOL = {
 
 
 def protocol_for_dataset(dataset_id="myops380"):
-    from training.dataset.benchmark_profiles import ROI_PROFILES
+    from training.dataset.benchmark_profiles import MYOPSPP_DATASET, MYOPSPP_LOCALIZATION
     if dataset_id == "myops380":
         return BENCHMARK_PROTOCOL
-    if dataset_id in ROI_PROFILES:
-        profile = ROI_PROFILES[dataset_id]
-        return dict(BENCHMARK_PROTOCOL,
-                id=f"{dataset_id}_roi_mm_v2", distance_unit="mm",
-                voxelspacing="preprocessed ROI NIfTI spacing in mm, orthogonal grid",
-                evaluation_grid="preprocessed_roi", localization="oracle_gt_bbox",
-                crop_mm=profile["crop_mm"], model_hw=[128, 128],
-                spacing_xy_mm=profile["spacing_xy"])
-    if dataset_id != "myopspp_bc80":
+    if dataset_id != MYOPSPP_DATASET:
         raise ValueError(f"Unknown metric dataset profile: {dataset_id}")
-    return dict(BENCHMARK_PROTOCOL,
-            id="myopspp_bc80_mm_v2", distance_unit="mm",
-            voxelspacing="native NIfTI spacing in mm, orthogonal grid")
+    result = dict(BENCHMARK_PROTOCOL,
+                  id=f"{dataset_id}_predicted_roi_mm_v1", distance_unit="mm",
+                  voxelspacing="preprocessed ROI NIfTI spacing in mm, orthogonal grid",
+                  evaluation_grid="preprocessed_roi", localization=MYOPSPP_LOCALIZATION,
+                  crop_mm=128, model_hw=[128, 128], spacing_xy_mm=1.0)
+    result.pop("selection_metric")
+    return result
 
 
 def benchmark_protocol_matches(saved_protocol, dataset_id="myops380", *, allow_legacy_selection=True):
-    """Keep old caches/evaluation readable, but never resume old selection state.
-
-    Per-region metrics and data geometry are unchanged. New runs select on
-    scar/inclusive-edema Dice; old runs selected on scar/exclusive-edema Dice.
-    """
+    """Retain MyoPS380 legacy compatibility; predicted ROI has its own strict protocol."""
     current = protocol_for_dataset(dataset_id)
     if saved_protocol == current:
         return True
-    if not allow_legacy_selection:
+    if not allow_legacy_selection or dataset_id != "myops380":
         return False
-    old_id = ("myops380_voxel_v2" if dataset_id == "myops380" else
-              f"{dataset_id}_roi_mm_v1" if "evaluation_grid" in current else "myopspp_bc80_mm_v1")
-    legacy = dict(current, id=old_id, selection_metric="avg_pathology_dice")
+    legacy = dict(current, id="myops380_voxel_v2", selection_metric="avg_pathology_dice")
     if saved_protocol == legacy:
         return True
-    if dataset_id != "myops380":
-        return False
     legacy = dict(legacy, id="myops380_voxel_v1",
                   official_reference="I_MMSeg@90f46c4eb72924509895fcda6bc6a3b8c3316e66/utils.py:171-182",
                   official_empty_policy="if either empty: Dice=1 when pred<200 and target<=200, else 0; HD95=0")

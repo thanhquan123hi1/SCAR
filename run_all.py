@@ -12,6 +12,7 @@ import yaml
 
 from training.config.config_utils import load_merged_config, resolve_training_list_dir
 from training.run_layout import final_checkpoint_name
+from training.dataset.benchmark_profiles import MYOPSPP_DATASET, MYOPSPP_SOURCE, ROI_PROFILES
 
 ROOT = Path(__file__).resolve().parent
 LOGGER = logging.getLogger("scar.pipeline")
@@ -74,9 +75,11 @@ def main(argv=None) -> Path:
     no_val = args.no_val if args.no_val is not None else config.get("train", {}).get("no_val", False)
     if not isinstance(no_val, bool):
         parser.error("train.no_val must be a boolean")
-    if no_val and (args.dataset != "myops380" or args.eval_split != "test_vol"
+    if no_val and (args.eval_split != "test_vol"
                    or config["train"].get("patience", 0) or config["train"].get("min_delta", 0)):
-        parser.error("--no-val requires myops380, test_vol, patience=0 and min_delta=0")
+        parser.error("--no-val requires test_vol, patience=0 and min_delta=0")
+    if args.dataset == MYOPSPP_DATASET and not no_val:
+        parser.error("MyoPS++ predicted ROI requires --no-val 64/16 training")
     mode_flags = ["--no-val"] if no_val else []
     # Share CLI > merged YAML runtime settings between training and evaluation.
     for name in ("device", "amp", "cpu_threads"):
@@ -88,10 +91,7 @@ def main(argv=None) -> Path:
     list_default = (data_root / "lists" if args.dataset != "myops380" and args.data_root is not None
                     else config["data"]["list_dir"])
     list_dir = project_path(resolve_training_list_dir(args.list_dir or list_default, args.dataset, no_val))
-    raw_default = "E:/STUDY/DATASET/Myo_train" if args.dataset == "myopspp_bc80" else prep_config["data"]["raw_root"]
-    from training.dataset.benchmark_profiles import ROI_PROFILES
-    if args.dataset in ROI_PROFILES:
-        raw_default = ROOT.parent / "MyoPSpp_preprocessed_2026-10-03" / ROI_PROFILES[args.dataset]["export_id"]
+    raw_default = MYOPSPP_SOURCE if args.dataset == MYOPSPP_DATASET else prep_config["data"]["raw_root"]
     raw_root = project_path(args.raw_root or raw_default)
     test_list = project_path(args.test_list)
     run_root = project_path(args.run_root or config["outputs"]["run_root"])
@@ -125,15 +125,7 @@ def main(argv=None) -> Path:
             parser.error("New ROI caches package manifests at --data-root/lists")
         if not cache_present:
             run_command([python, "-m", "preprocessing.myopspp_roi", "--dataset", args.dataset,
-                         "--src-path", str(raw_root), "--dst-path", str(data_root)], "1/4: Adapt exported cardiac ROIs")
-    elif args.dataset == "myopspp_bc80":
-        if args.label_order not in (None, "canonical") or args.normalization not in (None, "percentile"):
-            parser.error("myopspp_bc80 requires canonical cache labels and percentile normalization")
-        if list_dir != data_root / "lists" and not cache_present:
-            parser.error("New MyoPS++ caches package manifests at --data-root/lists")
-        if not cache_present:
-            run_command([python, "-m", "preprocessing.myopspp", "--src-path", str(raw_root),
-                         "--dst-path", str(data_root)], "1/4: Package fixed MyoPS++ B/C benchmark")
+                         "--src-path", str(raw_root), "--dst-path", str(data_root)], "1/4: Package predicted U-Net2D ROIs with fixed 64/16 split")
     elif cache_present:
         run_command([python, "preprocessing/build_splits.py", "--data-root", str(data_root),
                      "--list-dir", str(list_dir), "--test-list", str(test_list),

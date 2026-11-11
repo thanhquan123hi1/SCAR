@@ -1,0 +1,39 @@
+================================================================================
+BẢN NGUYÊN TẮC BENCHMARK HIỆU NĂNG TÍNH TOÁN & ĐỘ GỌN NHẸ
+(Áp dụng đối sánh: SCAR, TransUNet, SAMed, mmFormer, IMS2Trans, MyoPS-Net, I-MMSeg)
+================================================================================
+
+1. PHẦN CỨNG BẮT BUỘC:
+   - Dùng duy nhất 01 GPU NVIDIA A100. Không chạy tác vụ ngầm khác lúc đo.
+
+2. ĐỘ CHÍNH XÁC (PRECISION):
+   - Chạy thuần FP32 (float32).
+   - Tắt hoàn toàn AMP (autocast / GradScaler), cờ lệnh: --amp none.
+
+3. DATALOADER:
+   - Cố định num_workers = 0 trên tất cả các repo.
+   - Bật pin_memory = True.
+
+4. DỮ LIỆU & NGÂN SÁCH TRAIN:
+   - Dữ liệu: MyoPS380 (input 3x128x128, 304 ca train / 76 ca test).
+   - Ngân sách: Đúng 300 epochs, không validation xen giữa.
+   - Batch size train: Cố định 16 (124 steps/epoch).
+   - Giữ nguyên hàm Loss gốc của từng model.
+
+5. QUY CHUẨN ĐO 7 CHỈ SỐ:
+   [Độ phức tạp]
+   - Params (M): Đếm Total và Trainable (SAMed ghi: 93.70 (4.21)*).
+   - FLOPs (G): Đo lý thuyết trên tensor (1, 3, 128, 128) ở chế độ FP32.
+
+   [Suy luận - Inference (Batch = 1)]
+   - Latency (ms/slice): Warm-up 30 lần, đo trung bình 100 lần, có cuda.synchronize().
+   - Peak VRAM (MB): Đọc mức RAM GPU đỉnh khi forward 1 lát cắt.
+
+   [Huấn luyện - Training (Batch = 16)]
+   - Time / Epoch (s): Lấy trung bình từ epoch 6 đến 300 (bỏ 5 epoch đầu).
+   - Total Time (hours): Tổng thời gian chạy xong 300 epochs.
+   - Peak VRAM (GB): Đỉnh RAM GPU lớn nhất đo được khi train.
+
+6. XUẤT NHẬT KÝ:
+   - Mỗi repo xuất file JSON tóm tắt: outputs/runs/<tên_model>/efficiency_metrics.json
+================================================================================

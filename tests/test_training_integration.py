@@ -11,7 +11,7 @@ from training.models import M2PlusNet, build_model, get_testing, model_from_conf
 from training.train import _load_initial_weights, parse_args
 
 
-@pytest.mark.parametrize("dataset", ["myops380", "myopspp_bc80"])
+@pytest.mark.parametrize("dataset", ["myops380", "myopspp_unet2d_roi128_1mm"])
 def test_loss_yaml_and_cli_use_the_same_settings(tmp_path, dataset):
     loss = dict(scar_weight=0.2, aar_weight=0.3,
                 dice_class_weights=[0, 1, 2, 2], ce_class_weights=[0.2, 1, 2, 2])

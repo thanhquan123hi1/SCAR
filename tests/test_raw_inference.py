@@ -66,7 +66,7 @@ def test_raw_nifti_prediction_loads_legacy_m2_plus_and_preserves_geometry(tmp_pa
     config = model.config.to_dict() | {"architecture": "cmspa_net", "ablation": "M2-Plus"}
     checkpoint = tmp_path / "legacy_m2_plus.pt"
     torch.save(dict(format_version=1, class_names=CLASS_NAMES, model=model.state_dict(),
-                    model_config=config, args=dict(img_size=32, dataset_id="myopspp_bc80"),
+                    model_config=config, args=dict(img_size=32, dataset_id="myops380"),
                     data_provenance=dict(metadata=dict(normalization="unit255"))), checkpoint)
     affine = np.diag([1.5, 2.0, 7.0, 1.0])
     arrays, paths = [], []
@@ -96,7 +96,7 @@ def test_raw_nifti_prediction_loads_legacy_m2_plus_and_preserves_geometry(tmp_pa
 
     roi_output = tmp_path / "roi_prediction.nii.gz"
     payload = torch.load(checkpoint, weights_only=True)
-    payload["args"]["dataset_id"] = "myopspp_roi128_80"
+    payload["args"]["dataset_id"] = "myopspp_unet2d_roi128_1mm"
     torch.save(payload, checkpoint)
     argv[argv.index("--output") + 1] = str(roi_output)
     with pytest.raises(ValueError, match="ROI checkpoint"):

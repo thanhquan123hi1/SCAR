@@ -57,6 +57,7 @@ model:
 loss:
   ce_weight: 0.2
   dice_weight: 0.8
+  pathology_reduction: positive
   negative_slice_handling: batch
   include_background: true
   dice_class_weights: [0.5, 1.0, 1.0, 1.0]

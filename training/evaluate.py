@@ -229,7 +229,7 @@ def main(argv=None):
             split_hashes=checkpoint["split_hashes"],
             hd95_note=("All distances are voxel distances (unit grid), never mm. Means exclude undefined surfaces; inspect defined/undefined counts and empty-prediction status."
                        if distance_unit == "voxel" else
-                       ("Distances use preprocessed oracle ROI grid spacing in mm; GT is evaluated on that ROI, without native restoration. "
+                       ("Distances use preprocessed predicted U-Net2D ROI grid spacing in mm; GT is evaluated on that ROI, without native restoration. "
                         if benchmark_protocol.get("evaluation_grid") == "preprocessed_roi" else
                         "Distances use native orthogonal-grid spacing in mm. ") +
                        "Means exclude undefined surfaces; inspect defined/undefined counts. No author-specific empty-mask reproduction metric."),

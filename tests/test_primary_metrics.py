@@ -77,16 +77,15 @@ def test_only_exact_legacy_reporting_protocol_is_accepted():
     assert not benchmark_protocol_matches(dict(original, unexpected=True))
     assert not benchmark_protocol_matches(None)
     assert not benchmark_protocol_matches({"id": "myops380_voxel_v1"})
-    assert not benchmark_protocol_matches(original, "myopspp_bc80")
+    assert not benchmark_protocol_matches(original, "myopspp_unet2d_roi128_1mm")
 
 
-@pytest.mark.parametrize("dataset", DATASET_IDS)
+@pytest.mark.parametrize("dataset", ["myops380"])
 def test_old_selection_is_readable_but_cannot_resume(dataset):
     current = protocol_for_dataset(dataset)
     assert current["selection_metric"] == "avg_pathology_inclusive_dice"
     assert benchmark_protocol_matches(current, dataset, allow_legacy_selection=False)
-    old_id = ("myops380_voxel_v2" if dataset == "myops380" else
-              f"{dataset}_roi_mm_v1" if "evaluation_grid" in current else "myopspp_bc80_mm_v1")
+    old_id = "myops380_voxel_v2"
     old = dict(current, id=old_id, selection_metric="avg_pathology_dice")
     assert benchmark_protocol_matches(old, dataset)
     assert not benchmark_protocol_matches(old, dataset, allow_legacy_selection=False)

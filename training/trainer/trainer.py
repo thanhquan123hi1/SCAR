@@ -497,6 +497,7 @@ def trainer_Myops(args, model, snapshot_path):
         seed=args.seed,
         output_dir=layout.logs / "splits",
         no_val=no_val,
+        dataset_id=dataset_id,
     )
     split_hashes = {
         name: hashlib.sha256((split_dir / f"{name}.txt").read_bytes()).hexdigest()
@@ -647,7 +648,7 @@ def trainer_Myops(args, model, snapshot_path):
         class_names=CLASS_NAMES,
         data_provenance=data_provenance,
         split_hashes=split_hashes,
-        training_protocol=training_protocol(no_val),
+        training_protocol=training_protocol(no_val, dataset_id),
         parameters=sum(p.numel() for p in model.parameters()),
         torch_version=str(torch.__version__),
         numpy_version=np.__version__,
@@ -811,7 +812,7 @@ def trainer_Myops(args, model, snapshot_path):
                 rng=rng_state(),
                 loader_rng=generator.get_state(),
             )
-            payload["training_protocol"] = training_protocol(no_val)
+            payload["training_protocol"] = training_protocol(no_val, dataset_id)
             payload["code_provenance"] = source_code
             payload["initialization"] = initialization
             if no_val:

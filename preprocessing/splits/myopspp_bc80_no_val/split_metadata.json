@@ -1,0 +1,26 @@
+{
+  "protocol_id": "myopspp_bc80_train64_test16_last_v1",
+  "split_method": "64 non-test patients (80%: 28 CenterB + 36 CenterC); 16 test patients (20%: 7 CenterB + 9 CenterC); no validation",
+  "seed_dependent": false,
+  "patient_counts": {
+    "train": 64,
+    "test_vol": 16
+  },
+  "center_counts": {
+    "train": {
+      "CenterB": 28,
+      "CenterC": 36
+    },
+    "test_vol": {
+      "CenterB": 7,
+      "CenterC": 9
+    }
+  },
+  "sample_counts": {
+    "train": 296,
+    "test_vol": 16
+  },
+  "train_ids_sha256": "81fafb159954e37088cf38db1a96c0d9d1f2380dff0a6ff1d0458dc504ce6bea",
+  "test_ids_sha256": "3152f8f62c1410aa5c78167eb53196d3f8a39f8d1b7137033ed00faa1dcf6b55",
+  "hash_rule": "SHA256 of lexically sorted IDs, UTF-8, LF after every ID"
+}

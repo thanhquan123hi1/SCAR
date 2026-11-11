@@ -1,60 +1,90 @@
-# Train the MyoPS++ ROI datasets
+# MyoPS++ U-Net2D ROI128, 1 mm
 
-The repository supports `myops380`, native `myopspp_bc80`, and three independent exported ROI profiles. All profiles use M2-Plus; MyoPS380 data and metric defaults are unchanged.
+Profile duy nhất cho MyoPS++: `myopspp_unet2d_roi128_1mm`.
+Nguồn trên máy: `D:/NCKH/Dataset/MyoPSpp_UNet2D_ROI128_1mm`.
+MyoPS380 giữ pipeline, nhãn legacy/canonical, split và metric voxel riêng.
 
-| Profile | Patients (train / val / test) | Export folder | Cache | Evaluation XY spacing |
-|---|---|---|---|---|
-| `myopspp_roi128_76` | 48 / 13 / 15 | `roi128mm_76cases` | `data/myopspp_roi128_76/cache` | 1.0 mm |
-| `myopspp_roi128_80` | 51 / 13 / 16 | `roi128mm_80cases` | `data/myopspp_roi128_80/cache` | 1.0 mm |
-| `myopspp_roi160_80` | 51 / 13 / 16 | `roi160mm_to128_80cases` | `data/myopspp_roi160_80/cache` | 1.25 mm |
+## Dữ liệu, split và nhãn
 
-All caches contain 128×128 slices; Z spacing is retained per patient. The 76-case cohort excludes Case2013, Case2017, Case2018 and Case2031 (cases where a 128 mm crop clips part of the cardiac structure). The `myopspp_roi128_80` profile retains all 80 cases with the 128 mm crop (auditing any crop label loss, identical to standard automated cropping pipelines like I-MMSeg). The `myopspp_roi160_80` profile avoids clipping by using a 160 mm physical FOV resized to 128×128. A model's random seed never regenerates these splits.
+80 bệnh nhân CenterB/CenterC, cố định **64 train / 16 test, không validation**.
+Train gồm 28 B + 36 C; test gồm 7 B + 9 C. Manifest được lưu trong
+`preprocessing/splits/myopspp_unet2d_roi128_1mm/patients.json`; đổi seed không chia lại bệnh nhân.
+Export hiện có 296 lát cắt train và 16 volume test. Tất cả lát cắt, kể cả lát không có tổn thương, đều được giữ.
 
-## Prepare a cache on another computer
+| Mã nhãn nguồn | ID trong cache/model | Ý nghĩa |
+|---|---:|---|
+| 0, 500 (LV), 600 (RV) | 0 | background của bài toán phân đoạn cơ tim |
+| 200 | 1 | normal myocardium |
+| 1220 | 2 | edema-exclusive |
+| 2221 | 3 | scar |
 
-Extract the existing dataset archive first. The adapter requires the export manifest, splits, per-case metadata and `checksums.sha256`. It validates checksums, geometry, cohort and split before publishing a new cache. It refuses any existing destination. MRI values are copied exactly as float32; no second normalization, crop or resampling occurs. Raw labels are mapped once: 0/500/600→background, 200→normal myocardium, 1220→edema, 2221→scar.
+Edema-inclusive/AAR là hợp `{2,3}`. Các nhãn lạ hoặc không nguyên bị từ chối.
+Không dùng chuyển nhãn legacy của MyoPS380 cho export raw MyoPS++.
 
-Run from the repository root, substituting the export path on that computer:
+Ảnh C0/LGE/T2 là float32 [0,1], đã chuẩn hóa p1/p99 theo volume/modalities.
+Adapter sao chép đúng giá trị, mapping nhãn một lần, giữ shape 128×128×D,
+spacing XY 1 mm, Z gốc và affine ROI. Adapter kiểm tra checksum, hình học, split,
+provenance và localizer không được train trên chính bệnh nhân đang crop.
+Dữ liệu nguồn, các checkpoint localizer và cache lịch sử trên đĩa không bị chỉnh sửa.
 
-```powershell
-python -m preprocessing.myopspp_roi --dataset myopspp_roi128_76 --src-path D:/NCKH/MyoPSpp_preprocessed_2026-10-03/roi128mm_76cases --dst-path data/myopspp_roi128_76/cache
-python -m preprocessing.myopspp_roi --dataset myopspp_roi128_80 --src-path D:/NCKH/MyoPSpp_preprocessed_2026-10-03/roi128mm_80cases --dst-path data/myopspp_roi128_80/cache
-python -m preprocessing.myopspp_roi --dataset myopspp_roi160_80 --src-path D:/NCKH/MyoPSpp_preprocessed_2026-10-03/roi160mm_to128_80cases --dst-path data/myopspp_roi160_80/cache
-```
+Tâm crop là dự đoán U-Net2D, không phải oracle theo GT. Provenance localizer vẫn ghi
+các fold/train/validation lịch sử; split 64/16 ở đây là split huấn luyện segmentation
+hiện tại. Không train lại localizer hoặc đổi tâm crop khi đóng gói cache.
 
-The caches have already been created on this computer. Do not run those commands against the existing destinations. Data/cache files and training outputs are ignored by Git; pulling the repository on another machine does not download the datasets.
+## Tạo cache và verify
 
-## Train and evaluate
-
-`run_all.py` reuses a cache with `--skip-cache`, verifies it, trains with validation-based checkpoint selection, and evaluates the best checkpoint on held-out patient volumes:
-
-```powershell
-python run_all.py --dataset myopspp_roi128_76 --config training/config/models/m2_plus.yaml --skip-cache --batch-size 2 --accum-steps 1 --run-id roi128_m2_plus_seed1234
-python run_all.py --dataset myopspp_roi128_80 --config training/config/models/m2_plus.yaml --skip-cache --batch-size 2 --accum-steps 1 --run-id roi128_80_m2_plus_seed1234
-python run_all.py --dataset myopspp_roi160_80 --config training/config/models/m2_plus.yaml --skip-cache --batch-size 2 --accum-steps 1 --run-id roi160_m2_plus_seed1234
-```
-
-M2-Plus is the only supported architecture. The default input is 128×128. `testing.yaml` uses a smaller M2-Plus and 32×32 input for software checks; it is not a research configuration. The shared I-MMSeg recipe uses batch Dice and requires `--accum-steps 1`. The commands above reduce the physical batch for memory; they do not reproduce batch 16. To use accumulation, explicitly select per-image Dice (`loss.negative_slice_handling: none` in YAML, or the train CLI flag); this changes the objective. CE/Dice class weights and optional AAR/scar losses can be set in YAML or the train CLI. Selecting an ROI profile does not enable auxiliary losses.
-
-The new ROI profiles default to `loss.pathology_reduction: sample`: conditional AAR/scar Dice contributes zero for negative slices and is averaged over all samples, so sample-weighted gradient accumulation preserves the objective. Existing MyoPS380 and native MyoPS++ runs keep `positive` reduction by default. BatchNorm and stochastic operations can still make microbatch training differ from a large physical batch. This change only fixes the loss denominator.
-
-To change that choice explicitly, set `loss.pathology_reduction` in a custom model YAML, or pass `--pathology-reduction` to `training/train.py`. Resume locks that setting; a checkpoint cannot silently switch modes. `--init-weights` transfers compatible canonical model weights into a new experiment without carrying optimizer state, old splits or scores. Initialization requires a complete M2-Plus state dict with matching canonical labels; partial parameter loading is rejected.
-
-Resume with the same dataset, model configuration and loss settings:
+Chạy từ root repo. Trên máy khác, thay `--src-path` bằng đường dẫn export đã giải nén:
 
 ```powershell
-python training/train.py --dataset myopspp_roi160_80 --config training/config/models/m2_plus.yaml --batch-size 2 --accum-steps 1 --resume outputs/myopspp_roi160_80/runs/roi160_m2_plus_seed1234/checkpoints/m2plus_seed1234.pt --output-dir outputs/myopspp_roi160_80/runs/roi160_m2_plus_seed1234
-python training/evaluate.py --checkpoint outputs/myopspp_roi160_80/runs/roi160_m2_plus_seed1234/checkpoints/best.pt --data-root data/myopspp_roi160_80/cache
+python -m preprocessing.myopspp_roi --src-path D:/NCKH/Dataset/MyoPSpp_UNet2D_ROI128_1mm --dst-path data/myopspp_unet2d_roi128_1mm/cache
+python preprocessing/verify.py --dataset myopspp_unet2d_roi128_1mm --no-val --label-order canonical --data-root data/myopspp_unet2d_roi128_1mm/cache --list-dir data/myopspp_unet2d_roi128_1mm/cache/lists
 ```
 
-Dataset identity, fixed split IDs, cache-byte fingerprint, class semantics and metric protocol are stored in checkpoints and checked on resume/evaluation. Do not edit caches in place between runs.
+Adapter từ chối thư mục đích đã tồn tại; cache sẵn có chỉ cần verify và train.
+Cache nằm ngoài export, được Git ignore. Kéo repo không tự tải dataset.
+Bốn profile native/oracle trước đây đã được gỡ khỏi CLI và cấu hình; không dùng
+cache/checkpoint benchmark cũ dưới identity của profile mới.
 
-## Evaluation protocol
+## Train, resume, evaluate
 
-These datasets use **GT-centered oracle ROIs**, including validation/test. Predictions are evaluated against the exported ROI GT with equal patient weight; Dice is dimensionless and HD95/ASD use the exported NIfTI spacing in mm (including native Z spacing). Reports record `evaluation_grid: preprocessed_roi` and `localization: oracle_gt_bbox`. Prediction NIfTI files use the ROI affine. They are not restored to the original whole-image native grid.
+```powershell
+python train.py --dataset myopspp_unet2d_roi128_1mm --batch-size 1 --accum-steps 1 --gradient-checkpointing --run-id myopspp_m2_plus_seed1234
+```
 
-This measures segmentation given a cardiac ROI. It does not measure automatic heart localization or performance on uncropped MRI. `training/predict.py` rejects these checkpoints on its raw-NIfTI path to prevent silently using the wrong preprocessing. Use the ROI cache evaluator for this protocol. Native restoration and a deployable localizer are separate work.
+Profile tự chọn canonical labels, no-val, cache và output riêng. Budget mặc định 300 epoch;
+lưu `m2plus_seed1234.pt` sau mỗi epoch, không chọn `best.pt`, không early stopping.
+Test không được dùng để chọn epoch/model. GPU ít VRAM dùng batch nhỏ; batch 1 ở lệnh
+trên không tương đương batch 16 của recipe mặc định. Batch Dice yêu cầu accumulation 1.
+Để dùng Lightweight M2-Plus, thêm `--config training/config/models/lightweight_m2_plus.yaml`.
 
-MyoPS380 retains its existing voxel-distance benchmark, label-order conversion, split and default loss behavior. Its commands remain unchanged, or choose it explicitly with `--dataset myops380`. Neither ROI cohort is the published 95-patient MyoPS++ cohort, and their results should be named separately in comparisons.
+```powershell
+python train.py --dataset myopspp_unet2d_roi128_1mm --batch-size 1 --accum-steps 1 --gradient-checkpointing --resume outputs/myopspp_unet2d_roi128_1mm/runs/myopspp_m2_plus_seed1234/checkpoints/m2plus_seed1234.pt
+python test.py --checkpoint outputs/myopspp_unet2d_roi128_1mm/runs/myopspp_m2_plus_seed1234/checkpoints/m2plus_seed1234.pt --data-root data/myopspp_unet2d_roi128_1mm/cache
+```
 
-Các profile ROI chọn `best.pt` bằng trung bình patient-mean Dice scar và edema-inclusive `{2,3}` trên validation volumes; early stopping dùng cùng điểm này. Mỗi run chỉ lưu `best.pt` và `m2plus_seed1234.pt`. Protocol ROI v2 giữ nguyên hình học và nhãn nên cache v1 vẫn dùng được. Checkpoint M2-Plus protocol cũ vẫn evaluate được hoặc dùng `--init-weights` cho run mới; không resume trạng thái chọn best/patience theo edema-exclusive.
+Resume dùng cùng config, seed, budget, batch, loss và đường dẫn dữ liệu. Evaluator từ chối
+checkpoint chưa đủ budget. Split, cache bytes, nhãn và protocol được khóa trong checkpoint.
+Khi dùng cache ở đường dẫn khác với `train.py`, truyền cả `--data-root` và `--list-dir`.
+Config `testing` có validation trong YAML để kiểm thử MyoPS380; với profile này phải thêm
+`--no-val` khi dùng `--config testing` (model nhỏ 32×32, chỉ dùng kiểm thử phần mềm).
+
+Pipeline đầy đủ trên cache đã có:
+
+```powershell
+python run_all.py --dataset myopspp_unet2d_roi128_1mm --skip-cache --batch-size 1 --accum-steps 1 --gradient-checkpointing --run-id myopspp_m2_plus_full
+```
+
+Bỏ `--skip-cache` để pipeline tạo cache khi chưa có. `--raw-root` chọn export nguồn khác.
+
+## Đánh giá
+
+Dice/IoU/precision/recall tính theo bệnh nhân; HD95/ASD tính bằng mm trên **predicted ROI grid**.
+Các vùng canonical giữ nguyên: normal `{1}`, edema-exclusive `{2}`, scar `{3}`,
+edema-inclusive `{2,3}`, myocardial ring `{1,2,3}`.
+Metadata ghi `localization: predicted_myocardium_unet2d_oof_train_final_val_test` và
+`evaluation_grid: preprocessed_roi`. Prediction NIfTI mang affine ROI.
+
+Evaluator này chưa khôi phục probabilities về native whole-image grid và chưa chấm với
+`reference_native/`; không dùng điểm ROI như điểm end-to-end trên toàn ảnh gốc.
+Raw inference từ chối checkpoint ROI vì cần cùng localizer/preprocessing như export.
+MyoPS380 tiếp tục dùng metric voxel và cơ chế validation tùy chọn như trước.

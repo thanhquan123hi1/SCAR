@@ -87,7 +87,9 @@ def main(argv=None):
     if output.exists():
         raise FileExistsError(f"Output already exists: {output}")
     checkpoint = load_checkpoint(args.checkpoint)
-    from training.dataset.benchmark_profiles import ROI_PROFILES
+    from training.dataset.benchmark_profiles import DATASET_IDS, ROI_PROFILES
+    if checkpoint["args"].get("dataset_id", "myops380") not in DATASET_IDS:
+        raise ValueError("Checkpoint belongs to an unsupported dataset profile")
     if checkpoint["args"].get("dataset_id", "myops380") in ROI_PROFILES:
         raise ValueError("ROI checkpoint requires already preprocessed cardiac ROIs. Use training/evaluate.py "
                          "with its ROI cache; raw prediction needs a separate automatic localizer.")

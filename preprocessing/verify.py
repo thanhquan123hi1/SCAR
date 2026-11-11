@@ -51,14 +51,14 @@ def verify_dataset(data_root, list_dir, label_order="legacy", dataset_id="myops3
         class_counts[split] = voxels.tolist()
     result = {"status": "passed", "sample_counts": counts,
               "benchmark_protocol": metric_protocol(dataset_id, no_val), "benchmark_data": data_lock,
-              "training_protocol": training_protocol(no_val),
+              "training_protocol": training_protocol(no_val, dataset_id),
               "canonical_class_voxel_counts": class_counts,
               "patient_counts": {k: len(v) for k, v in patients.items()},
               "samples_with_mm_geometry": with_mm,
               "samples_without_mm_geometry": total - with_mm,
               "geometry_note": ("MyoPS380 benchmark uses voxel HD95 on the unit grid; physical spacing is not required or inferred."
                                 if dataset_id == "myops380" else
-                                "MyoPS++ oracle ROI benchmark uses preprocessed orthogonal mm geometry."
+                                "MyoPS++ predicted U-Net2D ROI benchmark uses preprocessed orthogonal mm geometry."
                                 if dataset_id in ROI_PROFILES else "MyoPS++ benchmark requires native orthogonal mm geometry.")}
     return result
 

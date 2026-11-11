@@ -47,9 +47,9 @@ def test_validation_opt_in_and_other_profiles_keep_separate_manifests():
     args, _ = parse_args(["--with-val"])
     assert args.no_val is False
     assert Path(args.list_dir).parts[-3:] == ("data", "processed", "splits")
-    for profile in ("myopspp_bc80", "myopspp_roi128_76", "myopspp_roi128_80", "myopspp_roi160_80"):
+    for profile in ("myopspp_unet2d_roi128_1mm",):
         args, _ = parse_args(["--dataset", profile])
-        assert args.no_val is False
+        assert args.no_val is True
         assert profile in args.list_dir
 
 

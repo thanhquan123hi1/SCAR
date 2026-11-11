@@ -1,4 +1,4 @@
-"""Adapt already exported oracle cardiac ROIs to SCAR caches, without reprocessing."""
+"""Package predicted U-Net2D ROI128/1mm exports without changing images or sources."""
 from __future__ import annotations
 
 import argparse
@@ -14,7 +14,9 @@ from tqdm import tqdm
 from preprocessing.myopspp import RAW_MAPPING, canonicalize_myopspp
 from preprocessing.preprocessing import MODALITIES
 from preprocessing.process_and_save import _write_volume, source_sha256
-from training.dataset.benchmark_profiles import ROI_PROFILES, fixed_roi_splits
+from training.dataset.benchmark_profiles import (
+    ROI_PROFILES, MYOPSPP_DATASET, MYOPSPP_LOCALIZATION, MYOPSPP_SOURCE, fixed_myopspp_splits,
+)
 from training.dataset.data_contract import CANONICAL_LABEL_ORDER, CLASS_NAMES, _write_manifest
 from training.metrics.surface_distance import protocol_for_dataset
 
@@ -59,7 +61,7 @@ def load_roi_case(paths, metadata, profile):
             or not np.allclose(metadata.get("output_affine"), affine, atol=1e-4)
             or not np.allclose(metadata.get("output_spacing_mm"), spacing, atol=1e-4)
             or not np.isclose(native_spacing[2], spacing[2])
-            or "oracle" not in metadata.get("localization", "").lower()):
+            or metadata.get("localization") != MYOPSPP_LOCALIZATION):
         raise ValueError("ROI geometry/provenance differs from the exported case metadata")
     images, label = {}, None
     for modality, path in paths.items():
@@ -77,7 +79,7 @@ def load_roi_case(paths, metadata, profile):
     return images, label, spacing, affine
 
 
-def preprocess_myopspp_roi(src_path, dst_path, dataset_id, show_progress=True):
+def preprocess_myopspp_roi(src_path, dst_path, dataset_id=MYOPSPP_DATASET, show_progress=True):
     source, destination = Path(src_path).resolve(), Path(dst_path).resolve()
     if source == destination or source in destination.parents or destination in source.parents:
         raise ValueError("Cache must be outside the export source tree")
@@ -92,24 +94,36 @@ def preprocess_myopspp_roi(src_path, dst_path, dataset_id, show_progress=True):
             raise ValueError(f"Consumed file is missing from export checksums: {path}")
         return json.loads(path.read_text(encoding="utf-8"))
     manifest = read_record(source / "dataset_manifest.json")
-    patients = fixed_roi_splits(dataset_id)
+    patients = fixed_myopspp_splits()
     cohort = {c for names in patients.values() for c in names}
     if (manifest.get("dataset_id") != profile["export_id"] or manifest.get("crop_mm") != profile["crop_mm"]
             or manifest.get("model_hw") != [128, 128]
             or manifest.get("output_inplane_spacing_mm") != profile["spacing_xy"]
             or manifest.get("patient_count") != len(cohort) or set(manifest.get("patients", [])) != cohort
             or len(manifest.get("patients", [])) != len(cohort)
-            or set(manifest.get("excluded_cases", [])) != set(profile["excluded"])
+            or manifest.get("excluded_cases") != []
+            or manifest.get("labels") != [0, 200, 500, 600, 1220, 2221]
             or manifest.get("normalization") != "p1/p99 after crop/resize; [0,1]"
-            or "oracle" not in manifest.get("localization", "").lower()):
+            or not manifest.get("localization", "").startswith("predicted U-Net2D;")):
         raise ValueError("Export belongs to a different ROI profile, cohort or normalization")
     if read_record(source / "splits.json").get("patients") != patients:
         raise ValueError("Export patient splits differ from the fixed ROI benchmark")
+    lock_path = source / "reproducibility/prediction_lock.json"
+    lock = read_record(lock_path)
+    predictions_path = source / "reproducibility/predicted_centers.json"
+    predictions = read_record(predictions_path)
+    protocol_path = source / "reproducibility/protocol.json"
+    localizer_protocol = read_record(protocol_path)
+    if (manifest.get("prediction_lock") != lock or set(predictions) != cohort
+            or lock.get("centers_sha256") != checksums[predictions_path.resolve()]
+            or lock.get("protocol_sha256") != checksums[protocol_path.resolve()]
+            or manifest.get("protocol_sha256") != lock["protocol_sha256"]):
+        raise ValueError("Predicted ROI localization lock/provenance differs from export")
     directories = list((source / "cases").glob("*/*"))
     if len(directories) != len(cohort) or {p.name for p in directories} != cohort:
         raise ValueError("Incomplete or extra ROI patient directories")
     assignment = {case: split for split, names in patients.items() for case in names}
-    lists = {"train": [], "val": [], "val_vol": patients["val"], "test_vol": patients["test_vol"]}
+    lists = {"train": [], "test_vol": patients["test_vol"]}
     info = dict(schema_version=1, dataset_id=dataset_id, class_names=list(CLASS_NAMES),
                 label_order=CANONICAL_LABEL_ORDER, raw_mapping=RAW_MAPPING,
                 source_label_encoding="myopspp_raw_0_200_500_600_1220_2221",
@@ -117,6 +131,7 @@ def preprocess_myopspp_roi(src_path, dst_path, dataset_id, show_progress=True):
                 source_path=str(source), patients=patients, case_shapes={}, centers={}, case_provenance={},
                 source_checksums_sha256={}, pathology_voxels={}, export_manifest=manifest,
                 export_checksums_sha256=source_sha256(source / "checksums.sha256"),
+                no_val=True, localization=MYOPSPP_LOCALIZATION,
                 benchmark_protocol=protocol_for_dataset(dataset_id))
     destination.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=destination.name + ".building-", dir=destination.parent))
@@ -128,6 +143,18 @@ def preprocess_myopspp_roi(src_path, dst_path, dataset_id, show_progress=True):
             provenance = read_record(directory / "metadata.json")
             if any(provenance.get(k) != v for k, v in (("case", case), ("center", center), ("split", assignment[case]))):
                 raise ValueError(f"{case}: incorrect case identity or split metadata")
+            prediction = predictions[case]
+            model_spec = localizer_protocol.get("models", {}).get(prediction.get("model"), {})
+            trained_on = prediction.get("training_patients")
+            if (provenance.get("localizer") != prediction
+                    or provenance.get("prediction_lock_sha256") != checksums[lock_path.resolve()]
+                    or not isinstance(trained_on, list) or not trained_on
+                    or trained_on != model_spec.get("train")
+                    or not set(trained_on).issubset(patients["train"])
+                    or case in trained_on
+                    or prediction.get("model") not in lock.get("models_sha256", {})
+                    or prediction.get("model_sha256") != lock.get("models_sha256", {}).get(prediction.get("model"))):
+                raise ValueError(f"{case}: invalid or self-trained localizer provenance")
             paths = {m: directory / f"{case}_{suffix}.nii.gz"
                      for m, suffix in (("bSSFP", "C0"), ("LGE", "LGE"), ("T2w", "T2"), ("label", "gd"))}
             if any(p.resolve() not in checksums for p in paths.values()):
@@ -143,7 +170,7 @@ def preprocess_myopspp_roi(src_path, dst_path, dataset_id, show_progress=True):
                             source_affine=np.asarray(provenance["native_affine"]), spacing_unit="mm",
                             source_spatial_unit="mm", patient_id=case, normalization=NORMALIZATION)
             split = assignment[case]
-            if split in ("train", "val"):
+            if split == "train":
                 for depth in range(label.shape[2]):
                     name = f"{case}_slice{depth:03d}"
                     lists[split].append(name)
@@ -153,8 +180,8 @@ def preprocess_myopspp_roi(src_path, dst_path, dataset_id, show_progress=True):
                         np.savez_compressed(folder / f"{name}.npz", image=images[modality][:, :, depth],
                                             label=label[:, :, depth], axis_order="HW", slice_index=depth,
                                             schema_version=1, **metadata)
-            if split in ("val", "test_vol"):
-                folder = "val_vol_h5" if split == "val" else "test_vol_h5"
+            if split == "test_vol":
+                folder = "test_vol_h5"
                 for modality in MODALITIES:
                     _write_volume(staging / modality / folder / f"{case}.npy.h5", images[modality], label, metadata)
         for split, names in lists.items():
@@ -171,9 +198,9 @@ def preprocess_myopspp_roi(src_path, dst_path, dataset_id, show_progress=True):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dataset", required=True, choices=tuple(ROI_PROFILES))
-    parser.add_argument("--src-path", required=True, help="Extracted ROI export containing dataset_manifest.json")
-    parser.add_argument("--dst-path", required=True, help="New cache directory; existing directories are refused")
+    parser.add_argument("--dataset", default=MYOPSPP_DATASET, choices=tuple(ROI_PROFILES))
+    parser.add_argument("--src-path", default=MYOPSPP_SOURCE, help="Predicted ROI export containing dataset_manifest.json")
+    parser.add_argument("--dst-path", default=f"data/{MYOPSPP_DATASET}/cache", help="New cache; existing directories are refused")
     args = parser.parse_args(argv)
     info = preprocess_myopspp_roi(args.src_path, args.dst_path, args.dataset)
     print(json.dumps({"dataset_id": info["dataset_id"], "sample_counts": info["sample_counts"]}, indent=2))
