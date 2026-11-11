@@ -51,6 +51,7 @@ htmlcov/
 docs/*
 !docs/myopspp_roi_training.md
 !docs/im_mseg_augmentation.md
+!docs/sspanet_paper_formula.md
 reports/
 
 # ==============================================================================

@@ -267,6 +267,30 @@ def _load_initial_weights(model, path):
     return [], []
 
 
+def model_config_from_args(args, merged):
+    """Resolve architecture identically for training and synthetic benchmarks."""
+    section = merged["model"]
+    selected = dict(section) | {"ablation": args.ablation}
+    config = get_lightweight_config() if model_architecture(selected) == "lightweight_m2_plus" else get_config()
+    if "resnet" in section:
+        config.resnet.num_layers = tuple(section["resnet"]["num_layers"])
+        config.resnet.width_factor = float(section["resnet"]["width_factor"])
+    if "transformer" in section:
+        config.transformer.dropout_rate = float(section["transformer"].get("dropout_rate", 0.1))
+    for key in ("decoder_channels", "skip_channels", "fused_channels", "n_skip", "cross_attention_heads", "classifier", "activation", "sspanet_gate",
+                "latent_dim", "fusion_version", "use_pos_enc", "sspanet_reduction"):
+        if key in section:
+            config[key] = tuple(section[key]) if key == "decoder_channels" else section[key]
+    config.ablation = args.ablation
+    config.gradient_checkpointing = args.gradient_checkpointing
+    config.n_classes = 4
+    if "architecture" in section:
+        config.architecture = section["architecture"]
+    if "model_name" in section:
+        config.model_name = section["model_name"]
+    return config
+
+
 def main(argv=None):
     args, merged = parse_args(argv)
     for key in ("data_root", "list_dir"):
@@ -296,25 +320,7 @@ def main(argv=None):
             raise ValueError("Resume from the final model/seed checkpoint into its original run directory")
     args.output_dir = str(output)
     args.model_name = merged["model"].get("model_name", "M2-Plus")
-    section = merged["model"]
-    selected = dict(section) | {"ablation": args.ablation}
-    config = get_lightweight_config() if model_architecture(selected) == "lightweight_m2_plus" else get_config()
-    if "resnet" in section:
-        config.resnet.num_layers = tuple(section["resnet"]["num_layers"])
-        config.resnet.width_factor = float(section["resnet"]["width_factor"])
-    if "transformer" in section:
-        config.transformer.dropout_rate = float(section["transformer"].get("dropout_rate", 0.1))
-    for key in ("decoder_channels", "skip_channels", "fused_channels", "n_skip", "cross_attention_heads", "classifier", "activation", "sspanet_gate",
-                "latent_dim", "fusion_version", "use_pos_enc", "sspanet_reduction"):
-        if key in section:
-            config[key] = tuple(section[key]) if key == "decoder_channels" else section[key]
-    config.ablation = args.ablation
-    config.gradient_checkpointing = args.gradient_checkpointing
-    config.n_classes = 4
-    if "architecture" in section:
-        config.architecture = section["architecture"]
-    if "model_name" in section:
-        config.model_name = section["model_name"]
+    config = model_config_from_args(args, merged)
     torch.set_num_threads(args.cpu_threads)
     seed_everything(args.seed, args.deterministic)
     model = model_from_config(config, img_size=args.img_size, num_classes=4, ablation=args.ablation)

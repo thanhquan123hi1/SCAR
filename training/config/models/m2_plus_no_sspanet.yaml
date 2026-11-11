@@ -1,0 +1,4 @@
+model:
+  model_name: M2-Plus-No-SSPA
+  ablation: M2-PLUS
+  sspanet_gate: identity

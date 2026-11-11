@@ -10,6 +10,8 @@ Mã chính: [m2_plus_net.py](training/models/m2_plus_net.py), [m2_plus.py](train
 
 SSPANet mặc định dùng `model.sspanet_gate: centered_tanh_v2`: `y = x * (1 + 0.5 * tanh(g_channel(x) + g_spatial(x)))`. Hai nhánh cung cấp logits trước sigmoid và trước phép nhân với `x`; hệ số trong khoảng 0.5–1.5 cho phép giảm hoặc tăng đặc trưng, bằng 1 khi tổng logits bằng 0. Đây là biến thể SCAR của SSPANet; ảnh hưởng tới Dice cần được xác nhận bằng ablation.
 
+Biến thể mới `--config m2_plus_paper_formula` dùng `paper_formula_v1`: channel attention rồi strip/style spatial attention theo công thức (17)–(23), `Y = Ms * (Mc * X)`. Đây là cách diễn giải được đặc tả rõ của SCAR vì công thức và code tác giả chưa nhất quán. Các config `m2_plus_legacy_sspanet` và `m2_plus_no_sspanet` cung cấp đối chứng. Xem [đặc tả, checkpoint và lệnh A100](docs/sspanet_paper_formula.md). Benchmark bằng `python -m training.benchmark`; số đo tổng hợp không thay thế Dice hoặc thời gian train trên dataset.
+
 M2-Plus mặc định có khoảng 63.75M tham số. Bản Lightweight có khoảng 14.67M: shared trunk với FiLM, OptimizedSSPANet và skip gates. Chọn bằng `--config training/config/models/lightweight_m2_plus.yaml`; cấu hình này dùng chung pipeline train/resume/evaluate. Hai tên chỉ rõ biến thể; mức giảm tham số không tự chứng minh cải thiện độ chính xác.
 
 | ID | Nhãn canonical |

@@ -22,12 +22,16 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from training.models.modules.sspanet_formula import PAPER_FORMULA_GATE, PaperFormulaSSPANet
+
 
 OPTIMIZED_SSPA_GATE = "optimized"
 CENTERED_SSPA_GATE = "centered_tanh_v2"
 LEGACY_SSPA_GATE = "legacy_v1"
 DEFAULT_SSPA_GATE = "centered_tanh_v2"
-SSPA_GATE_MODES = (OPTIMIZED_SSPA_GATE, CENTERED_SSPA_GATE, LEGACY_SSPA_GATE)
+IDENTITY_SSPA_GATE = "identity"
+SSPA_GATE_MODES = (OPTIMIZED_SSPA_GATE, CENTERED_SSPA_GATE, LEGACY_SSPA_GATE,
+                   PAPER_FORMULA_GATE, IDENTITY_SSPA_GATE)
 
 
 def _statistics_input(x: torch.Tensor) -> torch.Tensor:
@@ -324,7 +328,7 @@ class OptimizedSSPANet(nn.Module):
 
 
 class SSPANet_Block(nn.Module):
-    """SSPANet Block supporting optimized, centered_tanh_v2, and legacy_v1 gating.
+    """Versioned SSPANet variants, including the sequential paper interpretation.
 
     Default gate_mode is centered_tanh_v2; optimized must be selected explicitly.
     Legacy modes ('centered_tanh_v2', 'legacy_v1') are retained for full backward compatibility
@@ -344,7 +348,11 @@ class SSPANet_Block(nn.Module):
         self.in_channels = in_channels
         self.reduction_ratio = reduction_ratio
 
-        if gate_mode == OPTIMIZED_SSPA_GATE:
+        if gate_mode == PAPER_FORMULA_GATE:
+            self.paper_formula = PaperFormulaSSPANet(in_channels)
+        elif gate_mode == IDENTITY_SSPA_GATE:
+            pass
+        elif gate_mode == OPTIMIZED_SSPA_GATE:
             self.optimized = OptimizedSSPANet(
                 in_channels=in_channels,
                 reduction_ratio=reduction_ratio,
@@ -358,6 +366,10 @@ class SSPANet_Block(nn.Module):
             self.spatial = SSPA_SpatialAttention(in_channels)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.gate_mode == PAPER_FORMULA_GATE:
+            return self.paper_formula(x)
+        if self.gate_mode == IDENTITY_SSPA_GATE:
+            return x
         if self.gate_mode == OPTIMIZED_SSPA_GATE:
             return self.optimized(x)
         if self.gate_mode == LEGACY_SSPA_GATE:
@@ -371,6 +383,9 @@ __all__ = [
     "CENTERED_SSPA_GATE",
     "LEGACY_SSPA_GATE",
     "DEFAULT_SSPA_GATE",
+    "PAPER_FORMULA_GATE",
+    "IDENTITY_SSPA_GATE",
+    "PaperFormulaSSPANet",
     "SSPA_GATE_MODES",
     "strip_rms",
     "SSPA_BasicConv",

@@ -1,0 +1,5 @@
+# Author-code control: all other M2-Plus defaults are unchanged.
+model:
+  model_name: M2-Plus-Legacy-SSPA
+  ablation: M2-PLUS
+  sspanet_gate: legacy_v1

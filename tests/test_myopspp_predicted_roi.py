@@ -219,7 +219,7 @@ def test_mm_metrics_keep_myops380_voxel_semantics():
     assert next(r for r in native if r["region"] == "scar")["hd95_voxel"] == pytest.approx(1)
 
 
-@pytest.mark.parametrize("variant", ["m2_plus", "lightweight_m2_plus"])
+@pytest.mark.parametrize("variant", ["m2_plus", "lightweight_m2_plus", "paper_formula_v1"])
 def test_train_resume_final_checkpoint_and_evaluate(cache, tmp_path, variant):
     from training.train import main as train
     from training.evaluate import main as evaluate
@@ -228,6 +228,8 @@ def test_train_resume_final_checkpoint_and_evaluate(cache, tmp_path, variant):
     config["train"]["no_val"] = True
     if variant == "lightweight_m2_plus":
         config["model"].update(architecture=variant, ablation="LIGHTWEIGHT_M2_PLUS", sspanet_gate="optimized")
+    elif variant == "paper_formula_v1":
+        config["model"]["sspanet_gate"] = variant
     path = tmp_path / "testing.yaml"
     path.write_text(yaml.safe_dump(config))
     run = tmp_path / "run"
@@ -238,6 +240,8 @@ def test_train_resume_final_checkpoint_and_evaluate(cache, tmp_path, variant):
     first = train(argv)
     last = run / "checkpoints/testingsmall_seed1234.pt"
     checkpoint = load_checkpoint(last)
+    if variant == "paper_formula_v1":
+        assert checkpoint["model_config"]["sspanet_gate"] == variant
     assert checkpoint["class_names"] == CLASS_NAMES
     assert checkpoint["training_protocol"]["train_patients"] == 64
     assert not checkpoint["training_complete"]

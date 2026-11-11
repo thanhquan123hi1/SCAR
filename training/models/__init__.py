@@ -5,7 +5,7 @@ from training.models.m2_plus_net import (
     M2PlusNet, LightweightM2PlusNet, get_config, get_testing,
     get_lightweight_config, get_lightweight_testing,
 )
-from training.models.modules.sspanet import LEGACY_SSPA_GATE, SSPA_GATE_MODES
+from training.models.modules.sspanet import LEGACY_SSPA_GATE, SSPA_GATE_MODES, PAPER_FORMULA_GATE
 from training.models.modules.m2_plus import LEGACY_FUSION, SPATIAL_FUSION, FUSION_VERSIONS
 
 
@@ -44,6 +44,13 @@ def checkpoint_model_config(config, state_dict):
     """Recover omitted fusion metadata from saved tensors, without changing weights."""
     validate_model_config(config)
     resolved = dict(config)
+    sspa_keys = [key for key in state_dict if key.startswith(
+        ("sspanet_cine.", "sspanet_psir.", "sspanet_t2w."))]
+    paper_weights = any(".paper_formula." in key for key in sspa_keys)
+    paper_config = resolved.get("sspanet_gate", LEGACY_SSPA_GATE) == PAPER_FORMULA_GATE
+    if paper_weights != paper_config and (sspa_keys or paper_config):
+        raise ValueError("Checkpoint sspanet_gate disagrees with paper_formula_v1 weights; "
+                         "explicit matching metadata is required")
     prefix = "cross_attention." if model_architecture(config) == "lightweight_m2_plus" else "cross_fusion."
     projection = state_dict.get(prefix + "proj_in.0.weight")
     legacy_projection = state_dict.get(prefix + "proj.0.weight")
