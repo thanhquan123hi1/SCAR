@@ -323,6 +323,7 @@ class SharedResNetV2(nn.Module):
         width_factor: float | None = None,
         gradient_checkpointing: bool = False,
         modalities: tuple[str, ...] = ("cine", "psir", "t2w"),
+        use_film: bool = True,
     ):
         super().__init__()
         # Handle config vs positional arguments
@@ -340,11 +341,13 @@ class SharedResNetV2(nn.Module):
                 elif isinstance(resnet_cfg, dict) and "width_factor" in resnet_cfg:
                     width_factor = resnet_cfg["width_factor"]
                 gradient_checkpointing = getattr(config, "gradient_checkpointing", gradient_checkpointing)
+                use_film = getattr(config, "use_film", use_film)
             elif isinstance(config, dict) and "resnet" in config:
                 resnet_cfg = config["resnet"]
                 block_units = resnet_cfg.get("num_layers", block_units)
                 width_factor = resnet_cfg.get("width_factor", width_factor)
                 gradient_checkpointing = config.get("gradient_checkpointing", gradient_checkpointing)
+                use_film = config.get("use_film", use_film)
 
         if block_units is None:
             block_units = (3, 4, 9)
@@ -360,6 +363,7 @@ class SharedResNetV2(nn.Module):
         self.width = width
         self.gradient_checkpointing = gradient_checkpointing
         self.modalities = tuple(modalities)
+        self.use_film = bool(use_film)
 
         # 1. Independent 1-channel stems
         num_gn_groups = min(32, width)
@@ -404,11 +408,17 @@ class SharedResNetV2(nn.Module):
             ))),
         ]))
 
-        # 3. Modality-specific FiLM adapters
-        self.film1 = FiLMAdapter(width * 4, modalities=self.modalities)
-        self.film2 = FiLMAdapter(width * 8, modalities=self.modalities)
-        self.film3 = FiLMAdapter(width * 16, modalities=self.modalities)
-        self.films = (self.film1, self.film2, self.film3)
+        # 3. Modality-specific FiLM adapters (optional for ablation)
+        if self.use_film:
+            self.film1 = FiLMAdapter(width * 4, modalities=self.modalities)
+            self.film2 = FiLMAdapter(width * 8, modalities=self.modalities)
+            self.film3 = FiLMAdapter(width * 16, modalities=self.modalities)
+            self.films = (self.film1, self.film2, self.film3)
+        else:
+            self.film1 = None
+            self.film2 = None
+            self.film3 = None
+            self.films = (None, None, None)
 
     def _resolve_stem(self, modality_name: str | int) -> nn.Module:
         mod = normalize_modality(modality_name)
@@ -457,7 +467,8 @@ class SharedResNetV2(nn.Module):
         h = self.pool(h)
         for i, (block, film) in enumerate(zip(self.body, self.films)):
             h = self._run_block(block, h)
-            h = film(h, mod)
+            if film is not None:
+                h = film(h, mod)
             if i < 2:
                 target_h, target_w = height // (4 * 2**i), width // (4 * 2**i)
                 pad_h, pad_w = target_h - h.shape[2], target_w - h.shape[3]

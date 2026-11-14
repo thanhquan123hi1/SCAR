@@ -17,10 +17,15 @@ from typing import Optional
 
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 LEGACY_FUSION = "legacy_v1"
 SPATIAL_FUSION = "spatial_v2"
 FUSION_VERSIONS = (LEGACY_FUSION, SPATIAL_FUSION)
+
+STANDARD_BOTTLENECK = "standard"
+LOCAL_CONTRAST_BOTTLENECK = "local_contrast"
+BOTTLENECK_FUSION_MODES = (STANDARD_BOTTLENECK, LOCAL_CONTRAST_BOTTLENECK)
 
 
 def _get_group_norm_groups(channels: int, max_groups: int = 32) -> int:
@@ -125,6 +130,7 @@ class SpatialAwareCrossAttention(nn.Module):
         out_channels: int = 512,
         num_heads: int = 8,
         use_pos_enc: bool = True,
+        use_cross_attention: bool = True,
     ):
         super().__init__()
         if in_channels < 1 or latent_dim < 1 or out_channels < 1 or num_heads < 1:
@@ -139,6 +145,7 @@ class SpatialAwareCrossAttention(nn.Module):
         self.out_channels = out_channels
         self.num_heads = num_heads
         self.use_pos_enc = use_pos_enc
+        self.use_cross_attention = bool(use_cross_attention)
 
         # 1. Input projection: in_channels -> latent_dim
         self.proj_in = nn.Sequential(
@@ -147,9 +154,13 @@ class SpatialAwareCrossAttention(nn.Module):
             nn.ReLU(inplace=True),
         )
 
-        # 2. Decoupled Multi-Head Cross-Attention modules
-        self.mha_scar = nn.MultiheadAttention(latent_dim, num_heads, batch_first=True)
-        self.mha_edema = nn.MultiheadAttention(latent_dim, num_heads, batch_first=True)
+        # 2. Decoupled Multi-Head Cross-Attention modules (optional for ablation)
+        if self.use_cross_attention:
+            self.mha_scar = nn.MultiheadAttention(latent_dim, num_heads, batch_first=True)
+            self.mha_edema = nn.MultiheadAttention(latent_dim, num_heads, batch_first=True)
+        else:
+            self.mha_scar = None
+            self.mha_edema = None
 
         # 3. Output projection: 3 * latent_dim -> out_channels
         self.proj_out = nn.Sequential(
@@ -178,6 +189,9 @@ class SpatialAwareCrossAttention(nn.Module):
         q_feat = self.proj_in(cine)
         k_scar = self.proj_in(psir)
         k_edema = self.proj_in(t2w)
+
+        if not self.use_cross_attention:
+            return self.proj_out(torch.cat([q_feat, k_scar, k_edema], dim=1))
 
         if self.use_pos_enc:
             pos_emb = build_2d_sinusoidal_positional_encoding(
@@ -285,9 +299,79 @@ class M2Plus_Fusion(SpatialAwareCrossAttention):
         )
 
 
+class LocalModalityContrastFusion(nn.Module):
+    """Modality-decoupled, contrast-aware local bottleneck fusion for aligned CMR.
+
+    Uses per-modality 1x1 projections (groups=3) so CINE, PSIR/LGE, and T2w keep
+    distinct semantic channels, injects explicit pathology difference cues
+    (PSIR - CINE for Scar, T2w - PSIR for Edema), fuses them pointwise, and
+    applies a local multi-scale depthwise residual block with channel SE gating.
+    """
+
+    def __init__(
+        self,
+        in_channels: int = 1024,
+        latent_dim: int = 192,
+        out_channels: int = 512,
+    ):
+        super().__init__()
+        if in_channels < 1 or latent_dim < 1 or out_channels < 1:
+            raise ValueError("Bottleneck fusion channel dimensions must be positive")
+        self.in_channels = in_channels
+        self.latent_dim = latent_dim
+        self.out_channels = out_channels
+
+        g_mod = _get_group_norm_groups(latent_dim, 16)
+        self.proj_mod = nn.Sequential(
+            nn.Conv2d(3 * in_channels, 3 * latent_dim, kernel_size=1, groups=3, bias=False),
+            nn.GroupNorm(num_groups=3 * g_mod, num_channels=3 * latent_dim),
+            nn.ReLU(inplace=True),
+        )
+        self.proj_fuse = nn.Sequential(
+            nn.Conv2d(5 * latent_dim, out_channels, kernel_size=1, bias=False),
+            nn.GroupNorm(num_groups=_get_group_norm_groups(out_channels, 32), num_channels=out_channels),
+            nn.ReLU(inplace=True),
+        )
+
+        mid = max(out_channels // 2, 16)
+        g_mid = _get_group_norm_groups(mid, 16)
+        se_mid = max(mid // 8, 8)
+        self.reduce = nn.Sequential(
+            nn.Conv2d(out_channels, mid, kernel_size=1, bias=False),
+            nn.GroupNorm(num_groups=g_mid, num_channels=mid),
+            nn.ReLU(inplace=True),
+        )
+        self.dw_local = nn.Conv2d(mid, mid, kernel_size=3, padding=1, groups=mid, bias=False)
+        self.dw_dilated = nn.Conv2d(mid, mid, kernel_size=3, padding=2, dilation=2, groups=mid, bias=False)
+        self.norm_dw = nn.GroupNorm(num_groups=g_mid, num_channels=mid)
+        self.se = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(mid, se_mid, kernel_size=1, bias=True),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(se_mid, mid, kernel_size=1, bias=True),
+            nn.Sigmoid(),
+        )
+        self.expand = nn.Sequential(
+            nn.Conv2d(mid, out_channels, kernel_size=1, bias=False),
+            nn.GroupNorm(num_groups=_get_group_norm_groups(out_channels, 32), num_channels=out_channels),
+        )
+
+    def forward(self, cine: torch.Tensor, psir: torch.Tensor, t2w: torch.Tensor) -> torch.Tensor:
+        f_cine, f_psir, f_t2w = self.proj_mod(torch.cat((cine, psir, t2w), dim=1)).chunk(3, dim=1)
+        d_scar = f_psir - f_cine
+        d_edema = f_t2w - f_psir
+        x = self.proj_fuse(torch.cat((f_cine, f_psir, f_t2w, d_scar, d_edema), dim=1))
+        r = self.reduce(x)
+        m = F.relu(self.norm_dw(self.dw_local(r) + self.dw_dilated(r)), inplace=True)
+        m = m * self.se(m)
+        return F.relu(x + self.expand(m), inplace=True)
+
+
 __all__ = [
     "LEGACY_FUSION", "SPATIAL_FUSION", "FUSION_VERSIONS", "LegacyM2PlusFusion",
+    "STANDARD_BOTTLENECK", "LOCAL_CONTRAST_BOTTLENECK", "BOTTLENECK_FUSION_MODES",
     "SpatialAwareCrossAttention",
+    "LocalModalityContrastFusion",
     "M2Plus_Fusion",
     "build_2d_sinusoidal_positional_encoding",
     "build_2d_sincos_position_embedding",

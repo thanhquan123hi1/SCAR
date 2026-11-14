@@ -4,6 +4,10 @@ from __future__ import annotations
 import torch
 from torch import nn
 
+MEAN_SKIP_FUSION = "mean"
+MODALITY_WEIGHTED_SKIP_FUSION = "modality_weighted"
+SKIP_FUSION_MODES = (MEAN_SKIP_FUSION, MODALITY_WEIGHTED_SKIP_FUSION)
+
 
 class ConcatFusion(nn.Module):
     def __init__(self, in_channels=1024, out_channels=512):
@@ -147,8 +151,67 @@ class SSPA_AttentionGate(nn.Module):
         return out
 
 
+class TriModalSkipFusion(nn.Module):
+    """Competitive channel + spatial softmax weighting across CINE, PSIR/LGE, and T2w skips.
+
+    Replaces uniform (cine + psir + t2w)/3 averaging so fine high-resolution scar
+    (PSIR) and edema (T2w) boundary features are preserved without dilution.
+    Zero-initialized final logits start smoothly at uniform 1/3 weights.
+    """
+
+    def __init__(self, channels: int, reduction: int = 16):
+        super().__init__()
+        if channels < 1 or reduction < 1:
+            raise ValueError("channels and reduction must be positive")
+        self.channels = channels
+        mid = max(channels // reduction, 16)
+        self.channel_mlp = nn.Sequential(
+            nn.Conv2d(3 * channels, mid, kernel_size=1, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(mid, 3 * channels, kernel_size=1, bias=True),
+        )
+        self.spatial_gate = nn.Sequential(
+            nn.Conv2d(6, 16, kernel_size=3, padding=1, bias=False),
+            nn.GroupNorm(num_groups=4, num_channels=16),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(16, 3, kernel_size=1, bias=True),
+        )
+        nn.init.zeros_(self.channel_mlp[-1].weight)
+        nn.init.zeros_(self.channel_mlp[-1].bias)
+        nn.init.zeros_(self.spatial_gate[-1].weight)
+        nn.init.zeros_(self.spatial_gate[-1].bias)
+
+    @staticmethod
+    def _spatial_desc(x: torch.Tensor) -> torch.Tensor:
+        return torch.cat((x.mean(dim=1, keepdim=True), x.amax(dim=1, keepdim=True)), dim=1)
+
+    def forward(self, cine: torch.Tensor, psir: torch.Tensor, t2w: torch.Tensor) -> torch.Tensor:
+        b, c, _, _ = cine.shape
+        ch_summary = torch.cat(
+            (
+                cine.mean(dim=(2, 3), keepdim=True),
+                psir.mean(dim=(2, 3), keepdim=True),
+                t2w.mean(dim=(2, 3), keepdim=True),
+            ),
+            dim=1,
+        )
+        logits_ch = self.channel_mlp(ch_summary).view(b, 3, c, 1, 1)
+        sp_in = torch.cat(
+            (self._spatial_desc(cine), self._spatial_desc(psir), self._spatial_desc(t2w)),
+            dim=1,
+        )
+        logits_sp = self.spatial_gate(sp_in).unsqueeze(2)
+        weights = torch.softmax((logits_ch + logits_sp).float(), dim=1).to(cine.dtype)
+        stacked = torch.stack((cine, psir, t2w), dim=1)
+        return (stacked * weights).sum(dim=1)
+
+
 __all__ = [
     "ConcatFusion",
     "Fusion_Embed",
     "SSPA_AttentionGate",
+    "TriModalSkipFusion",
+    "MEAN_SKIP_FUSION",
+    "MODALITY_WEIGHTED_SKIP_FUSION",
+    "SKIP_FUSION_MODES",
 ]

@@ -36,7 +36,9 @@ from training.optimization import (
     OPTIMIZATION_PROTOCOL, build_optimizer, build_scheduler, validate_optimization_checkpoint,
 )
 from training.models import validate_model_config, model_architecture, checkpoint_model_config
-from training.models.modules.m2_plus import LEGACY_FUSION, SPATIAL_FUSION
+from training.models.modules.decoder import NO_DECODER_REFINEMENT
+from training.models.modules.fusion import MEAN_SKIP_FUSION
+from training.models.modules.m2_plus import LEGACY_FUSION, SPATIAL_FUSION, STANDARD_BOTTLENECK
 from training.models.modules.sspanet import LEGACY_SSPA_GATE
 from training.metrics.surface_distance import protocol_for_dataset, benchmark_protocol_matches, dataset_rows, summarize_dataset_rows
 
@@ -268,6 +270,13 @@ def _resume_model_config(config):
     channels = 16 * int(64 * normalized.get("resnet", {}).get("width_factor", 1.0))
     normalized.setdefault("latent_dim", channels if fusion == LEGACY_FUSION else min(256, channels))
     normalized.setdefault("use_pos_enc", fusion == SPATIAL_FUSION)
+    if lightweight:
+        normalized.setdefault("use_skip_gates", True)
+        normalized.setdefault("use_film", True)
+        normalized.setdefault("use_cross_attention", True)
+        normalized.setdefault("bottleneck_fusion", STANDARD_BOTTLENECK)
+        normalized.setdefault("skip_fusion", MEAN_SKIP_FUSION)
+        normalized.setdefault("decoder_refinement", NO_DECODER_REFINEMENT)
     return normalized
 
 

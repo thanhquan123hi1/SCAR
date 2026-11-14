@@ -278,7 +278,9 @@ def model_config_from_args(args, merged):
     if "transformer" in section:
         config.transformer.dropout_rate = float(section["transformer"].get("dropout_rate", 0.1))
     for key in ("decoder_channels", "skip_channels", "fused_channels", "n_skip", "cross_attention_heads", "classifier", "activation", "sspanet_gate",
-                "latent_dim", "fusion_version", "use_pos_enc", "sspanet_reduction"):
+                "latent_dim", "fusion_version", "use_pos_enc", "sspanet_reduction",
+                "use_skip_gates", "use_film", "use_cross_attention",
+                "bottleneck_fusion", "skip_fusion", "decoder_refinement"):
         if key in section:
             config[key] = tuple(section[key]) if key == "decoder_channels" else section[key]
     config.ablation = args.ablation

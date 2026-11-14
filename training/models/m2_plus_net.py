@@ -12,14 +12,37 @@ from torch import nn
 import torch.nn.functional as F
 
 from training.models.backbones.resnet_v2 import ResNetV2, SharedResNetV2
-from training.models.modules.decoder import DecoderCup, SegmentationHead
-from training.models.modules.fusion import Fusion_Embed, SSPA_AttentionGate
+from training.models.modules.decoder import (
+    DecoderCup,
+    SegmentationHead,
+    BoundaryRefinementBlock,
+    NO_DECODER_REFINEMENT,
+    BOUNDARY_DECODER_REFINEMENT,
+    DECODER_REFINEMENT_MODES,
+)
+from training.models.modules.fusion import (
+    Fusion_Embed,
+    SSPA_AttentionGate,
+    TriModalSkipFusion,
+    MEAN_SKIP_FUSION,
+    MODALITY_WEIGHTED_SKIP_FUSION,
+    SKIP_FUSION_MODES,
+)
 from training.models.modules.m2_plus import (
-    M2Plus_Fusion, SpatialAwareCrossAttention, LegacyM2PlusFusion,
-    LEGACY_FUSION, SPATIAL_FUSION, FUSION_VERSIONS,
+    M2Plus_Fusion,
+    SpatialAwareCrossAttention,
+    LocalModalityContrastFusion,
+    LegacyM2PlusFusion,
+    LEGACY_FUSION,
+    SPATIAL_FUSION,
+    FUSION_VERSIONS,
+    STANDARD_BOTTLENECK,
+    LOCAL_CONTRAST_BOTTLENECK,
+    BOTTLENECK_FUSION_MODES,
 )
 from training.models.modules.sspanet import (
     DEFAULT_SSPA_GATE,
+    IDENTITY_SSPA_GATE,
     LEGACY_SSPA_GATE,
     OPTIMIZED_SSPA_GATE,
     SSPANet_Block,
@@ -38,6 +61,12 @@ def get_lightweight_config() -> ConfigDict:
     config.latent_dim = 256
     config.fusion_version = SPATIAL_FUSION
     config.use_pos_enc = True
+    config.use_skip_gates = True
+    config.use_film = True
+    config.use_cross_attention = True
+    config.bottleneck_fusion = STANDARD_BOTTLENECK
+    config.skip_fusion = MEAN_SKIP_FUSION
+    config.decoder_refinement = NO_DECODER_REFINEMENT
     config.n_skip = 3
     config.n_classes = 4
     config.ablation = "LIGHTWEIGHT_M2_PLUS"
@@ -447,57 +476,107 @@ class LightweightM2PlusNet(M2PlusNet):
         sspa_reduction = getattr(self.config, "sspanet_reduction", 16)
         if self.config.get("fusion_version", SPATIAL_FUSION) != SPATIAL_FUSION:
             raise ValueError("Lightweight M2-Plus requires spatial_v2 fusion")
-        if self.config.get("sspanet_gate", OPTIMIZED_SSPA_GATE) != OPTIMIZED_SSPA_GATE:
-            raise ValueError("Lightweight M2-Plus requires optimized SSPANet")
+        sspa_gate = self.config.get("sspanet_gate", OPTIMIZED_SSPA_GATE)
+        if sspa_gate not in {OPTIMIZED_SSPA_GATE, IDENTITY_SSPA_GATE}:
+            raise ValueError("Lightweight M2-Plus requires optimized or identity SSPANet")
         self.config.fusion_version = SPATIAL_FUSION
         self.config.latent_dim = latent_dim
-        self.config.use_pos_enc = self.config.get("use_pos_enc", True)
-        self.config.sspanet_gate = OPTIMIZED_SSPA_GATE
+        self.config.use_pos_enc = bool(self.config.get("use_pos_enc", True))
+        self.config.use_skip_gates = bool(self.config.get("use_skip_gates", True))
+        self.config.use_film = bool(self.config.get("use_film", True))
+        self.config.use_cross_attention = bool(self.config.get("use_cross_attention", True))
+        bottleneck_fusion = self.config.get("bottleneck_fusion", STANDARD_BOTTLENECK)
+        if bottleneck_fusion not in BOTTLENECK_FUSION_MODES:
+            raise ValueError(f"Unknown bottleneck_fusion {bottleneck_fusion!r}; expected {BOTTLENECK_FUSION_MODES}")
+        skip_fusion_mode = self.config.get("skip_fusion", MEAN_SKIP_FUSION)
+        if skip_fusion_mode not in SKIP_FUSION_MODES:
+            raise ValueError(f"Unknown skip_fusion {skip_fusion_mode!r}; expected {SKIP_FUSION_MODES}")
+        decoder_refinement = self.config.get("decoder_refinement", NO_DECODER_REFINEMENT)
+        if decoder_refinement not in DECODER_REFINEMENT_MODES:
+            raise ValueError(f"Unknown decoder_refinement {decoder_refinement!r}; expected {DECODER_REFINEMENT_MODES}")
+        self.config.bottleneck_fusion = bottleneck_fusion
+        self.config.skip_fusion = skip_fusion_mode
+        self.config.decoder_refinement = decoder_refinement
+        self.config.sspanet_gate = sspa_gate
         self.config.sspanet_reduction = sspa_reduction
 
-        # 1. Shared ResNetV2 backbone with 3 independent 1-channel stems and FiLM adapters
+        self.use_skip_gates = self.config.use_skip_gates
+        self.use_film = self.config.use_film
+        self.use_cross_attention = self.config.use_cross_attention
+        self.bottleneck_fusion = bottleneck_fusion
+        self.skip_fusion_mode = skip_fusion_mode
+        self.decoder_refinement_mode = decoder_refinement
+
+        # 1. Shared ResNetV2 backbone with 3 independent 1-channel stems and optional FiLM adapters
         self.encoder = SharedResNetV2(
             block_units=num_layers,
             width_factor=width_factor,
             gradient_checkpointing=grad_ckpt,
+            use_film=self.use_film,
         )
 
-        # 2. OptimizedSSPANet bottleneck blocks for CINE, PSIR/LGE, and T2W
-        self.sspanet_cine = OptimizedSSPANet(bottleneck_channels, reduction_ratio=sspa_reduction, mode="residual")
-        self.sspanet_psir = OptimizedSSPANet(bottleneck_channels, reduction_ratio=sspa_reduction, mode="residual")
-        self.sspanet_t2w = OptimizedSSPANet(bottleneck_channels, reduction_ratio=sspa_reduction, mode="residual")
+        # 2. OptimizedSSPANet (or Identity) bottleneck blocks for CINE, PSIR/LGE, and T2W
+        if sspa_gate == IDENTITY_SSPA_GATE:
+            self.sspanet_cine = nn.Identity()
+            self.sspanet_psir = nn.Identity()
+            self.sspanet_t2w = nn.Identity()
+        else:
+            self.sspanet_cine = OptimizedSSPANet(bottleneck_channels, reduction_ratio=sspa_reduction, mode="residual")
+            self.sspanet_psir = OptimizedSSPANet(bottleneck_channels, reduction_ratio=sspa_reduction, mode="residual")
+            self.sspanet_t2w = OptimizedSSPANet(bottleneck_channels, reduction_ratio=sspa_reduction, mode="residual")
 
-        # 3. Spatial-Aware Decoupled Cross-Attention (latent dim 256, 2D Sinusoidal Positional Encoding)
-        self.cross_attention = SpatialAwareCrossAttention(
-            in_channels=bottleneck_channels,
-            latent_dim=latent_dim,
-            out_channels=fused_channels,
-            num_heads=cross_heads,
-            use_pos_enc=self.config.use_pos_enc,
-        )
+        # 3. Bottleneck Fusion: standard SpatialAwareCrossAttention or Phase-2 LocalModalityContrastFusion
+        if self.bottleneck_fusion == LOCAL_CONTRAST_BOTTLENECK:
+            self.cross_attention = LocalModalityContrastFusion(
+                in_channels=bottleneck_channels,
+                latent_dim=latent_dim,
+                out_channels=fused_channels,
+            )
+        else:
+            self.cross_attention = SpatialAwareCrossAttention(
+                in_channels=bottleneck_channels,
+                latent_dim=latent_dim,
+                out_channels=fused_channels,
+                num_heads=cross_heads,
+                use_pos_enc=self.config.use_pos_enc,
+                use_cross_attention=self.use_cross_attention,
+            )
         self.cross_fusion = self.cross_attention
 
-        # 4. Skip Attention Gates (SSPA_AttentionGate) filtering thoracic noise on skips
+        # 4. Skip Fusion (uniform mean or TriModalSkipFusion) + Skip Attention Gates
         skip0_ch = 8 * w
         skip1_ch = 4 * w
         skip2_ch = w
         dec_ch = getattr(self.config, "decoder_channels", (128, 64, 32, 32) if width_factor == 1.0 else (64, 32, 16, 16))
+        if self.skip_fusion_mode == MODALITY_WEIGHTED_SKIP_FUSION:
+            self.skip_fusions = nn.ModuleList([
+                TriModalSkipFusion(skip0_ch, reduction=sspa_reduction),
+                TriModalSkipFusion(skip1_ch, reduction=sspa_reduction),
+                TriModalSkipFusion(skip2_ch, reduction=sspa_reduction),
+            ])
+        else:
+            self.skip_fusions = None
 
-        self.gate_skip0 = SSPA_AttentionGate(
-            in_channels=skip0_ch,
-            gate_channels=fused_channels,
-            inter_channels=max(skip0_ch // 16, 16),
-        )
-        self.gate_skip1 = SSPA_AttentionGate(
-            in_channels=skip1_ch,
-            gate_channels=dec_ch[0],
-            inter_channels=max(skip1_ch // 16, 16),
-        )
-        self.gate_skip2 = SSPA_AttentionGate(
-            in_channels=skip2_ch,
-            gate_channels=dec_ch[1],
-            inter_channels=max(skip2_ch // 16, 16),
-        )
+        if self.use_skip_gates:
+            self.gate_skip0 = SSPA_AttentionGate(
+                in_channels=skip0_ch,
+                gate_channels=fused_channels,
+                inter_channels=max(skip0_ch // 16, 16),
+            )
+            self.gate_skip1 = SSPA_AttentionGate(
+                in_channels=skip1_ch,
+                gate_channels=dec_ch[0],
+                inter_channels=max(skip1_ch // 16, 16),
+            )
+            self.gate_skip2 = SSPA_AttentionGate(
+                in_channels=skip2_ch,
+                gate_channels=dec_ch[1],
+                inter_channels=max(skip2_ch // 16, 16),
+            )
+        else:
+            self.gate_skip0 = None
+            self.gate_skip1 = None
+            self.gate_skip2 = None
 
         # 5. Progressive Slim Decoder
         self.dec1 = SlimDecoderBlock(in_channels=fused_channels, skip_channels=skip0_ch, out_channels=dec_ch[0])
@@ -505,6 +584,10 @@ class LightweightM2PlusNet(M2PlusNet):
         self.dec3 = SlimDecoderBlock(in_channels=dec_ch[1], skip_channels=skip2_ch, out_channels=dec_ch[2])
         self.dec4 = SlimDecoderBlock(in_channels=dec_ch[2], skip_channels=0, out_channels=dec_ch[3])
         self.decoder = nn.ModuleList([self.dec1, self.dec2, self.dec3, self.dec4])
+        if self.decoder_refinement_mode == BOUNDARY_DECODER_REFINEMENT:
+            self.boundary_refine = BoundaryRefinementBlock(dec_ch[3])
+        else:
+            self.boundary_refine = None
 
         # 6. Final Segmentation Head
         self.head = nn.Conv2d(dec_ch[3], self.num_classes, kernel_size=1)
@@ -584,27 +667,35 @@ class LightweightM2PlusNet(M2PlusNet):
         fused = self.cross_attention(att_cine, att_psir, att_t2w)
 
         # 4. Multi-modal skip connections: combine CINE anatomy with PSIR scar and T2w edema
-        skip0 = (skips_cine[0] + skips_psir[0] + skips_t2w[0]) / 3.0
-        skip1 = (skips_cine[1] + skips_psir[1] + skips_t2w[1]) / 3.0
-        skip2 = (skips_cine[2] + skips_psir[2] + skips_t2w[2]) / 3.0
+        if self.skip_fusions is not None:
+            skip0 = self.skip_fusions[0](skips_cine[0], skips_psir[0], skips_t2w[0])
+            skip1 = self.skip_fusions[1](skips_cine[1], skips_psir[1], skips_t2w[1])
+            skip2 = self.skip_fusions[2](skips_cine[2], skips_psir[2], skips_t2w[2])
+        else:
+            skip0 = (skips_cine[0] + skips_psir[0] + skips_t2w[0]) / 3.0
+            skip1 = (skips_cine[1] + skips_psir[1] + skips_t2w[1]) / 3.0
+            skip2 = (skips_cine[2] + skips_psir[2] + skips_t2w[2]) / 3.0
 
-        # 5. Progressive Slim Decoder with SSPA Skip Attention Gates (thoracic noise filtering)
-        # Stage 1: H/16 -> H/8, gated skip0
-        gated_skip0 = self.gate_skip0(skip0, g=fused)
+        # 5. Progressive Slim Decoder with optional SSPA Skip Attention Gates (thoracic noise filtering)
+        # Stage 1: H/16 -> H/8, skip0
+        gated_skip0 = self.gate_skip0(skip0, g=fused) if self.use_skip_gates else skip0
         d1 = self.dec1(fused, gated_skip0)
 
-        # Stage 2: H/8 -> H/4, gated skip1
-        gated_skip1 = self.gate_skip1(skip1, g=d1)
+        # Stage 2: H/8 -> H/4, skip1
+        gated_skip1 = self.gate_skip1(skip1, g=d1) if self.use_skip_gates else skip1
         d2 = self.dec2(d1, gated_skip1)
 
-        # Stage 3: H/4 -> H/2, gated skip2
-        gated_skip2 = self.gate_skip2(skip2, g=d2)
+        # Stage 3: H/4 -> H/2, skip2
+        gated_skip2 = self.gate_skip2(skip2, g=d2) if self.use_skip_gates else skip2
         d3 = self.dec3(d2, gated_skip2)
 
         # Stage 4: H/2 -> H
         d4 = self.dec4(d3)
         if d4.shape[2:] != (target_h, target_w):
             d4 = F.interpolate(d4, size=(target_h, target_w), mode="bilinear", align_corners=False)
+
+        if self.boundary_refine is not None:
+            d4 = self.boundary_refine(d4)
 
         # 6. Final Segmentation Head
         logits = self.head(d4)

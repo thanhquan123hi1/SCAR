@@ -108,6 +108,8 @@ MODEL_KEYS = {
     "model.activation", "model.classifier", "model.transformer.dropout_rate",
     "model.sspanet_gate", "model.sspanet_reduction", "model.latent_dim",
     "model.fusion_version", "model.use_pos_enc",
+    "model.use_skip_gates", "model.use_film", "model.use_cross_attention",
+    "model.bottleneck_fusion", "model.skip_fusion", "model.decoder_refinement",
 }
 
 

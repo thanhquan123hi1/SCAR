@@ -6,7 +6,15 @@ from training.models.m2_plus_net import (
     get_lightweight_config, get_lightweight_testing,
 )
 from training.models.modules.sspanet import LEGACY_SSPA_GATE, SSPA_GATE_MODES, PAPER_FORMULA_GATE
-from training.models.modules.m2_plus import LEGACY_FUSION, SPATIAL_FUSION, FUSION_VERSIONS
+from training.models.modules.m2_plus import (
+    LEGACY_FUSION,
+    SPATIAL_FUSION,
+    FUSION_VERSIONS,
+    STANDARD_BOTTLENECK,
+    BOTTLENECK_FUSION_MODES,
+)
+from training.models.modules.fusion import MEAN_SKIP_FUSION, SKIP_FUSION_MODES
+from training.models.modules.decoder import NO_DECODER_REFINEMENT, DECODER_REFINEMENT_MODES
 
 
 def model_architecture(config):
@@ -36,8 +44,30 @@ def validate_model_config(config):
     for key in ("latent_dim", "sspanet_reduction"):
         if key in config and (type(config[key]) is not int or config[key] < 1):
             raise ValueError(f"{key} must be a positive integer")
-    if "use_pos_enc" in config and not isinstance(config["use_pos_enc"], bool):
-        raise ValueError("use_pos_enc must be a boolean")
+    for key in ("use_pos_enc", "use_skip_gates", "use_film", "use_cross_attention"):
+        if key in config and not isinstance(config[key], bool):
+            raise ValueError(f"{key} must be a boolean")
+    if config.get("bottleneck_fusion", STANDARD_BOTTLENECK) not in BOTTLENECK_FUSION_MODES:
+        raise ValueError(
+            f"Unknown bottleneck_fusion {config.get('bottleneck_fusion')!r}; expected {BOTTLENECK_FUSION_MODES}"
+        )
+    if config.get("skip_fusion", MEAN_SKIP_FUSION) not in SKIP_FUSION_MODES:
+        raise ValueError(f"Unknown skip_fusion {config.get('skip_fusion')!r}; expected {SKIP_FUSION_MODES}")
+    if config.get("decoder_refinement", NO_DECODER_REFINEMENT) not in DECODER_REFINEMENT_MODES:
+        raise ValueError(
+            f"Unknown decoder_refinement {config.get('decoder_refinement')!r}; expected {DECODER_REFINEMENT_MODES}"
+        )
+    if model_architecture(config) != "lightweight_m2_plus":
+        for key in ("use_skip_gates", "use_film", "use_cross_attention"):
+            if config.get(key) is False:
+                raise ValueError(f"{key}=False is only supported for Lightweight M2-Plus")
+        for key, default in (
+            ("bottleneck_fusion", STANDARD_BOTTLENECK),
+            ("skip_fusion", MEAN_SKIP_FUSION),
+            ("decoder_refinement", NO_DECODER_REFINEMENT),
+        ):
+            if config.get(key, default) != default:
+                raise ValueError(f"{key}={config.get(key)!r} is only supported for Lightweight M2-Plus")
 
 
 def checkpoint_model_config(config, state_dict):
@@ -52,6 +82,17 @@ def checkpoint_model_config(config, state_dict):
         raise ValueError("Checkpoint sspanet_gate disagrees with paper_formula_v1 weights; "
                          "explicit matching metadata is required")
     prefix = "cross_attention." if model_architecture(config) == "lightweight_m2_plus" else "cross_fusion."
+    if resolved.get("bottleneck_fusion", STANDARD_BOTTLENECK) != STANDARD_BOTTLENECK:
+        resolved["fusion_version"] = SPATIAL_FUSION
+        mod_proj = state_dict.get(prefix + "proj_mod.0.weight")
+        if mod_proj is not None:
+            latent_dim = mod_proj.shape[0] // 3
+            if "latent_dim" in resolved and resolved["latent_dim"] != latent_dim:
+                raise ValueError("Checkpoint latent_dim disagrees with its saved weights")
+            resolved["latent_dim"] = latent_dim
+        resolved.setdefault("use_pos_enc", False)
+        return resolved
+
     projection = state_dict.get(prefix + "proj_in.0.weight")
     legacy_projection = state_dict.get(prefix + "proj.0.weight")
     inferred = SPATIAL_FUSION if projection is not None else LEGACY_FUSION if legacy_projection is not None else None

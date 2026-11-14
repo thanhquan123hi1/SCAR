@@ -1,0 +1,18 @@
+model:
+  architecture: lightweight_m2_plus
+  model_name: Lightweight-P2-ContrastFusion
+  ablation: LIGHTWEIGHT_M2_PLUS
+  decoder_channels: [128, 64, 32, 32]
+  latent_dim: 192
+  fusion_version: spatial_v2
+  use_pos_enc: false
+  use_skip_gates: true
+  use_film: true
+  use_cross_attention: false
+  sspanet_gate: identity
+  sspanet_reduction: 16
+  bottleneck_fusion: local_contrast
+  skip_fusion: mean
+  decoder_refinement: none
+  transformer:
+    dropout_rate: 0.0

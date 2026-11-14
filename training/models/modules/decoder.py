@@ -50,6 +50,43 @@ class DecoderCup(nn.Module):
         return fused
 
 
+NO_DECODER_REFINEMENT = "none"
+BOUNDARY_DECODER_REFINEMENT = "boundary"
+DECODER_REFINEMENT_MODES = (NO_DECODER_REFINEMENT, BOUNDARY_DECODER_REFINEMENT)
+
+
+def _gn_groups(channels: int, max_groups: int = 8) -> int:
+    for g in range(min(max_groups, channels), 0, -1):
+        if channels % g == 0:
+            return g
+    return 1
+
+
+class BoundaryRefinementBlock(nn.Module):
+    """Multi-scale 3x3 + dilated-3x3 residual refinement at full prediction resolution."""
+
+    def __init__(self, channels: int):
+        super().__init__()
+        if channels < 1:
+            raise ValueError("channels must be positive")
+        groups = _gn_groups(channels, 8)
+        self.dw_local = nn.Conv2d(channels, channels, kernel_size=3, padding=1, groups=channels, bias=False)
+        self.dw_dilated = nn.Conv2d(
+            channels, channels, kernel_size=3, padding=2, dilation=2, groups=channels, bias=False
+        )
+        self.refine = nn.Sequential(
+            nn.Conv2d(2 * channels, channels, kernel_size=1, bias=False),
+            nn.GroupNorm(num_groups=groups, num_channels=channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False),
+            nn.GroupNorm(num_groups=groups, num_channels=channels),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        ms = torch.cat((self.dw_local(x), self.dw_dilated(x)), dim=1)
+        return F.relu(x + self.refine(ms), inplace=True)
+
+
 class SegmentationHead(nn.Sequential):
     def __init__(self, in_channels, out_channels, kernel_size=3):
         super().__init__(nn.Conv2d(in_channels, out_channels, kernel_size,
