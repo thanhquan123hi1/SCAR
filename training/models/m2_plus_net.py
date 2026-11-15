@@ -16,8 +16,10 @@ from training.models.modules.decoder import (
     DecoderCup,
     SegmentationHead,
     BoundaryRefinementBlock,
+    WideResidualFullConvDecoder,
     NO_DECODER_REFINEMENT,
     BOUNDARY_DECODER_REFINEMENT,
+    WIDE_RES_FPN_DECODER_REFINEMENT,
     DECODER_REFINEMENT_MODES,
 )
 from training.models.modules.fusion import (
@@ -25,9 +27,11 @@ from training.models.modules.fusion import (
     SSPA_AttentionGate,
     TriModalSkipFusion,
     SpatialResidualSkipFusion,
+    NormalizedContrastSkipFusion,
     MEAN_SKIP_FUSION,
     MODALITY_WEIGHTED_SKIP_FUSION,
     SPATIAL_RESIDUAL_SKIP_FUSION,
+    NORM_CONTRAST_SKIP_FUSION,
     SKIP_FUSION_MODES,
 )
 from training.models.modules.m2_plus import (
@@ -35,6 +39,7 @@ from training.models.modules.m2_plus import (
     SpatialAwareCrossAttention,
     LocalModalityContrastFusion,
     ResidualContrastBottleneck,
+    MultiScaleSymmetricContrastBottleneck,
     LegacyM2PlusFusion,
     LEGACY_FUSION,
     SPATIAL_FUSION,
@@ -42,6 +47,7 @@ from training.models.modules.m2_plus import (
     STANDARD_BOTTLENECK,
     LOCAL_CONTRAST_BOTTLENECK,
     RESIDUAL_CONTRAST_BOTTLENECK,
+    MULTISCALE_CONTRAST_BOTTLENECK,
     BOTTLENECK_FUSION_MODES,
 )
 from training.models.modules.sspanet import (
@@ -542,6 +548,12 @@ class LightweightM2PlusNet(M2PlusNet):
                 latent_dim=latent_dim,
                 out_channels=fused_channels,
             )
+        elif self.bottleneck_fusion == MULTISCALE_CONTRAST_BOTTLENECK:
+            self.cross_attention = MultiScaleSymmetricContrastBottleneck(
+                in_channels=bottleneck_channels,
+                latent_dim=latent_dim,
+                out_channels=fused_channels,
+            )
         else:
             self.cross_attention = SpatialAwareCrossAttention(
                 in_channels=bottleneck_channels,
@@ -553,7 +565,7 @@ class LightweightM2PlusNet(M2PlusNet):
             )
         self.cross_fusion = self.cross_attention
 
-        # 4. Skip Fusion (uniform mean, TriModalSkipFusion, or SpatialResidualSkipFusion) + Skip Attention Gates
+        # 4. Skip Fusion (uniform mean, TriModalSkipFusion, SpatialResidualSkipFusion, or NormalizedContrastSkipFusion)
         skip0_ch = 8 * w
         skip1_ch = 4 * w
         skip2_ch = w
@@ -569,6 +581,12 @@ class LightweightM2PlusNet(M2PlusNet):
                 SpatialResidualSkipFusion(skip0_ch),
                 SpatialResidualSkipFusion(skip1_ch),
                 SpatialResidualSkipFusion(skip2_ch),
+            ])
+        elif self.skip_fusion_mode == NORM_CONTRAST_SKIP_FUSION:
+            self.skip_fusions = nn.ModuleList([
+                NormalizedContrastSkipFusion(skip0_ch),
+                NormalizedContrastSkipFusion(skip1_ch),
+                NormalizedContrastSkipFusion(skip2_ch),
             ])
         else:
             self.skip_fusions = None
@@ -602,8 +620,16 @@ class LightweightM2PlusNet(M2PlusNet):
         self.decoder = nn.ModuleList([self.dec1, self.dec2, self.dec3, self.dec4])
         if self.decoder_refinement_mode == BOUNDARY_DECODER_REFINEMENT:
             self.boundary_refine = BoundaryRefinementBlock(dec_ch[3])
+            self.wide_res_fpn = None
+        elif self.decoder_refinement_mode == WIDE_RES_FPN_DECODER_REFINEMENT:
+            self.boundary_refine = None
+            self.wide_res_fpn = WideResidualFullConvDecoder(
+                skip_channels=(skip0_ch, skip1_ch, skip2_ch),
+                dec_channels=tuple(dec_ch),
+            )
         else:
             self.boundary_refine = None
+            self.wide_res_fpn = None
 
         # 6. Final Segmentation Head
         self.head = nn.Conv2d(dec_ch[3], self.num_classes, kernel_size=1)
@@ -696,20 +722,28 @@ class LightweightM2PlusNet(M2PlusNet):
         # Stage 1: H/16 -> H/8, skip0
         gated_skip0 = self.gate_skip0(skip0, g=fused) if self.use_skip_gates else skip0
         d1 = self.dec1(fused, gated_skip0)
+        if self.wide_res_fpn is not None:
+            d1 = self.wide_res_fpn.refine_stage1(d1, gated_skip0)
 
         # Stage 2: H/8 -> H/4, skip1
         gated_skip1 = self.gate_skip1(skip1, g=d1) if self.use_skip_gates else skip1
         d2 = self.dec2(d1, gated_skip1)
+        if self.wide_res_fpn is not None:
+            d2 = self.wide_res_fpn.refine_stage2(d2, gated_skip1)
 
         # Stage 3: H/4 -> H/2, skip2
         gated_skip2 = self.gate_skip2(skip2, g=d2) if self.use_skip_gates else skip2
         d3 = self.dec3(d2, gated_skip2)
+        if self.wide_res_fpn is not None:
+            d3 = self.wide_res_fpn.refine_stage3(d3, gated_skip2)
 
         # Stage 4: H/2 -> H
         d4 = self.dec4(d3)
         if d4.shape[2:] != (target_h, target_w):
             d4 = F.interpolate(d4, size=(target_h, target_w), mode="bilinear", align_corners=False)
 
+        if self.wide_res_fpn is not None:
+            d4 = self.wide_res_fpn.refine_stage4(d4, d3, d2)
         if self.boundary_refine is not None:
             d4 = self.boundary_refine(d4)
 

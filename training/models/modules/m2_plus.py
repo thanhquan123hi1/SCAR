@@ -26,7 +26,13 @@ FUSION_VERSIONS = (LEGACY_FUSION, SPATIAL_FUSION)
 STANDARD_BOTTLENECK = "standard"
 LOCAL_CONTRAST_BOTTLENECK = "local_contrast"
 RESIDUAL_CONTRAST_BOTTLENECK = "residual_contrast"
-BOTTLENECK_FUSION_MODES = (STANDARD_BOTTLENECK, LOCAL_CONTRAST_BOTTLENECK, RESIDUAL_CONTRAST_BOTTLENECK)
+MULTISCALE_CONTRAST_BOTTLENECK = "multiscale_contrast"
+BOTTLENECK_FUSION_MODES = (
+    STANDARD_BOTTLENECK,
+    LOCAL_CONTRAST_BOTTLENECK,
+    RESIDUAL_CONTRAST_BOTTLENECK,
+    MULTISCALE_CONTRAST_BOTTLENECK,
+)
 
 
 def _get_group_norm_groups(channels: int, max_groups: int = 32) -> int:
@@ -433,13 +439,98 @@ class ResidualContrastBottleneck(nn.Module):
         return F.relu(base_out + self.contrast_gamma * delta, inplace=True)
 
 
+class MultiScaleSymmetricContrastBottleneck(nn.Module):
+    """E5-anchored bottleneck with 4-way symmetric contrast, multi-scale 3x3 pyramid, and global slice gate.
+
+    Upgrades ResidualContrastBottleneck (B1R) with:
+      1. 4-way symmetric rectified differences in shared GroupNorm-aligned space:
+         - d_scar_cine  = ReLU(f_psir - f_cine): LGE/PSIR hyper-enhancement over CINE
+         - d_scar_t2    = ReLU(f_psir - f_t2w):  Pure Scar excess over T2w (suppresses Edema-as-Scar FP)
+         - d_edema_pure = ReLU(f_t2w  - f_psir): Pure Edema excess over PSIR (suppresses Scar-as-Edema FP)
+         - d_aar        = ReLU(f_t2w  - f_cine): Total Area-at-Risk excess over CINE
+      2. Wide 256-ch multi-scale spatial pyramid (Full 3x3 Conv + Dilated 3x3 Conv + residual shortcut).
+      3. Global Peak-to-Mean Slice Gate (compares slice peak against slice mean to suppress negative-slice FP).
+    """
+
+    def __init__(
+        self,
+        in_channels: int = 1024,
+        latent_dim: int = 256,
+        out_channels: int = 512,
+    ):
+        super().__init__()
+        if in_channels < 1 or latent_dim < 1 or out_channels < 1:
+            raise ValueError("Bottleneck fusion channel dimensions must be positive")
+        self.in_channels = in_channels
+        self.latent_dim = latent_dim
+        self.out_channels = out_channels
+
+        self.proj_in = nn.Sequential(
+            nn.Conv2d(in_channels, latent_dim, kernel_size=1, bias=False),
+            nn.GroupNorm(num_groups=_get_group_norm_groups(latent_dim, 32), num_channels=latent_dim),
+            nn.ReLU(inplace=True),
+        )
+        self.proj_out = nn.Sequential(
+            nn.Conv2d(latent_dim * 3, out_channels, kernel_size=1, bias=False),
+            nn.GroupNorm(num_groups=_get_group_norm_groups(out_channels, 32), num_channels=out_channels),
+            nn.ReLU(inplace=False),
+        )
+
+        mid = max(latent_dim, 64)
+        g_mid = _get_group_norm_groups(mid, 32)
+        g_out = _get_group_norm_groups(out_channels, 32)
+        gate_hidden = max(mid // 4, 16)
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(202611 + in_channels + latent_dim + out_channels)
+            self.compress = nn.Sequential(
+                nn.Conv2d(latent_dim * 4, mid, kernel_size=1, bias=False),
+                nn.GroupNorm(num_groups=g_mid, num_channels=mid),
+                nn.ReLU(inplace=True),
+            )
+            self.ms_conv3x3 = nn.Conv2d(mid, mid, kernel_size=3, padding=1, bias=False)
+            self.ms_dilated = nn.Conv2d(mid, mid, kernel_size=3, padding=2, dilation=2, groups=mid, bias=False)
+            self.ms_norm = nn.GroupNorm(num_groups=g_mid, num_channels=mid)
+            self.slice_gate = nn.Sequential(
+                nn.Conv2d(mid * 2, gate_hidden, kernel_size=1, bias=True),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(gate_hidden, mid, kernel_size=1, bias=True),
+                nn.Sigmoid(),
+            )
+            self.expand = nn.Sequential(
+                nn.Conv2d(mid, out_channels, kernel_size=1, bias=False),
+                nn.GroupNorm(num_groups=g_out, num_channels=out_channels),
+            )
+            self.contrast_gamma = nn.Parameter(torch.zeros(1, out_channels, 1, 1))
+
+    def forward(self, cine: torch.Tensor, psir: torch.Tensor, t2w: torch.Tensor) -> torch.Tensor:
+        q_feat = self.proj_in(cine)
+        k_scar = self.proj_in(psir)
+        k_edema = self.proj_in(t2w)
+        base_out = self.proj_out(torch.cat((q_feat, k_scar, k_edema), dim=1))
+
+        d_scar_cine = F.relu(k_scar - q_feat)
+        d_scar_t2 = F.relu(k_scar - k_edema)
+        d_edema_pure = F.relu(k_edema - k_scar)
+        d_aar = F.relu(k_edema - q_feat)
+
+        c = self.compress(torch.cat((d_scar_cine, d_scar_t2, d_edema_pure, d_aar), dim=1))
+        m = F.relu(self.ms_norm(self.ms_conv3x3(c) + self.ms_dilated(c) + c), inplace=True)
+        m_avg = m.mean(dim=(2, 3), keepdim=True)
+        m_max = m.amax(dim=(2, 3), keepdim=True)
+        g = self.slice_gate(torch.cat((m_avg, m_max - m_avg), dim=1))
+        delta = self.expand(m * g)
+        return F.relu(base_out + self.contrast_gamma * delta, inplace=True)
+
+
 __all__ = [
     "LEGACY_FUSION", "SPATIAL_FUSION", "FUSION_VERSIONS", "LegacyM2PlusFusion",
     "STANDARD_BOTTLENECK", "LOCAL_CONTRAST_BOTTLENECK", "RESIDUAL_CONTRAST_BOTTLENECK",
+    "MULTISCALE_CONTRAST_BOTTLENECK",
     "BOTTLENECK_FUSION_MODES",
     "SpatialAwareCrossAttention",
     "LocalModalityContrastFusion",
     "ResidualContrastBottleneck",
+    "MultiScaleSymmetricContrastBottleneck",
     "M2Plus_Fusion",
     "build_2d_sinusoidal_positional_encoding",
     "build_2d_sincos_position_embedding",

@@ -7,7 +7,13 @@ from torch import nn
 MEAN_SKIP_FUSION = "mean"
 MODALITY_WEIGHTED_SKIP_FUSION = "modality_weighted"
 SPATIAL_RESIDUAL_SKIP_FUSION = "spatial_residual"
-SKIP_FUSION_MODES = (MEAN_SKIP_FUSION, MODALITY_WEIGHTED_SKIP_FUSION, SPATIAL_RESIDUAL_SKIP_FUSION)
+NORM_CONTRAST_SKIP_FUSION = "norm_contrast"
+SKIP_FUSION_MODES = (
+    MEAN_SKIP_FUSION,
+    MODALITY_WEIGHTED_SKIP_FUSION,
+    SPATIAL_RESIDUAL_SKIP_FUSION,
+    NORM_CONTRAST_SKIP_FUSION,
+)
 
 
 class ConcatFusion(nn.Module):
@@ -262,14 +268,69 @@ class SpatialResidualSkipFusion(nn.Module):
         return base + self.gamma * self.contrast_refine(contrast)
 
 
+class NormalizedContrastSkipFusion(nn.Module):
+    """E5-anchored skip fusion with GroupNorm-aligned 4-way symmetric contrast and full 3x3 fusion.
+
+    Aligns CINE, PSIR, and T2w skip features via a shared 1x1 Conv + GroupNorm + ReLU
+    projection before computing 4-way rectified differences (d_scar_cine, d_scar_t2,
+    d_edema_pure, d_aar), processes them through a full 3x3 spatial context block,
+    and injects the result into E5's uniform skip mean via a zero-initialized scale.
+    """
+
+    def __init__(self, channels: int):
+        super().__init__()
+        if channels < 1:
+            raise ValueError("channels must be positive")
+        self.channels = channels
+        mid = max(channels // 2, 32)
+        gn_mid = 16 if mid >= 16 and mid % 16 == 0 else (8 if mid >= 8 and mid % 8 == 0 else 1)
+        gn_out = 16 if channels >= 16 and channels % 16 == 0 else (8 if channels >= 8 and channels % 8 == 0 else 1)
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(202622 + channels)
+            self.align_proj = nn.Sequential(
+                nn.Conv2d(channels, mid, kernel_size=1, bias=False),
+                nn.GroupNorm(num_groups=gn_mid, num_channels=mid),
+                nn.ReLU(inplace=True),
+            )
+            self.contrast_fuse = nn.Sequential(
+                nn.Conv2d(mid * 4, mid, kernel_size=1, bias=False),
+                nn.GroupNorm(num_groups=gn_mid, num_channels=mid),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(mid, mid, kernel_size=3, padding=1, bias=False),
+                nn.GroupNorm(num_groups=gn_mid, num_channels=mid),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(mid, channels, kernel_size=1, bias=False),
+                nn.GroupNorm(num_groups=gn_out, num_channels=channels),
+            )
+            self.gamma = nn.Parameter(torch.zeros(1, channels, 1, 1))
+
+    def forward(self, cine: torch.Tensor, psir: torch.Tensor, t2w: torch.Tensor) -> torch.Tensor:
+        base = (cine + psir + t2w) / 3.0
+        q_cine = self.align_proj(cine)
+        k_psir = self.align_proj(psir)
+        k_t2w = self.align_proj(t2w)
+
+        d_scar_cine = torch.relu(k_psir - q_cine)
+        d_scar_t2 = torch.relu(k_psir - k_t2w)
+        d_edema_pure = torch.relu(k_t2w - k_psir)
+        d_aar = torch.relu(k_t2w - q_cine)
+
+        delta = self.contrast_fuse(
+            torch.cat((d_scar_cine, d_scar_t2, d_edema_pure, d_aar), dim=1)
+        )
+        return base + self.gamma * delta
+
+
 __all__ = [
     "ConcatFusion",
     "Fusion_Embed",
     "SSPA_AttentionGate",
     "TriModalSkipFusion",
     "SpatialResidualSkipFusion",
+    "NormalizedContrastSkipFusion",
     "MEAN_SKIP_FUSION",
     "MODALITY_WEIGHTED_SKIP_FUSION",
     "SPATIAL_RESIDUAL_SKIP_FUSION",
+    "NORM_CONTRAST_SKIP_FUSION",
     "SKIP_FUSION_MODES",
 ]

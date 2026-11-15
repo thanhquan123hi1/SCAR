@@ -1,8 +1,10 @@
 # Research Handoff — Lightweight M2-Plus Optimization on MyoPS++
 
 > Tài liệu bàn giao toàn bộ quá trình thực nghiệm, kết quả định lượng, chẩn đoán lỗi, mã nguồn đã chỉnh sửa, vị trí tài nguyên đã sao lưu và kế hoạch bước tiếp theo để phiên làm việc sau có thể tiếp tục ngay mà không cần train/test lại hay phân tích lại từ đầu.
-> **Mốc tốt nhất hiện tại (`seed=1234`, `test_vol`):** **`E5-B1R`** (`lightweight_e5_b1r_res_contrast.yaml`, `14,311,415` params) — **`AvgPathExcl = 57.75%`** (`+0.68 pp` vs `E5`), **`AvgPathIncl = 71.89%`**, vượt `E5` về Dice trên cả 5 vùng giải phẫu/bệnh lý.
-> **Cập nhật lần cuối:** `2026-11-15 04:12 UTC`
+> **Mốc tốt nhất hiện tại (`seed=1234`, `test_vol`):**
+> - **#1 (Kỷ lục Dice):** **`E5-B1R-S3-NormSkip`** ([lightweight_e5_b1r_s3_norm_skip.yaml](training/config/models/lightweight_e5_b1r_s3_norm_skip.yaml), `15,726,455` params, `9.4695 G` FLOPs) — **`AvgPathExcl = 58.47%`** (`+1.40 pp` vs `E5`, `+0.72 pp` vs `E5-B1R`), **`AvgPathIncl = 72.53%`**, thắng `Scar = 71.26%`, `Edema = 45.69%`, `NormMyo = 79.04%`.
+> - **#2 (Tốt nhất về Hiệu quả/Chi phí & HD95):** **`E5-B2-MSContrast`** ([lightweight_e5_b2_ms_contrast.yaml](training/config/models/lightweight_e5_b2_ms_contrast.yaml), `15,181,751` params, `7.9891 G` FLOPs) — **`AvgPathExcl = 58.20%`**, **`AvgPathExcl HD95 = 14.87 mm`**, `AvgPathIncl = 72.23% / 11.66 mm`, gần như không tốn thêm FLOPs/VRAM so với `E5-B1R`.
+> **Cập nhật lần cuối:** `2026-11-15 05:12 UTC` (Đầy đủ Đợt 1–4 + gói khôi phục Drive sau khi ngắt Colab)
 
 ---
 
@@ -98,7 +100,7 @@ Tất cả 9 thử nghiệm đều giữ nguyên 100% dataset split (`64/0/16`),
 ### 5.2 Tại sao `E5-B1R` là Model Tốt Nhất Hiện tại & Chẩn đoán Gốc rễ W1–W3
 
 1. **`E5-B1R` vượt `E5` toàn diện về Dice và phần lớn biên giải phẫu:**
-   - **Thắng `E5` về Dice ở cả 5 vùng:** `AvgPathExcl` (`57.75%` vs `57.07%`, **`+0.68 pp` — kỷ lục cao nhất mọi thí nghiệm trên `MyoPS++`**), `AvgPathIncl` (`71.89%` vs `71.65%`, `+0.24 pp`), `Edema` (`44.62%` vs `43.30%`, **`+1.32 pp`**, kéo cả Precision `+1.84 pp` lẫn Recall `+2.17 pp`), `EdemaIncl` (`72.89%` vs `72.46%`, `+0.43 pp`), `Scar` (`70.88%` vs `70.84%`, `+0.04 pp`), `NormalMyo` (`77.89%` vs `77.84%`), `MyoRing` (`88.05%` = `88.05%`, median `89.58%` vs `89.01%`).
+   - **Thắng `E5` về Dice ở cả 5 vùng:** `AvgPathExcl` (`57.75%` vs `57.07%`, `+0.68 pp`), `AvgPathIncl` (`71.89%` vs `71.65%`, `+0.24 pp`), `Edema` (`44.62%` vs `43.30%`, `+1.32 pp`, kéo cả Precision `+1.84 pp` lẫn Recall `+2.17 pp`), `EdemaIncl` (`72.89%` vs `72.46%`, `+0.43 pp`), `Scar` (`70.88%` vs `70.84%`, `+0.04 pp`), `NormalMyo` (`77.89%` vs `77.84%`), `MyoRing` (`88.05%` = `88.05%`, median `89.58%` vs `89.01%`).
    - **Cải thiện HD95 ở 4/5 vùng:** `Edema HD95` giảm `-0.93 mm` (`20.55` vs `21.48 mm`, med `18.39` vs `20.04 mm`), `NormalMyo HD95` (`4.72` vs `4.99 mm`), `EdemaIncl HD95` (`14.42` vs `14.69 mm`), `MyoRing HD95` (`2.80` vs `2.81 mm`).
    - **Tác dụng của `torch.random.fork_rng`:** `E5-B1R` và `E5-B1` có kiến trúc y hệt (`14,311,415` params), chỉ khác `fork_rng` cô lập RNG khởi tạo nhánh `contrast_branch` trong `ResidualContrastBottleneck` (`training/models/modules/m2_plus.py`) để giữ nguyên quỹ đạo RNG gốc như `E5`. Nhờ giữ được quỹ đạo đó, **`AvgPathExcl` tăng `+1.52 pp`** (`57.75%` vs `56.23%`) và **`Edema` tăng `+2.33 pp`** (`44.62%` vs `42.29%`). Tham số `cross_attention.contrast_gamma` (512d) hội tụ sạch ở `absmean=0.03785` (`[-0.12253, +0.11514]`).
 2. **Outlier `Case3003 z=2` (`GT Scar = 0`) — nguyên nhân duy nhất khiến `Scar HD95` của `E5-B1R` (`11.04 mm`) cao hơn `E5` (`8.54 mm`):**
@@ -113,48 +115,128 @@ Tất cả 9 thử nghiệm đều giữ nguyên 100% dataset split (`64/0/16`),
 
 ---
 
-## 6. Kiểm kê Tài nguyên, Backup Drive & Hướng dẫn Tiếp tục Phiên sau
+## 6. Giai đoạn 3 (Đợt 4 — Wave 4, `2026-11-15`): Vượt Ngưỡng `58%+` `AvgPathExcl`
 
-### 6.1 Vị trí lưu trữ trên Google Drive (`/content/NCKH_V2` = `gdrive:NCKH_V2`)
-- **Mốc tốt nhất hiện tại (`E5-B1R` — CÓ trọng số `.pt`):**
-  `/content/NCKH_V2/Checkpoints/MyoPS++/The_New_World/E5_B1R_ResContrast/`
-  - `lightweighte5b1rrescontrast_seed1234.pt` (`172,563,901 bytes` — đã đối chiếu SHA256 khớp bản local)
-  - `lightweight_e5_b1r_res_contrast.yaml`, `summary.json`, `logs/` (trọn bộ log train & `test_results/` + 16 mask dự đoán), `tensorboard/`.
-- **Mốc nền trước đó (`E5` — CÓ trọng số `.pt`):**
-  `/content/NCKH_V2/Checkpoints/MyoPS++/The_New_World/E5_Lightweight_No_CrossAttn/` (`lightweightnocrossattn_seed1234.pt`).
+Cả 3 mô hình Wave 4 tiếp tục giữ nguyên 100% dataset split (`64/0/16`), augmentation, optimizer (`AdamW`), scheduler, `seed=1234`, `300 epochs`, `bf16` trên `NVIDIA A100-SXM4-40GB` (`amp_skipped_updates = 0` trên tất cả các run). Chi phí `FLOPs / MACs (G)` đo theo `training.benchmark.counted_flops` với input `(1, 1, 128, 128) × 3` (`1 MAC = 2 FLOPs`), `Peak VRAM` lấy max `train/gpu_peak_allocated_mb` & `train/gpu_peak_reserved_mb` ở `batch_size=16`.
+
+### 6.1 Bảng So sánh Wave 4 vs `E5` & `E5-B1R` (`test_vol` `16` ca)
+
+| Mã | Config (`training/config/models/`) | Thay đổi Kiến trúc | Params | FLOPs / MACs (G) | Peak VRAM (Alloc / Res) | Train `mDice` / Time | Scar Dice / HD95 | Edema Dice / HD95 | Edema Incl | NormMyo | Ring | **`AvgPathExcl`** | **`AvgPathIncl`** |
+| :--- | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **`E5`** *(Ref)* | `lightweight_no_cross_attention` | Baseline đã chốt | `14,144,375` | `7.8629 / 3.9315` | — | `0.909` | `70.84% / 8.54` | `43.30% / 21.48` | `72.46%` | `77.84%` | `88.05%` | `57.07% / 15.01` | `71.65% / 11.61` |
+| **`E5-B1R`** *(Best W3)* | `lightweight_e5_b1r_res_contrast` | `ResidualContrastBottleneck` (`fork_rng`) | `14,311,415` | `7.8840 / 3.9420` | `2,541.6 / 2,616.0 MB` | `0.9084 / 31.5m` | `70.88% / 11.04` | `44.62% / 20.55` | `72.89%` | `77.89%` | `88.05%` | `57.75% / 15.80` | `71.89% / 12.73` |
+| **`E5-B2-MSContrast`** *(#2)* | `lightweight_e5_b2_ms_contrast` | `MultiScaleSymmetricContrastBottleneck` | `15,181,751` | **`7.9891 / 3.9946`** | **`2,561.4 / 2,634.0 MB`** | `0.9091 / 31.9m` | `70.76%` / **`9.85`** | `45.65%` / **`19.89`** | `73.69%` | `77.92%` | `88.06%` | `58.20%` / **`14.87`** | `72.23%` / **`11.66`** |
+| **`E5-B1R-S3-NormSkip`** *(#1)* | **`lightweight_e5_b1r_s3_norm_skip`** | `B1R` + `NormalizedContrastSkipFusion` | `15,726,455` | `9.4695 / 4.7347` | `3,049.2 / 3,146.0 MB` | `0.9177 / 33.0m` | **`71.26%`** / `10.55` | **`45.69%`** / `20.57` | **`73.80%`** | **`79.04%`** | **`88.21%`** | **`58.47%`** / `15.56` | **`72.53%`** / `12.09` |
+| **`E5-B1R-D2-WideFPN`** | `lightweight_e5_b1r_d2_wide_fpn` | `B1R` + `WideResidualFullConvDecoder` | `15,406,391` | `11.1577 / 5.5788` | `3,395.4 / 3,636.0 MB` | `0.9102 / 33.0m` | `70.15% / 12.28` | `45.11% / 19.92` | `73.08%` | `78.18%` | `87.92%` | `57.63% / 16.10` | `71.61% / 12.90` |
+
+#### Chi tiết Precision / Recall / ASD & các ca khó trên `test_vol` (Wave 4)
+- **`E5-B1R-S3-NormSkip` *(#1 BEST)*:**
+  - `Scar`: `P 81.00% / R 67.41%` *(med `73.33%`)*, HD95 `10.55 mm` *(med `6.04`)*, ASD `2.32 mm`
+  - `Edema`: `P 46.93% / R 51.31%` *(med `48.37%`)*, HD95 `20.57 mm` *(med `19.42`)*, ASD `4.47 mm`
+  - `EdemaIncl`: `P 77.98% / R 71.87%` *(med `74.52%`)*, HD95 `13.63 mm`, ASD `2.46 mm`
+  - `NormMyo`: `P 79.26% / R 79.61%`, HD95 `4.70 mm` *(med `3.64`)*, ASD `0.85 mm`
+  - `MyoRing`: `P 89.58% / R 87.22%`, HD95 `2.90 mm`, ASD `0.49 mm`
+  - Ca khó: `Case3003 scar = 66.4% / 36.68 mm` (`122` FP Scar voxels ở `z=2`), `Case2012 scar = 35.5% / 37.35 mm`, `Case2013 edema = 32.1% / 47.47 mm`, `Case3007 edema = 27.5% / 14.32 mm`.
+- **`E5-B2-MSContrast` *(#2 & Best HD95)*:**
+  - `Scar`: `P 79.96% / R 66.84%` *(med `74.19%`)*, HD95 **`9.85 mm`** *(med `6.72`)*, ASD **`2.00 mm`**
+  - `Edema`: `P 45.97% / R 51.86%` *(med **`50.61%`**)*, HD95 **`19.89 mm`**, ASD `4.60 mm`
+  - `EdemaIncl`: `P 76.65% / R 72.56%` *(med **`77.49%`**)*, HD95 **`13.48 mm`**, ASD **`2.35 mm`**
+  - `NormMyo`: `P 79.70% / R 77.61%`, HD95 `4.74 mm`, ASD `0.89 mm`
+  - `MyoRing`: `P 89.36% / R 87.08%`, HD95 `2.81 mm`, ASD `0.47 mm`
+  - Ca khó: `Case3003 scar = 73.2% / 34.67 mm` (kéo FP Scar trên lát `z=2` xuống còn **`51` voxels** — thấp nhất trong tất cả 12 biến thể!), `Case2012 scar = 42.1% / 13.96 mm`, `Case2013 edema = 34.0% / 42.24 mm`, `Case3007 edema = 30.6% / 22.77 mm`.
+- **`E5-B1R-D2-WideFPN`:**
+  - `Scar`: `P 78.71% / R 66.88%` (ASD `2.48 mm`), `Edema`: `P 46.01% / R 50.46%` (ASD `4.55 mm`), `NormMyo`: `78.18%` (HD95 `4.64 mm`). Ca khó: `Case3003 z=2` `154` FP Scar voxels (`62.9% / 37.25 mm`).
+
+### 6.2 Phân tích Cơ chế Wave 4 — Tại sao Hai Nhánh Tốt Nhất Bổ Trợ Nhau
+1. **`NormalizedContrastSkipFusion` (`E5-B1R-S3-NormSkip`):** Chiếu CINE/PSIR/T2w skip qua `1x1 Conv + GroupNorm + ReLU` chung (`align_proj`) rồi tính 4 hiệu đối xứng có định hướng (`d_scar_cine`, `d_scar_t2`, `d_edema_pure`, `d_aar`) qua khối Conv `3x3` đầy đủ (`fork_rng`, `gamma` init=0). Giúp nâng Dice đồng loạt cả mô lành lẫn bệnh lý (`NormalMyo +1.15 pp`, `Scar +0.38 pp`, `Edema +1.07 pp` vs `E5-B1R`), đạt **`58.47% AvgPathExcl` / `72.53% AvgPathIncl`**. Tuy nhiên chưa có slice gate tại bottleneck nên `Case3003 z=2` vẫn còn `122` voxel Scar FP (`Scar HD95 = 10.55 mm`).
+2. **`MultiScaleSymmetricContrastBottleneck` (`E5-B2-MSContrast`):** Mở rộng bottleneck bằng tương phản 4 chiều + nhánh đa tỉ lệ (`Conv3x3` + `Dilated3x3`) + **Global Peak-to-Mean Slice Gate (`m_avg`, `m_max - m_avg`)** với gần như **không tăng chi phí** (`7.9891 G` vs `7.8840 G` FLOPs; `2,561.4 MB` vs `2,541.6 MB` VRAM). Chính Slice Gate giúp giảm FP Scar ở `Case3003 z=2` xuống đáy (`51` voxels), kéo **`AvgPathExcl HD95` xuống `14.87 mm`** (thắng `E5` `15.01 mm` lẫn `E5-B1R` `15.80 mm`) và **`AvgPathExcl` lên `58.20%`**.
+3. **`WideResidualFullConvDecoder` (`E5-B1R-D2-WideFPN`):** Tốn `11.16 G` FLOPs & `3.40 GB` Peak VRAM nhưng rớt `Scar` (`70.15%`, `12.28 mm`), khẳng định nút thắt nằm ở **tương phản đa phương thức tại bottleneck & skip**, không phải thiếu độ rộng Conv ở decoder.
+
+---
+
+## 7. Kiểm kê Tài nguyên, Backup Drive & Hướng dẫn Khôi phục Sau Khi Ngắt Colab
+
+> Toàn bộ tài nguyên quan trọng đã được lưu lâu dài trên Google Drive (`/content/NCKH_V2` = `gdrive:NCKH_V2`) để đảm bảo **khi ngắt session Colab này, không mất bất kỳ code, trọng số hay log/metric nào**.
+
+### 7.1 Vị trí lưu trữ trên Google Drive (`/content/NCKH_V2`)
+- **#1 Best Model (`E5-B1R-S3-NormSkip` — CÓ trọng số `.pt`):**
+  `/content/NCKH_V2/Checkpoints/MyoPS++/The_New_World/E5_B1R_S3_NormSkip/`
+  - `lightweighte5b1rs3normskip_seed1234.pt` (SHA256 verified), `lightweight_e5_b1r_s3_norm_skip.yaml`, `summary.json`, `logs/`, `tensorboard/`.
+- **#2 Best HD95 / Efficiency (`E5-B2-MSContrast` — CÓ trọng số `.pt`):**
+  `/content/NCKH_V2/Checkpoints/MyoPS++/The_New_World/E5_B2_MSContrast/`
+  - `lightweighte5b2mscontrast_seed1234.pt` (SHA256 verified), `lightweight_e5_b2_ms_contrast.yaml`, `summary.json`, `logs/`, `tensorboard/`.
+- **Mốc nền trước đó (CÓ trọng số `.pt`):**
+  - `E5-B1R` (`57.75%`): `/content/NCKH_V2/Checkpoints/MyoPS++/The_New_World/E5_B1R_ResContrast/`
+  - `E5` (`57.07%`): `/content/NCKH_V2/Checkpoints/MyoPS++/The_New_World/E5_Lightweight_No_CrossAttn/`
 - **Phase 1 & 2 (`E1..E6`, `P2-1..P2-4`):** `Lightweight_Phase1_Ablation/`, `Lightweight_Phase2_Arch/`.
-- **Phase 3 logs & metrics cho toàn bộ 9 thử nghiệm (KHÔNG lưu `.pt` của `A1/A2/L1/B1/S2/L2/L3/Combo`):**
+- **Logs & Metrics toàn bộ 12 thí nghiệm Phase 3 + Wave 4 (KHÔNG lưu `.pt` các biến thể không thắng như `A1/A2/L1/B1/S2/L2/L3/Combo/D2-WideFPN`):**
   `/content/NCKH_V2/Checkpoints/MyoPS++/The_New_World/Lightweight_Phase3_E5_Optimization/`
-  - `configs/`: toàn bộ `lightweight_e5_*.yaml` + `lightweight_no_cross_attention.yaml`
-  - `per_variant_logs/{E5-A1,E5-A2,E5-L1,E5-B1,E5-S2,E5-L2,E5-B1R,E5-L3,E5-Combo}/`: trọn bộ `config.json`, `summary.json`, `metrics.csv`, `metrics.jsonl`, `train.log`, `splits/`, và `test_results/` (`metrics.json`, `per_case.csv`, `test.log`, 16 cặp mask dự đoán `Case*_pred.{nii.gz,npz}`).
-  - Bảng tổng hợp 9 biến thể: `phase3_summary_metrics.csv`, `phase3_per_case_long.csv`, `phase3_per_case_wide.csv`.
-- **Tập `MyoPS380` (tách biệt, đơn vị voxel):** `/content/NCKH_V2/Checkpoints/MyoPS380/E5_Lightweight_No_CrossAttn/` (`Nov 15 00:40 UTC`).
+  - `configs/`: đủ 13 YAML (`lightweight_no_cross_attention.yaml` + 12 YAML `lightweight_e5_*.yaml`).
+  - `per_variant_logs/`: đủ **12** thư mục (`E5-A1`, `E5-A2`, `E5-L1`, `E5-B1`, `E5-S2`, `E5-L2`, `E5-B1R`, `E5-L3`, `E5-Combo`, `E5-B2-MSContrast`, `E5-B1R-S3-NormSkip`, `E5-B1R-D2-WideFPN`) chứa trọn `config.json`, `summary.json`, `metrics.csv`, `metrics.jsonl`, `train.log`, `splits/`, `test_results/` (kèm 16 mask dự đoán `Case*_pred.{nii.gz,npz}`).
+  - Bảng tổng hợp 12 biến thể (đã cập nhật cả FLOPs/MACs/Peak VRAM): `phase3_summary_metrics.csv`, `phase3_per_case_long.csv`, `phase3_per_case_wide.csv`.
+- **Gói Backup Code, Git History & Dataset Cache (phòng mất dữ liệu khi ngắt Colab):**
+  `/content/NCKH_V2/Checkpoints/MyoPS++/The_New_World/SCAR_Code_Backup/`
+  - `SCAR_main.bundle` *(đủ toàn bộ commit Git trên `main`, kể cả các commit sau `origin/main` `146ef02`)*
+  - `SCAR_code_snapshot.tar.gz` *(code `training/`, `tests/`, `scripts/`, `pytest.ini`, `RESEARCH_HANDOFF.md`)*
+  - `unpushed_from_origin.patch` *(patch đầy đủ từ `146ef02..HEAD`)*
+  - `myopspp_unet2d_roi128_1mm_cache.tar.gz` *(bản cache 2D đã chuẩn bị sẵn của `data/myopspp_unet2d_roi128_1mm/cache` kèm `lists/` & `dataset_metadata.json`, giải nén chạy được ngay)*
+- **Dataset gốc & Pretrained đã có sẵn trên Drive:**
+  - Dataset NIfTI gốc: `/content/NCKH_V2/Dataset/MyoPSpp_UNet2D_ROI128_1mm.zip` (`92,880,113 bytes`)
+  - Pretrained backbone: `/content/NCKH_V2/i_mmseg/ViT_checkpoint/R50-ViT-B_16.npz` (`440 MB`)
+- **Tập `MyoPS380` (tách biệt, đơn vị voxel):** `/content/NCKH_V2/Checkpoints/MyoPS380/E5_Lightweight_No_CrossAttn/`.
 
-### 6.2 Kiểm tra Code & Trạng thái Git
-- Bộ unit test (`PYTHONPATH=. python3 -m pytest -q tests/test_lightweight_ablation.py tests/test_lightweight_phase2.py tests/test_shared_backbone_and_skip_gates.py`): **41 passed**. *(Lưu ý `tests/test_lightweight_m2_plus.py` cần package resolution khi chạy riêng có thể lỗi import `tests.test_sspanet`.)*
-- Toàn bộ module sửa (`config_utils.py`, `losses.py`, `models/__init__.py`, `m2_plus_net.py`, `decoder.py`, `fusion.py`, `m2_plus.py`, `train.py`, `trainer.py`) và 9 YAML `training/config/models/lightweight_e5_*.yaml` đã được commit trên nhánh `main` local.
+### 7.2 Kiểm tra Code & Trạng thái Git
+- Bộ unit test Wave 4 (`PYTHONPATH=. python3 -m pytest -q tests/test_lightweight_ablation.py tests/test_lightweight_phase2.py tests/test_shared_backbone_and_skip_gates.py`): **41 passed in 13.30s**. *(Lưu ý `tests/test_lightweight_m2_plus.py` cần package resolution khi chạy riêng có thể lỗi import `tests.test_sspanet`.)*
+- Toàn bộ code (`m2_plus_net.py`, `decoder.py`, `fusion.py`, `m2_plus.py`, `losses.py`, `config_utils.py`, `train.py`, `trainer.py`), 12 YAML `lightweight_e5_*.yaml` và `RESEARCH_HANDOFF.md` đã được commit sạch trên nhánh `main` local và đóng gói vào `SCAR_main.bundle` trên Drive. *(Khi có xác thực GitHub, chạy `git push origin main` để đồng bộ lên remote).*
 
-### 6.3 Hướng đi đề xuất cho Phiên Làm Việc Sau
-1. **Kiểm chứng đa seed (`seed 1234, 1024, 1098`) cho `E5-B1R` vs `E5`:** `E5-B1R` đã thắng `E5` ở `+0.68 pp` `AvgPathExcl` trên seed `1234`, nên cần đo trung bình 3 seed để khẳng định mức tăng bền vững cho bài báo.
-2. **Khai thác thêm biên độ tăng từ `E5-B1R` (mà không làm rớt `Scar` như `E5-Combo`/`E5-L3`):**
-   - Khảo sát kết hợp **`E5-B1R` + `E5-S2`** *không* bật `anat_contrast_weight` hoặc *không* bật `BoundaryRefinementBlock` (tránh giảm `Scar` ở `E5-Combo`).
-   - Tập trung xử lý 2 điểm yếu còn lại của `E5-B1R` từ mask `.nii.gz` đã lưu: cụm FP `60` voxel ở `Case3003 z=2` (`Scar HD95 = 34.05 mm`) và recall `Scar`/`Edema` trên ca tương phản yếu (`Case2012 Scar = 39.5%`, `Case3007 Edema = 22.8%`).
-
-### 6.4 Lệnh Tái lập Chuẩn cho Best Model `E5-B1R` (trên `myopspp_unet2d_roi128_1mm`)
-*(Cần có `data/myopspp_unet2d_roi128_1mm/cache` và `training/pretrained/R50-ViT-B_16.npz`.)*
+### 7.3 Hướng dẫn Khôi phục Trong Session Colab Mới (1 Lệnh — Không cần làm lại từ đầu)
 
 ```bash
-# Train E5-B1R (best model hiện tại) từ đầu
+# 1. Mount Google Drive tại /content/NCKH_V2 (qua colab drive.mount hoặc thư mục tương đương)
+# 2. Khôi phục repo SCAR giữ nguyên toàn bộ commit Waves 1–4 từ Git bundle trên Drive:
+git clone /content/NCKH_V2/Checkpoints/MyoPS++/The_New_World/SCAR_Code_Backup/SCAR_main.bundle /content/SCAR
+cd /content/SCAR
+git checkout main
+git remote set-url origin https://github.com/thanhquan123hi1/SCAR.git
+
+# 3. Khôi phục Cache Dataset MyoPS++ ROI 128 1mm, Dataset gốc & Pretrained R50-ViT-B_16:
+mkdir -p data/ training/pretrained/
+tar -xzf /content/NCKH_V2/Checkpoints/MyoPS++/The_New_World/SCAR_Code_Backup/myopspp_unet2d_roi128_1mm_cache.tar.gz -C data/
+unzip -q /content/NCKH_V2/Dataset/MyoPSpp_UNet2D_ROI128_1mm.zip -d data/
+ln -s /content/NCKH_V2/i_mmseg/ViT_checkpoint/R50-ViT-B_16.npz training/pretrained/R50-ViT-B_16.npz
+
+# 4. Kiểm tra lại môi trường code:
+PYTHONPATH=. python3 -m pytest -q tests/test_lightweight_ablation.py tests/test_lightweight_phase2.py tests/test_shared_backbone_and_skip_gates.py
+```
+
+### 7.4 Hướng đi Ưu tiên Ngay cho Phiên Làm Việc Sau (Wave 5)
+1. **Thử nghiệm mũi nhọn `E5-B2-S3` (chưa từng chạy, tiềm năng cao nhất):**
+   - Kết hợp **`bottleneck_fusion: multiscale_contrast`** (từ `E5-B2-MSContrast`: Slice Gate + pyramid 3x3 giúp hạ Scar FP `Case3003 z=2` xuống `51` voxels và `AvgPathExcl HD95 = 14.87 mm`, chỉ `+0.105G` FLOPs) với **`skip_fusion: norm_contrast`** (từ `E5-B1R-S3-NormSkip`: nâng toàn diện Dice lên `58.47%`).
+   - Có thể chỉ cần tạo YAML `lightweight_e5_b2_s3.yaml` đặt cả `bottleneck_fusion: multiscale_contrast` lẫn `skip_fusion: norm_contrast` (không cần sửa code module!).
+2. **Kiểm chứng đa seed (`seed 1234, 1024, 1098`) cho top ứng viên (`E5-B1R-S3-NormSkip`, `E5-B2-MSContrast`, và `E5-B2-S3` nếu thắng) vs `E5`:** Đo trung bình ± độ lệch chuẩn trên 3 seed để chốt kết quả cho bài báo.
+3. **Tinh chỉnh loss nhẹ trên nền kiến trúc thắng (optional):** Sau khi test `B2-S3`, có thể khảo sát thêm bounded `anat_contrast_weight` nhỏ hơn (`0.03–0.05` thay cho `0.10`) để giữ `Scar` không tụt như `E5-L3`.
+
+### 7.5 Lệnh Tái lập Best Model Hiện tại trên Session Mới
+
+```bash
+# Train #1 Best Model E5-B1R-S3-NormSkip (AvgPathExcl 58.47%)
 python3 train.py \
-  --config training/config/models/lightweight_e5_b1r_res_contrast.yaml \
+  --config training/config/models/lightweight_e5_b1r_s3_norm_skip.yaml \
   --data-root data/myopspp_unet2d_roi128_1mm/cache \
   --dataset myopspp_unet2d_roi128_1mm \
   --pretrained training/pretrained/R50-ViT-B_16.npz \
   --seed 1234 --epochs 300 --batch-size 16 --img-size 128 --no-val --patience 0 --min-delta 0 --amp bf16
 
-# Đánh giá trên test_vol (16 bệnh nhân) bằng trọng số đã lưu trên Drive
+# Đánh giá trực tiếp từ trọng số #1 trên Drive
 python3 test.py \
-  --checkpoint /content/NCKH_V2/Checkpoints/MyoPS++/The_New_World/E5_B1R_ResContrast/lightweighte5b1rrescontrast_seed1234.pt \
+  --checkpoint /content/NCKH_V2/Checkpoints/MyoPS++/The_New_World/E5_B1R_S3_NormSkip/lightweighte5b1rs3normskip_seed1234.pt \
+  --data-root data/myopspp_unet2d_roi128_1mm/cache \
+  --dataset myopspp_unet2d_roi128_1mm \
+  --split test_vol --amp bf16 --save-predictions
+
+# Đánh giá trực tiếp từ trọng số #2 (E5-B2-MSContrast, Best HD95 14.87 mm) trên Drive
+python3 test.py \
+  --checkpoint /content/NCKH_V2/Checkpoints/MyoPS++/The_New_World/E5_B2_MSContrast/lightweighte5b2mscontrast_seed1234.pt \
   --data-root data/myopspp_unet2d_roi128_1mm/cache \
   --dataset myopspp_unet2d_roi128_1mm \
   --split test_vol --amp bf16 --save-predictions
