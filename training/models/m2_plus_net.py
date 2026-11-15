@@ -24,20 +24,24 @@ from training.models.modules.fusion import (
     Fusion_Embed,
     SSPA_AttentionGate,
     TriModalSkipFusion,
+    SpatialResidualSkipFusion,
     MEAN_SKIP_FUSION,
     MODALITY_WEIGHTED_SKIP_FUSION,
+    SPATIAL_RESIDUAL_SKIP_FUSION,
     SKIP_FUSION_MODES,
 )
 from training.models.modules.m2_plus import (
     M2Plus_Fusion,
     SpatialAwareCrossAttention,
     LocalModalityContrastFusion,
+    ResidualContrastBottleneck,
     LegacyM2PlusFusion,
     LEGACY_FUSION,
     SPATIAL_FUSION,
     FUSION_VERSIONS,
     STANDARD_BOTTLENECK,
     LOCAL_CONTRAST_BOTTLENECK,
+    RESIDUAL_CONTRAST_BOTTLENECK,
     BOTTLENECK_FUSION_MODES,
 )
 from training.models.modules.sspanet import (
@@ -525,9 +529,15 @@ class LightweightM2PlusNet(M2PlusNet):
             self.sspanet_psir = OptimizedSSPANet(bottleneck_channels, reduction_ratio=sspa_reduction, mode="residual")
             self.sspanet_t2w = OptimizedSSPANet(bottleneck_channels, reduction_ratio=sspa_reduction, mode="residual")
 
-        # 3. Bottleneck Fusion: standard SpatialAwareCrossAttention or Phase-2 LocalModalityContrastFusion
+        # 3. Bottleneck Fusion: standard SpatialAwareCrossAttention or contrast-aware bottleneck
         if self.bottleneck_fusion == LOCAL_CONTRAST_BOTTLENECK:
             self.cross_attention = LocalModalityContrastFusion(
+                in_channels=bottleneck_channels,
+                latent_dim=latent_dim,
+                out_channels=fused_channels,
+            )
+        elif self.bottleneck_fusion == RESIDUAL_CONTRAST_BOTTLENECK:
+            self.cross_attention = ResidualContrastBottleneck(
                 in_channels=bottleneck_channels,
                 latent_dim=latent_dim,
                 out_channels=fused_channels,
@@ -543,7 +553,7 @@ class LightweightM2PlusNet(M2PlusNet):
             )
         self.cross_fusion = self.cross_attention
 
-        # 4. Skip Fusion (uniform mean or TriModalSkipFusion) + Skip Attention Gates
+        # 4. Skip Fusion (uniform mean, TriModalSkipFusion, or SpatialResidualSkipFusion) + Skip Attention Gates
         skip0_ch = 8 * w
         skip1_ch = 4 * w
         skip2_ch = w
@@ -553,6 +563,12 @@ class LightweightM2PlusNet(M2PlusNet):
                 TriModalSkipFusion(skip0_ch, reduction=sspa_reduction),
                 TriModalSkipFusion(skip1_ch, reduction=sspa_reduction),
                 TriModalSkipFusion(skip2_ch, reduction=sspa_reduction),
+            ])
+        elif self.skip_fusion_mode == SPATIAL_RESIDUAL_SKIP_FUSION:
+            self.skip_fusions = nn.ModuleList([
+                SpatialResidualSkipFusion(skip0_ch),
+                SpatialResidualSkipFusion(skip1_ch),
+                SpatialResidualSkipFusion(skip2_ch),
             ])
         else:
             self.skip_fusions = None

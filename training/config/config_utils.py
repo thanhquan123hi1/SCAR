@@ -37,6 +37,7 @@ YAML_KEY_TO_DEST: dict[str, str] = {
     "loss.dice_weight": "dice_weight",
     "loss.aar_weight": "aar_weight",
     "loss.scar_weight": "scar_weight",
+    "loss.anat_contrast_weight": "anat_contrast_weight",
     "loss.dice_class_weights": "dice_class_weights",
     "loss.dice_normalization": "dice_normalization",
     "loss.ce_class_weights": "ce_class_weights",

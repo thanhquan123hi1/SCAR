@@ -25,7 +25,8 @@ FUSION_VERSIONS = (LEGACY_FUSION, SPATIAL_FUSION)
 
 STANDARD_BOTTLENECK = "standard"
 LOCAL_CONTRAST_BOTTLENECK = "local_contrast"
-BOTTLENECK_FUSION_MODES = (STANDARD_BOTTLENECK, LOCAL_CONTRAST_BOTTLENECK)
+RESIDUAL_CONTRAST_BOTTLENECK = "residual_contrast"
+BOTTLENECK_FUSION_MODES = (STANDARD_BOTTLENECK, LOCAL_CONTRAST_BOTTLENECK, RESIDUAL_CONTRAST_BOTTLENECK)
 
 
 def _get_group_norm_groups(channels: int, max_groups: int = 32) -> int:
@@ -367,11 +368,78 @@ class LocalModalityContrastFusion(nn.Module):
         return F.relu(x + self.expand(m), inplace=True)
 
 
+class ResidualContrastBottleneck(nn.Module):
+    """E5-anchored bottleneck fusion with zero-initialized differential contrast branch.
+
+    Preserves E5's exact shared-basis projection (proj_in + proj_out) as the primary
+    pathway and injects explicit rectified inter-modality differences in the aligned
+    latent space:
+      - d_scar  = ReLU(f_psir - f_cine): LGE/PSIR hyper-enhancement over CINE anatomy
+      - d_edema = ReLU(f_t2w  - f_psir): Pure T2w edema excess over PSIR (suppresses Scar FP in Edema)
+      - d_aar   = ReLU(f_t2w  - f_cine): Area-at-risk excess over CINE anatomy
+    processed via a 3x3 depthwise-separable spatial context block with zero-init scale.
+    """
+
+    def __init__(
+        self,
+        in_channels: int = 1024,
+        latent_dim: int = 256,
+        out_channels: int = 512,
+    ):
+        super().__init__()
+        if in_channels < 1 or latent_dim < 1 or out_channels < 1:
+            raise ValueError("Bottleneck fusion channel dimensions must be positive")
+        self.in_channels = in_channels
+        self.latent_dim = latent_dim
+        self.out_channels = out_channels
+
+        self.proj_in = nn.Sequential(
+            nn.Conv2d(in_channels, latent_dim, kernel_size=1, bias=False),
+            nn.GroupNorm(num_groups=_get_group_norm_groups(latent_dim, 32), num_channels=latent_dim),
+            nn.ReLU(inplace=True),
+        )
+        self.proj_out = nn.Sequential(
+            nn.Conv2d(latent_dim * 3, out_channels, kernel_size=1, bias=False),
+            nn.GroupNorm(num_groups=_get_group_norm_groups(out_channels, 32), num_channels=out_channels),
+            nn.ReLU(inplace=False),
+        )
+
+        mid = max(latent_dim // 2, 32)
+        g_mid = _get_group_norm_groups(mid, 16)
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(202601 + in_channels + latent_dim + out_channels)
+            self.contrast_branch = nn.Sequential(
+                nn.Conv2d(latent_dim * 3, mid, kernel_size=1, bias=False),
+                nn.GroupNorm(num_groups=g_mid, num_channels=mid),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(mid, mid, kernel_size=3, padding=1, groups=mid, bias=False),
+                nn.GroupNorm(num_groups=g_mid, num_channels=mid),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(mid, out_channels, kernel_size=1, bias=False),
+                nn.GroupNorm(num_groups=_get_group_norm_groups(out_channels, 32), num_channels=out_channels),
+            )
+            self.contrast_gamma = nn.Parameter(torch.zeros(1, out_channels, 1, 1))
+
+    def forward(self, cine: torch.Tensor, psir: torch.Tensor, t2w: torch.Tensor) -> torch.Tensor:
+        q_feat = self.proj_in(cine)
+        k_scar = self.proj_in(psir)
+        k_edema = self.proj_in(t2w)
+        base_out = self.proj_out(torch.cat((q_feat, k_scar, k_edema), dim=1))
+
+        d_scar = F.relu(k_scar - q_feat)
+        d_edema = F.relu(k_edema - k_scar)
+        d_aar = F.relu(k_edema - q_feat)
+        delta = self.contrast_branch(torch.cat((d_scar, d_edema, d_aar), dim=1))
+        return F.relu(base_out + self.contrast_gamma * delta, inplace=True)
+
+
 __all__ = [
     "LEGACY_FUSION", "SPATIAL_FUSION", "FUSION_VERSIONS", "LegacyM2PlusFusion",
-    "STANDARD_BOTTLENECK", "LOCAL_CONTRAST_BOTTLENECK", "BOTTLENECK_FUSION_MODES",
+    "STANDARD_BOTTLENECK", "LOCAL_CONTRAST_BOTTLENECK", "RESIDUAL_CONTRAST_BOTTLENECK",
+    "BOTTLENECK_FUSION_MODES",
     "SpatialAwareCrossAttention",
     "LocalModalityContrastFusion",
+    "ResidualContrastBottleneck",
     "M2Plus_Fusion",
     "build_2d_sinusoidal_positional_encoding",
     "build_2d_sincos_position_embedding",

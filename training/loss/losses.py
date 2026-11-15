@@ -235,6 +235,7 @@ class SegmentationLoss(nn.Module):
         dice_weight=0.5,
         aar_weight=0.0,
         scar_weight=0.0,
+        anat_contrast_weight=0.0,
         dice_class_weights=None,
         ce_class_weights=None,
         pathology_reduction="positive",
@@ -249,7 +250,8 @@ class SegmentationLoss(nn.Module):
             raise ValueError("pathology_reduction must be positive or sample")
         self.pathology_reduction = pathology_reduction
         for name, value in (("ce_weight", ce_weight), ("dice_weight", dice_weight),
-                            ("aar_weight", aar_weight), ("scar_weight", scar_weight)):
+                            ("aar_weight", aar_weight), ("scar_weight", scar_weight),
+                            ("anat_contrast_weight", anat_contrast_weight)):
             if not math.isfinite(value) or value < 0:
                 raise ValueError(f"{name} must be finite and nonnegative")
         for name, values in (("dice_class_weights", dice_class_weights), ("ce_class_weights", ce_class_weights)):
@@ -262,6 +264,7 @@ class SegmentationLoss(nn.Module):
         self.dice_weight = dice_weight
         self.aar_weight = aar_weight
         self.scar_weight = scar_weight
+        self.anat_contrast_weight = anat_contrast_weight
         self.dice_class_weights = dice_class_weights
         self.ce_class_weights = ce_class_weights
         self.masked_negative_slices = masked_negative_slices
@@ -280,7 +283,7 @@ class SegmentationLoss(nn.Module):
         if accum_steps > 1 and self.dice.batch_dice and self.dice_weight > 0:
             raise ValueError("Batch Dice requires accum_steps=1; use per-image Dice for gradient accumulation")
         if (accum_steps > 1 and self.pathology_reduction == "positive"
-                and (self.aar_weight > 0 or self.scar_weight > 0)):
+                and (self.aar_weight > 0 or self.scar_weight > 0 or self.anat_contrast_weight > 0)):
             raise ValueError("Auxiliary positive reduction requires accum_steps=1; use pathology_reduction='sample'")
 
     def forward(self, logits, target):
@@ -335,11 +338,44 @@ class SegmentationLoss(nn.Module):
         else:
             scar_loss = torch.tensor(0.0, device=logits.device, dtype=torch.float32)
 
+        # 5. Bounded Batch-Level Composite Hierarchy & Edema-Scar Margin Loss
+        if self.anat_contrast_weight > 0.0:
+            probs = logits.float().softmax(1)
+            p_myo = probs[:, 1]
+            p_edema = probs[:, 2]
+            p_scar = probs[:, 3]
+            p_aar = p_edema + p_scar
+            p_ring = p_myo + p_aar
+
+            y_edema = (target == 2).float()
+            y_scar = (target == 3).float()
+            y_aar = y_edema + y_scar
+            y_ring = (target > 0).float()
+
+            # All-slice batch-level composite Dice terms (strictly bounded in [0, 1];
+            # negative slices remain in the batch denominator to penalize false positives)
+            batch_scar_dice = 1.0 - (2.0 * (p_scar * y_scar).sum() + 1e-5) / (p_scar.sum() + y_scar.sum() + 1e-5)
+            batch_aar_dice = 1.0 - (2.0 * (p_aar * y_aar).sum() + 1e-5) / (p_aar.sum() + y_aar.sum() + 1e-5)
+            batch_ring_dice = 1.0 - (2.0 * (p_ring * y_ring).sum() + 1e-5) / (p_ring.sum() + y_ring.sum() + 1e-5)
+
+            # Strictly [0, 1)-bounded penalty for Scar false-positives inside GT Edema
+            scar_in_edema_leak = (p_scar * y_edema).sum() / (y_edema.sum() + 1.0)
+
+            anat_contrast_loss = (
+                0.35 * batch_scar_dice
+                + 0.35 * batch_aar_dice
+                + 0.15 * batch_ring_dice
+                + 0.15 * scar_in_edema_leak
+            )
+        else:
+            anat_contrast_loss = torch.tensor(0.0, device=logits.device, dtype=torch.float32)
+
         total_loss = (
             self.ce_weight * ce
             + self.dice_weight * dice
             + self.aar_weight * aar_loss
             + self.scar_weight * scar_loss
+            + self.anat_contrast_weight * anat_contrast_loss
         )
         return {
             "loss": total_loss,
@@ -347,6 +383,7 @@ class SegmentationLoss(nn.Module):
             "dice_loss": dice,
             "aar_loss": aar_loss,
             "scar_loss": scar_loss,
+            "anat_contrast_loss": anat_contrast_loss,
         }
 
 

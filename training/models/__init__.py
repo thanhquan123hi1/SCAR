@@ -82,7 +82,7 @@ def checkpoint_model_config(config, state_dict):
         raise ValueError("Checkpoint sspanet_gate disagrees with paper_formula_v1 weights; "
                          "explicit matching metadata is required")
     prefix = "cross_attention." if model_architecture(config) == "lightweight_m2_plus" else "cross_fusion."
-    if resolved.get("bottleneck_fusion", STANDARD_BOTTLENECK) != STANDARD_BOTTLENECK:
+    if resolved.get("bottleneck_fusion", STANDARD_BOTTLENECK) == "local_contrast":
         resolved["fusion_version"] = SPATIAL_FUSION
         mod_proj = state_dict.get(prefix + "proj_mod.0.weight")
         if mod_proj is not None:

@@ -221,7 +221,7 @@ def _validate_resume_loss_config(saved_args: dict, args, saved_version: int | No
     current = getattr(args, "pathology_reduction", "positive")
     if previous != current:
         raise ValueError(f"Resume changes pathology_reduction: {previous} -> {current}")
-    for key in ("aar_weight", "scar_weight",
+    for key in ("aar_weight", "scar_weight", "anat_contrast_weight",
                 "dice_class_weights", "ce_class_weights"):
         default = None if key.endswith("class_weights") else 0.0
         previous, current = saved_args.get(key, default), getattr(args, key, default)
@@ -554,6 +554,7 @@ def trainer_Myops(args, model, snapshot_path):
         dice_weight=args.dice_weight,
         aar_weight=getattr(args, "aar_weight", 0.0),
         scar_weight=getattr(args, "scar_weight", 0.0),
+        anat_contrast_weight=getattr(args, "anat_contrast_weight", 0.0),
         dice_class_weights=getattr(args, "dice_class_weights", None),
         ce_class_weights=getattr(args, "ce_class_weights", None),
         pathology_reduction=getattr(args, "pathology_reduction", "positive"),

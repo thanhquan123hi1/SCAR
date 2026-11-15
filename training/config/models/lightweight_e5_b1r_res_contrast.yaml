@@ -1,0 +1,16 @@
+model:
+  architecture: lightweight_m2_plus
+  model_name: Lightweight-E5-B1R-ResContrast
+  ablation: LIGHTWEIGHT_M2_PLUS
+  decoder_channels: [128, 64, 32, 32]
+  latent_dim: 256
+  fusion_version: spatial_v2
+  use_pos_enc: true
+  use_skip_gates: true
+  use_film: true
+  use_cross_attention: false
+  sspanet_gate: optimized
+  sspanet_reduction: 16
+  bottleneck_fusion: residual_contrast
+  transformer:
+    dropout_rate: 0.0

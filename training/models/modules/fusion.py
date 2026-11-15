@@ -6,7 +6,8 @@ from torch import nn
 
 MEAN_SKIP_FUSION = "mean"
 MODALITY_WEIGHTED_SKIP_FUSION = "modality_weighted"
-SKIP_FUSION_MODES = (MEAN_SKIP_FUSION, MODALITY_WEIGHTED_SKIP_FUSION)
+SPATIAL_RESIDUAL_SKIP_FUSION = "spatial_residual"
+SKIP_FUSION_MODES = (MEAN_SKIP_FUSION, MODALITY_WEIGHTED_SKIP_FUSION, SPATIAL_RESIDUAL_SKIP_FUSION)
 
 
 class ConcatFusion(nn.Module):
@@ -206,12 +207,69 @@ class TriModalSkipFusion(nn.Module):
         return (stacked * weights).sum(dim=1)
 
 
+class SpatialResidualSkipFusion(nn.Module):
+    """E5-anchored skip fusion with pixel-wise spatial-contrast residual enhancement.
+
+    Preserves E5's uniform average (cine + psir + t2w) / 3.0 as the primary skip
+    representation so CINE anatomical boundaries are never diluted, while adding
+    spatially gated differential pathology cues:
+      - d_scar  = ReLU(psir - cine): focal LGE scar hyper-enhancement
+      - d_edema = ReLU(t2w  - psir): pure T2w edema excess over PSIR
+    via a zero-initialized residual branch.
+    """
+
+    def __init__(self, channels: int):
+        super().__init__()
+        if channels < 1:
+            raise ValueError("channels must be positive")
+        self.channels = channels
+        gn_groups = 16 if channels >= 16 and channels % 16 == 0 else (8 if channels >= 8 and channels % 8 == 0 else 1)
+        pw_groups = 4 if channels >= 16 and channels % 4 == 0 else 1
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(202602 + channels)
+            self.spatial_gate = nn.Sequential(
+                nn.Conv2d(6, 16, kernel_size=3, padding=1, bias=False),
+                nn.GroupNorm(num_groups=4, num_channels=16),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(16, 2, kernel_size=1, bias=True),
+                nn.Sigmoid(),
+            )
+            self.contrast_refine = nn.Sequential(
+                nn.Conv2d(channels, channels, kernel_size=3, padding=1, groups=channels, bias=False),
+                nn.GroupNorm(num_groups=gn_groups, num_channels=channels),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(channels, channels, kernel_size=1, groups=pw_groups, bias=False),
+                nn.GroupNorm(num_groups=gn_groups, num_channels=channels),
+            )
+            self.gamma = nn.Parameter(torch.zeros(1, channels, 1, 1))
+
+    @staticmethod
+    def _spatial_desc(x: torch.Tensor) -> torch.Tensor:
+        return torch.cat((x.mean(dim=1, keepdim=True), x.amax(dim=1, keepdim=True)), dim=1)
+
+    def forward(self, cine: torch.Tensor, psir: torch.Tensor, t2w: torch.Tensor) -> torch.Tensor:
+        base = (cine + psir + t2w) / 3.0
+        d_scar = torch.relu(psir - cine)
+        d_edema = torch.relu(t2w - psir)
+        sp_in = torch.cat(
+            (self._spatial_desc(cine), self._spatial_desc(d_scar), self._spatial_desc(d_edema)),
+            dim=1,
+        )
+        gates = self.spatial_gate(sp_in)
+        g_scar = gates[:, 0:1]
+        g_edema = gates[:, 1:2]
+        contrast = g_scar * d_scar + g_edema * d_edema
+        return base + self.gamma * self.contrast_refine(contrast)
+
+
 __all__ = [
     "ConcatFusion",
     "Fusion_Embed",
     "SSPA_AttentionGate",
     "TriModalSkipFusion",
+    "SpatialResidualSkipFusion",
     "MEAN_SKIP_FUSION",
     "MODALITY_WEIGHTED_SKIP_FUSION",
+    "SPATIAL_RESIDUAL_SKIP_FUSION",
     "SKIP_FUSION_MODES",
 ]

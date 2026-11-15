@@ -70,21 +70,24 @@ class BoundaryRefinementBlock(nn.Module):
         if channels < 1:
             raise ValueError("channels must be positive")
         groups = _gn_groups(channels, 8)
-        self.dw_local = nn.Conv2d(channels, channels, kernel_size=3, padding=1, groups=channels, bias=False)
-        self.dw_dilated = nn.Conv2d(
-            channels, channels, kernel_size=3, padding=2, dilation=2, groups=channels, bias=False
-        )
-        self.refine = nn.Sequential(
-            nn.Conv2d(2 * channels, channels, kernel_size=1, bias=False),
-            nn.GroupNorm(num_groups=groups, num_channels=channels),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False),
-            nn.GroupNorm(num_groups=groups, num_channels=channels),
-        )
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(202603 + channels)
+            self.dw_local = nn.Conv2d(channels, channels, kernel_size=3, padding=1, groups=channels, bias=False)
+            self.dw_dilated = nn.Conv2d(
+                channels, channels, kernel_size=3, padding=2, dilation=2, groups=channels, bias=False
+            )
+            self.refine = nn.Sequential(
+                nn.Conv2d(2 * channels, channels, kernel_size=1, bias=False),
+                nn.GroupNorm(num_groups=groups, num_channels=channels),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False),
+                nn.GroupNorm(num_groups=groups, num_channels=channels),
+            )
+            self.gamma = nn.Parameter(torch.zeros(1, channels, 1, 1))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         ms = torch.cat((self.dw_local(x), self.dw_dilated(x)), dim=1)
-        return F.relu(x + self.refine(ms), inplace=True)
+        return F.relu(x + self.gamma * self.refine(ms), inplace=True)
 
 
 class SegmentationHead(nn.Sequential):

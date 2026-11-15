@@ -86,6 +86,12 @@ def build_parser():
         help="Weight for conditional Scar auxiliary Dice loss (default: 0.0)",
     )
     parser.add_argument(
+        "--anat-contrast-weight",
+        type=float,
+        default=0.0,
+        help="Weight for anatomical ring-consistent and FP-suppressing pathology loss (default: 0.0)",
+    )
+    parser.add_argument(
         "--dice-class-weights",
         nargs="+",
         type=float,
@@ -215,10 +221,10 @@ def parse_args(argv=None):
         parser.error("img_size must be a multiple of 16 and >=32")
     if args.base_lr <= 0 or args.weight_decay < 0 or (not args.no_val and not 0 < args.val_fraction < 1):
         parser.error("Require lr>0, weight_decay>=0, 0<val_fraction<1")
-    for key in ("base_lr", "weight_decay", "val_fraction", "min_delta", "clip_grad", "ce_weight", "dice_weight", "aar_weight", "scar_weight"):
+    for key in ("base_lr", "weight_decay", "val_fraction", "min_delta", "clip_grad", "ce_weight", "dice_weight", "aar_weight", "scar_weight", "anat_contrast_weight"):
         if not math.isfinite(getattr(args, key)):
             parser.error(f"{key} must be finite")
-    for key in ("num_workers", "patience", "min_delta", "save_every", "epochs_per_run", "clip_grad", "ce_weight", "dice_weight", "aar_weight", "scar_weight"):
+    for key in ("num_workers", "patience", "min_delta", "save_every", "epochs_per_run", "clip_grad", "ce_weight", "dice_weight", "aar_weight", "scar_weight", "anat_contrast_weight"):
         if getattr(args, key) < 0:
             parser.error(f"{key} must be nonnegative")
     if args.ce_weight + args.dice_weight <= 0:
@@ -246,6 +252,7 @@ def parse_args(argv=None):
         SegmentationLoss(
             ce_weight=args.ce_weight, dice_weight=args.dice_weight,
             aar_weight=args.aar_weight, scar_weight=args.scar_weight,
+            anat_contrast_weight=args.anat_contrast_weight,
             pathology_reduction=args.pathology_reduction,
             negative_slice_handling=args.negative_slice_handling,
             masked_negative_slices=args.masked_negative_slices,
