@@ -107,6 +107,24 @@ def test_trimodal_skip_fusion_uniform_init_and_multistep_grad():
             "skip_fusion": "modality_weighted",
             "decoder_refinement": "boundary",
         },
+        {
+            "sspanet_gate": "optimized",
+            "bottleneck_fusion": "residual_contrast_gated",
+            "skip_fusion": "decoupled_anat_contrast",
+            "decoder_refinement": "hr_anat_calib",
+        },
+        {
+            "sspanet_gate": "optimized",
+            "bottleneck_fusion": "residual_contrast_gated",
+            "skip_fusion": "norm_contrast_anat_mean",
+            "decoder_refinement": "none",
+        },
+        {
+            "sspanet_gate": "optimized",
+            "bottleneck_fusion": "residual_contrast",
+            "skip_fusion": "norm_contrast_ms",
+            "decoder_refinement": "hr_raw_edge",
+        },
     ],
 )
 def test_phase2_forward_backward_flops_and_checkpoint_roundtrip(tmp_path, overrides):
@@ -176,3 +194,29 @@ def test_phase2_pretrained_loads_and_exact_param_prints():
         cfg = model_config_from_args(args, merged)
         model = model_from_config(cfg, img_size=128)
         model.load_pretrained_encoders(weights_path)
+
+
+@pytest.mark.parametrize(
+    "cfg_name",
+    [
+        "lightweight_e5_b1rgate_s3",
+        "lightweight_e5_b1r_s3_anat_mean",
+        "lightweight_e5_b1r_s3_ms_hdr",
+    ],
+)
+def test_wave6_configs_step0_equivalence_and_zero_input(cfg_name):
+    e5_args, e5_merged = parse_args(["--config", "lightweight_no_cross_attention"])
+    e5_cfg = model_config_from_args(e5_args, e5_merged)
+    e5 = model_from_config(e5_cfg, img_size=32).eval()
+
+    args, merged = parse_args(["--config", cfg_name])
+    cfg = model_config_from_args(args, merged)
+    model = model_from_config(cfg, img_size=32).eval()
+    model.load_state_dict(e5.state_dict(), strict=False)
+
+    torch.manual_seed(7)
+    imgs = [torch.randn(2, 1, 32, 32) for _ in range(3)]
+    zeros = [torch.zeros(2, 1, 32, 32) for _ in range(3)]
+    with torch.no_grad():
+        torch.testing.assert_close(model(*imgs), e5(*imgs), rtol=0, atol=1e-6)
+        assert torch.isfinite(model(*zeros)).all()

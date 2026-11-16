@@ -2,9 +2,11 @@
 
 > Tài liệu bàn giao toàn bộ quá trình thực nghiệm, kết quả định lượng, chẩn đoán lỗi, mã nguồn đã chỉnh sửa, vị trí tài nguyên đã sao lưu và kế hoạch bước tiếp theo để phiên làm việc sau có thể tiếp tục ngay mà không cần train/test lại hay phân tích lại từ đầu.
 > **Mốc tốt nhất hiện tại (`seed=1234`, `test_vol`):**
-> - **#1 (Kỷ lục Dice):** **`E5-B1R-S3-NormSkip`** ([lightweight_e5_b1r_s3_norm_skip.yaml](training/config/models/lightweight_e5_b1r_s3_norm_skip.yaml), `15,726,455` params, `9.4695 G` FLOPs) — **`AvgPathExcl = 58.47%`** (`+1.40 pp` vs `E5`, `+0.72 pp` vs `E5-B1R`), **`AvgPathIncl = 72.53%`**, thắng `Scar = 71.26%`, `Edema = 45.69%`, `NormMyo = 79.04%`.
-> - **#2 (Tốt nhất về Hiệu quả/Chi phí & HD95):** **`E5-B2-MSContrast`** ([lightweight_e5_b2_ms_contrast.yaml](training/config/models/lightweight_e5_b2_ms_contrast.yaml), `15,181,751` params, `7.9891 G` FLOPs) — **`AvgPathExcl = 58.20%`**, **`AvgPathExcl HD95 = 14.87 mm`**, `AvgPathIncl = 72.23% / 11.66 mm`, gần như không tốn thêm FLOPs/VRAM so với `E5-B1R`.
-> **Cập nhật lần cuối:** `2026-11-15 05:12 UTC` (Đầy đủ Đợt 1–4 + gói khôi phục Drive sau khi ngắt Colab)
+> - **#1 Tổng thể hiện tại (`AvgPathIncl`, `Scar`, `NormMyo` trên MyoPS++; đồng thời #1 nội bộ trên MyoPS380):** **`E5-B1R-S3-NormSkip`** ([lightweight_e5_b1r_s3_norm_skip.yaml](training/config/models/lightweight_e5_b1r_s3_norm_skip.yaml), `15,726,455` params, `9.4695 G` FLOPs) — **`AvgPathExcl = 58.47%`**, **`AvgPathIncl = 72.53%`**, `Scar = 71.26%`, `Edema Excl = 45.69%`, `Edema Incl = 73.80%`, `NormMyo = 79.04%`. *(Trên MyoPS380: `Scar = 72.05% / 4.30 vox`, `EdemaExcl = 39.36%`, `EdemaIncl = 74.73%`, `AvgPathExcl = 55.70%`, `AvgPathIncl = 73.39%`.)*
+> - **#1 `AvgPathExcl` & Best HD95 toàn diện (Wave 6B):** **`E5-B1R-S3AnatMean`** ([lightweight_e5_b1r_s3_anat_mean.yaml](training/config/models/lightweight_e5_b1r_s3_anat_mean.yaml), `15,894,634` params, `9.6275 G` FLOPs) — **`AvgPathExcl = 58.49%`** (`14.66 mm`, giảm `-0.90 mm` HD95), `AvgPathIncl = 72.23% / 11.55 mm`, `Edema Excl = 46.14% / 19.57 mm`, `Scar = 70.84% / 9.76 mm`.
+> - **#1 Kỷ lục Edema trên MyoPS++ (Wave 6C):** **`E5-B1R-S3MS-RawHDR`** ([lightweight_e5_b1r_s3_ms_hdr.yaml](training/config/models/lightweight_e5_b1r_s3_ms_hdr.yaml), `15,753,479` params, `10.2288 G` FLOPs) — **`Edema Excl = 46.47%`**, **`Edema Incl = 74.26%`**, `AvgPathExcl = 58.41%`, `AvgPathIncl = 72.31%`.
+> - **#2 Trước đó về Hiệu quả/Chi phí (Wave 4):** **`E5-B2-MSContrast`** ([lightweight_e5_b2_ms_contrast.yaml](training/config/models/lightweight_e5_b2_ms_contrast.yaml), `15,181,751` params, `7.9891 G` FLOPs) — `AvgPathExcl = 58.20% / 14.87 mm`, `AvgPathIncl = 72.23% / 11.66 mm`.
+> **Cập nhật lần cuối:** `2026-11-16 16:30 UTC` (Đầy đủ Waves 1–6 + tổng hợp `Lightweight_Wave5_6_Ablation/` + chẩn đoán MyoPS++/MyoPS380 + backup Drive)
 
 ---
 
@@ -241,3 +243,97 @@ python3 test.py \
   --dataset myopspp_unet2d_roi128_1mm \
   --split test_vol --amp bf16 --save-predictions
 ```
+
+---
+
+## 8. Giai đoạn 4 (Wave 5 & Wave 6 — `2026-11-16`): Chẩn đoán Chuyên sâu MyoPS++ / MyoPS380 & Kỷ lục Mới Về `AvgPathExcl` / `HD95` / `Edema`
+
+Mục tiêu của Wave 5 & Wave 6 là tìm kiến trúc vượt `E5-B1R-S3-NormSkip` trên **MyoPS++** trước (train ~33 phút/model, giữ nguyên 100% loss `0.2*CE + 0.8*BatchDice`, `seed=1234`, `300 epochs`, `bf16`, `batch_size=16`, `amp_skipped_updates=0` trên mọi run) mà không làm giảm Edema, làm bước đệm trước khi train dài (~vài giờ/model) trên **MyoPS380** (nơi `E5-B1R-S3-NormSkip` đạt `Scar 72.05% / 4.30 vox`, đang sát hoặc kém nhẹ `M2FTrans 72.39%` / `AWSnet 73.21%` / `MyoPS-Net 74.18%`).
+
+### 8.1 Bảng Tổng hợp Toàn bộ 7 Thí nghiệm Wave 5–6 vs `E5-B1R-S3-NormSkip` (`16` ca `test_vol`, MyoPS++)
+
+| Đợt | Mã | Config (`training/config/models/`) | Kiến trúc (trên nền `E5`) | Params | FLOPs / MACs (G) | Peak VRAM (Alloc / Res MB) | Train `mDice` / `loss` / Time | Scar Dice / HD95 | Scar P / R *(ASD)* | Edema Excl Dice / HD95 | Edema Incl Dice / HD95 | NormMyo Dice / HD95 | Ring Dice / HD95 | **`AvgPathExcl`** | **`AvgPathIncl`** | `Case3003 z=2` Scar FP |
+| :--- | :--- | :--- | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **W4-Ref** | **`Base #1: E5-B1R-S3`** | `lightweight_e5_b1r_s3_norm_skip` | `B1R + S3(NormSkip)` | `15,726,455` | `9.4695 / 4.7347` | `3049.2 / 3146.0` | `0.9177 / 0.0482 / 33.0m` | **`71.26%` / 10.55** | `81.00 / 67.41` *(2.32)* | `45.69% / 20.57` | `73.80% / 13.63` | **`79.04%` / 4.70** | `88.21% / 2.90` | `58.47% / 15.56` | **`72.53%` / 12.09** | `122` *(per W4)* |
+| **W5-0** | **`E5-B2-S3`** | `lightweight_e5_b2_s3` | `B2(MSContrast) + S3(NormSkip)` | `16,596,791` | `9.5746 / 4.7873` | `3064.1 / 3160.0` | `0.9170 / 0.0486 / 26.7m` | `70.59% / 10.19` | `80.16 / 65.82` *(1.99)* | `45.98% / 19.70` | `73.26% / 13.95` | `78.48% / 4.66` | `88.30% / 2.78` | `58.28% / 14.95` | `71.93% / 12.07` | `71` |
+| **W5-M1** | **`M1-B1RGate-DecSkip`** | `lightweight_e5_b1rgate_decoupled_skip` | `B1RGate + DecoupledAnatContrastSkip` (`groups=3`) | `15,636,738` | **`9.0932 / 4.5466`** | `3371.9 / 3520.0` | `0.9155 / 0.0496 / 33.8m` | `70.64% / 9.95` | `79.40 / 66.60` *(**1.88**)* | `45.81% / 20.50` | `73.61% / 13.85` | `77.92% / 4.80` | `88.20% / 2.75` | `58.23% / 15.23` | `72.12% / 11.90` | **`48`** |
+| **W5-M2** | **`M2-B1R-S3-HRAnat`** | `lightweight_e5_b1r_s3_hr_anat` | `B1R + S3 + HRAnatCalib` (Z-score slice ở `128x128`) | `15,754,472` | `10.3770 / 5.1885` | `3521.1 / 3624.0` | `0.9163 / 0.0490 / 33.4m` | `70.75% / 9.67` | `80.56 / 66.74` *(2.20)* | `45.08% / 19.68` | `73.68% / 13.64` | `77.63% / 4.71` | **`88.31%` / 2.73** | `57.92% / 14.68` | `72.21% / 11.65` | `214` |
+| **W5-M3** | **`M3-B2-Dec-HRAnat`** | `lightweight_e5_b2_decoupled_hr_anat` | `B2 + DecoupledSkip + HRAnatCalib` | `16,489,875` | `10.1016 / 5.0508` | `3863.9 / 3976.0` | `0.9149 / 0.0496 / 34.2m` | `71.21% / 10.50` | **`81.71`** `/ 67.26` *(2.16)* | `44.81% / 21.69` | `73.15% / 14.70` | `77.85% / 4.67` | `88.27% / 2.73` | `58.01% / 16.09` | `72.18% / 12.60` | `77` |
+| **W6-A** | **`6A-B1RGate-S3`** | `lightweight_e5_b1rgate_s3` | `B1RGate + S3` (cô lập `B1RGate`) | `15,771,671` | `9.4737 / 4.7368` | `3054.6 / 3150.0` | `0.9168 / 0.0488 / 32.2m` | `69.36% / 10.46` | `79.38 / 64.91` *(2.13)* | `44.64% / 19.83` | `73.31% / 13.74` | `77.80% / 4.67` | `88.27% / 2.70` | `57.00% / 15.14` | `71.33% / 12.10` | `108` |
+| **W6-B** | **`6B-B1R-S3AnatMean`** *(#1 Excl & HD95)* | `lightweight_e5_b1r_s3_anat_mean` | `B1R + AnatMeanNormalizedContrastSkipFusion` | `15,894,634` | `9.6275 / 4.8137` | `3164.8 / 3302.0` | `0.9163 / 0.0490 / 32.6m` | `70.84%` / **`9.76`** | `81.31 / 66.45` *(2.09)* | `46.14%` / **`19.57`** | `73.62%` / **`13.34`** | `77.98%` / **`4.51`** | `88.03% / 2.79` | **`58.49% / 14.66`** | `72.23% / 11.55` | `111` |
+| **W6-C** | **`6C-B1R-S3MS-RawHDR`** *(#1 Edema)* | `lightweight_e5_b1r_s3_ms_hdr` | `B1R + S3MS + RawModalHDRRefinement` (`128x128`) | `15,753,479` | `10.2288 / 5.1144` | `3412.2 / 3560.0` | `0.9170 / 0.0484 / 32.7m` | `70.36% / 10.66` | `79.58 / 66.82` *(2.47)* | **`46.47%`** `/ 20.36` | **`74.26%`** `/ 14.28` | `78.40% / 4.54` | `88.26% / 2.71` | `58.41% / 15.51` | `72.31% / 12.47` | `163` |
+
+### 8.2 Chẩn đoán Gốc rễ & Bằng chứng Dữ liệu Thật (MyoPS++ & MyoPS380)
+
+1. **Đo phân bố cường độ pixel thực tế trên tập train cả 2 dataset (lý giải tại sao trừ thô `LGE - T2w` hay `LGE - CINE` dễ gãy):**
+   - **MyoPS++ (`296` lát train, `4,849,664` pixels):**
+     - `BG` (`86.51%`): `CINE=0.343`, `LGE=0.437`, `T2w=0.227` $\Rightarrow$ **`LGE - T2w = +0.210`** *(lớn hơn cả Scar `+0.096`, nên `GroupNorm` hay phép trừ không có `wall_gate` sẽ nhiễu mạnh ở vùng máu sáng/BG)*.
+     - `NormMyo` (`7.55%`): `CINE=0.393`, `LGE=0.344`, `T2w=0.367` (`LGE - CINE = -0.049`, `LGE - T2w = -0.023`).
+     - `Edema` (`3.27%`): `CINE=0.487`, `LGE=0.509`, `T2w=0.618` (`LGE - CINE = +0.022`, `LGE - T2w = -0.109`).
+     - `Scar` (`2.66%`): `CINE=0.469`, `LGE=0.644`, `T2w=0.548` (`LGE - CINE = +0.174`, `LGE - T2w = +0.096`).
+   - **MyoPS380 (`1,972` lát train, `legacy` labels `0=BG, 1=NormMyo, 2=Scar, 3=Edema`):**
+     - `BG` (`93.14%`): `CINE=0.146`, `LGE=0.440`, `T2w=0.121` (`LGE - CINE = +0.294`, `LGE - T2w = +0.319`).
+     - `NormMyo` (`3.09%`): `CINE=0.149`, `LGE=0.356`, `T2w=0.188`.
+     - `Scar` (`2.14%`): `CINE=0.167`, `LGE=0.556`, `T2w=0.257` (`LGE - CINE = +0.389`, `LGE - T2w = +0.299`).
+     - `Edema` (`1.62%`): `CINE=0.189`, `LGE=0.465`, `T2w=0.257` (`LGE - CINE = +0.276`, `LGE - T2w = +0.208`).
+
+2. **Tại sao `HRAnatCalib` (`M2`/`M3`) thất bại:**
+   - Chia `(x - mean_myo) / std_myo` trong mask cơ tim mềm `p_ring` theo từng lát cắt 2D đã khuếch đại nhiễu trên lát cắt gần lành (`std_myo` nhỏ $\Rightarrow$ noise thành `+3 sigma` giống sẹo giả), đẩy `Case3003 z=2` từ `122` lên **`214` voxel Scar FP** (`Case3003 Scar` rơi `66.4% -> 55.5%`), đồng thời kéo tụt `NormalMyo` `-1.41 pp` và `Case2030` `-12%`.
+
+3. **Tại sao `DecoupledAnatContrastSkipFusion` (`M1`/`M3`, `groups=3`) tụt ở `Case2030` và `NormalMyo`:**
+   - Đo trực tiếp trên **MyoPS++ test cache** của **`Case2030`**: `NormalMyo (CINE=0.532, LGE=0.397, T2w=0.524)` vs **`Scar (CINE=0.763, LGE=0.638, T2w=0.673)`**. Ở ca này (và `Case2013`), **`LGE < CINE` (`-0.125`) và `LGE < T2w` (`-0.035`) ngay cả trong lõi Scar**, nhưng **`LGE_Scar = 0.638 > LGE_Norm = 0.397`**.
+   - `S3` (`NormalizedContrastSkipFusion`) giữ được `Case2030` và `NormalMyo 79.04%` nhờ chiếu chung 3 modality (`shared align_proj`) và xử lý gộp cả 4 hiệu tương phản trong cùng 1 khối `3x3`. Việc `DecoupledSkip` tách sang `groups=3` (lệch hệ toạ độ kênh) và tách đôi nhánh Scar/Edema khiến `Case2030` nhầm nhãn bên trong vòng cơ tim (dù `Ring Dice` vẫn `91.4%`).
+
+4. **Tại sao `6A` loại `B1RGate`, còn `6B` và `6C` bổ trợ nhau rất rõ:**
+   - **`6A (B1RGate-S3)`** giữ nguyên `S3` chỉ thay `B1R -> B1RGate`: rơi xuống **`57.00%`** `AvgExcl` $\Rightarrow$ chứng minh `B1R` tốt hơn `B1RGate`.
+   - **`6B (B1R-S3AnatMean)`**: giữ nguyên `shared align_proj` và khối `3x3` gộp của `S3`, chỉ bổ sung soft CINE `wall_gate` + **`k - mu_wall` (KHÔNG chia `std`)**. Kết quả **vượt `Base #1` về `AvgPathExcl` (`58.49%` vs `58.47%`)**, giảm **`AvgExcl HD95` `-0.90 mm` (`14.66` vs `15.56 mm`)**, **`AvgIncl HD95` `-0.54 mm` (`11.55` vs `12.09 mm`)**, `Edema Excl` tăng lên **`46.14%` (`19.57 mm`)**, thắng `8/16` ca Scar (`Case2012 +11.4%` và HD95 `37.3 -> 20.2 mm`, `Case3007 Edema +17.7%`).
+   - **`6C (B1R-S3MS-RawHDR)`**: thay khối `3x3` ở `S3` bằng `3x3 + dilated d=2` (`norm_contrast_ms`) + nhánh `RawModalHDRRefinement` ở `128x128` (bù cho việc `dec4` trong `SlimDecoderBlock` trước đây chỉ upsample + `1x1` mà chưa có `3x3` ở độ phân giải `1mm`, dùng thẳng `[CINE, PSIR, T2w]` không Z-score). Kết quả lập kỷ lục **`Edema Excl = 46.47%`** và **`Edema Incl = 74.26%`**, thắng **`9/16` ca `NormalMyo`**, đẩy `Case2012 Scar` lên **`47.5%`** (`+11.9%`).
+   - **Giải mã yếu tố may rủi `Case2030` ở `Base #1`:** Đối chiếu `per_case.csv` trên **>20 model lịch sử** (W1–W4, P2, M2-Plus) cho thấy **19/20 model** chỉ đạt `Case2030` Scar `41–58.8%` / Edema `26–39.3%` / Norm `55–67%`, chỉ riêng 1 run `Base #1` (`seed=1234`) đạt `S=63.4% / E=48.5% / N=74.6%`. Do đó ở `seed=1234`, `Base #1` được lợi tới `+10–13%` từ riêng 1 ca đơn lẻ này; dù vậy **`6B` vẫn thắng `AvgPathExcl` (`58.49% > 58.47%`) và HD95 toàn diện**.
+
+5. **Đối chiếu lỗi Scar của `E5-B1R-S3-NormSkip` trên MyoPS380 (`76` ca test, `75` ca có Scar GT, `0` ca zero-GT FP):**
+   - Thua `M2FTrans` (`72.84%` eval seed2026 / `72.39±0.48%`) chủ yếu ở 2 nhóm:
+     1) **Thiếu Recall trên Scar mờ / lõi tối (`Precision >> Recall`)**: `case0011` (`50.6%` vs `78.6%`, `R=35.7%`), `case0066` (`48.6%` vs `58.3%`, `R=35.4%`), `case0356` (`7.0%`, `R=3.6%`).
+     2) **Đốm outlier làm tăng Scar HD95**: `case0326` (`hd95=31.26`), `case0306` (`hd95=22.52`), `case0361` (`hd95=12.24`).
+
+### 8.3 Kiểm kê Code, Unit Tests & Backup Đợt Waves 5–6
+
+- **Module mã nguồn mới đã thêm & tích hợp:**
+  - `training/models/modules/m2_plus.py`: `GatedSymmetricContrastBottleneck` (`bottleneck_fusion: residual_contrast_gated`).
+  - `training/models/modules/fusion.py`: `DecoupledAnatContrastSkipFusion` (`decoupled_anat_contrast`), **`AnatMeanNormalizedContrastSkipFusion` (`norm_contrast_anat_mean`, 6B)**, **`MultiScaleNormalizedContrastSkipFusion` (`norm_contrast_ms`, 6C)**.
+  - `training/models/modules/decoder.py`: `HRAnatCalibRefinement` (`hr_anat_calib`), **`RawModalHDRRefinement` (`hr_raw_edge`, 6C)**.
+  - `training/models/m2_plus_net.py` & `tests/test_lightweight_phase2.py`: nối đầy đủ + kiểm thử step-0 exact equivalence (`0.00e+00` vs `E5`), zero-input finite, `bf16` grads, FLOPs & checkpoint roundtrip.
+  - **Kết quả `pytest` gần nhất:** `pytest -q tests/test_lightweight_ablation.py tests/test_lightweight_phase2.py tests/test_shared_backbone_and_skip_gates.py` $\Rightarrow$ **`47 passed in 17.94s`**.
+- **Tài nguyên mới trên Google Drive (`/content/NCKH_V2/Checkpoints/MyoPS++/The_New_World/`):**
+  - Đủ 7 thư mục run Wave 5 & 6 (mỗi thư mục gồm YAML, `.pt`, `logs/`):
+    - `E5_B2_S3_MSNormSkip/`, `E5_B1RGate_DecoupledSkip/`, `E5_B1R_S3_HRAnatCalib/`, `E5_B2_DecoupledHRAnat/` *(Wave 5)*
+    - `E5_B1RGate_S3/`, **`E5_B1R_S3AnatMean/`** *(Wave 6B — #1 AvgExcl & HD95)*, **`E5_B1R_S3MS_RawHDR/`** *(Wave 6C — #1 Edema)*
+  - Gói log/CSV tổng hợp toàn bộ Waves 5–6: `Lightweight_Wave5_6_Ablation/` (`wave5_6_summary_metrics.csv`, `wave5_6_per_case_long.csv`, `wave5_6_per_case_wide.csv`, `configs/`, `per_variant_logs/`).
+  - Gói code & Git cập nhật mới nhất trong `SCAR_Code_Backup/` (`SCAR_main.bundle`, `SCAR_code_snapshot.tar.gz`, `unpushed_from_origin.patch`) + bản mới nhất của `RESEARCH_HANDOFF.md`.
+
+### 8.4 Hướng đi Khuyến nghị Cho Phiên Tiếp Theo (Wave 7 $\rightarrow$ Chốt Qua MyoPS380)
+
+Để có 1 model **thắng dứt điểm trên MyoPS++ ở cả `AvgPathExcl`, `AvgPathIncl`, `Scar` lẫn `Edema`** trước khi tốn thời gian train trên **MyoPS380**:
+
+1. **Wave 7A — Ghép trực tiếp ưu điểm `6B` + `6C` (`E5-B1R-S3AnatMean-RawHDR`):**
+   - Tạo YAML đặt `bottleneck_fusion: residual_contrast`, **`skip_fusion: norm_contrast_anat_mean`** *(từ `6B`: Best Scar/HD95/Precision/AvgExcl)*, **`decoder_refinement: hr_raw_edge`** *(từ `6C`: Best Edema Excl/Incl & NormalMyo `9/16` wins)* — **không cần viết thêm module mới**!
+2. **Wave 7B — Tích hợp Multi-Scale ngay trong `S3AnatMean` + `RawHDR` (`S3AnatMeanMS-RawHDR`):**
+   - Nâng cấp `AnatMeanNormalizedContrastSkipFusion` thay khối `Conv3x3` ở `contrast_fuse` thành `Conv3x3 + DWConv3x3(d=2)` (lấy thêm receptive field đa tỉ lệ của `6C`) rồi ghép `hr_raw_edge`.
+3. **Wave 7C — Kiểm chứng đa seed (`seed=2026`, `seed=1024`) cho `E5-B1R-S3-NormSkip` vs `6B` (và `7A`):**
+   - Triệt tiêu ảnh hưởng may rủi từ ca đơn `Case2030`, xác nhận trung bình $\pm$ std chắc chắn trước khi chạy trên **MyoPS380** (`train304_test76`).
+
+```bash
+# Lệnh đánh giá trực tiếp trên MyoPS++ từ checkpoint 6B (#1 AvgPathExcl 58.49%, Best HD95 14.66mm)
+python3 test.py \
+  --checkpoint /content/NCKH_V2/Checkpoints/MyoPS++/The_New_World/E5_B1R_S3AnatMean/lightweighte5b1rs3anatmean_seed1234.pt \
+  --data-root data/myopspp_unet2d_roi128_1mm/cache \
+  --dataset myopspp_unet2d_roi128_1mm \
+  --split test_vol --amp bf16 --save-predictions
+
+# Lệnh đánh giá trực tiếp từ checkpoint 6C (#1 Edema Excl 46.47%, Edema Incl 74.26%)
+python3 test.py \
+  --checkpoint /content/NCKH_V2/Checkpoints/MyoPS++/The_New_World/E5_B1R_S3MS_RawHDR/lightweighte5b1rs3msrawhdr_seed1234.pt \
+  --data-root data/myopspp_unet2d_roi128_1mm/cache \
+  --dataset myopspp_unet2d_roi128_1mm \
+  --split test_vol --amp bf16 --save-predictions
+```
+

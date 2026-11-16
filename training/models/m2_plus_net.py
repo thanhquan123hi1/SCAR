@@ -17,9 +17,13 @@ from training.models.modules.decoder import (
     SegmentationHead,
     BoundaryRefinementBlock,
     WideResidualFullConvDecoder,
+    HRAnatCalibRefinement,
+    RawModalHDRRefinement,
     NO_DECODER_REFINEMENT,
     BOUNDARY_DECODER_REFINEMENT,
     WIDE_RES_FPN_DECODER_REFINEMENT,
+    HR_ANAT_CALIB_DECODER_REFINEMENT,
+    HR_RAW_EDGE_DECODER_REFINEMENT,
     DECODER_REFINEMENT_MODES,
 )
 from training.models.modules.fusion import (
@@ -28,10 +32,16 @@ from training.models.modules.fusion import (
     TriModalSkipFusion,
     SpatialResidualSkipFusion,
     NormalizedContrastSkipFusion,
+    DecoupledAnatContrastSkipFusion,
+    AnatMeanNormalizedContrastSkipFusion,
+    MultiScaleNormalizedContrastSkipFusion,
     MEAN_SKIP_FUSION,
     MODALITY_WEIGHTED_SKIP_FUSION,
     SPATIAL_RESIDUAL_SKIP_FUSION,
     NORM_CONTRAST_SKIP_FUSION,
+    DECOUPLED_ANAT_CONTRAST_SKIP_FUSION,
+    NORM_CONTRAST_ANAT_MEAN_SKIP_FUSION,
+    NORM_CONTRAST_MS_SKIP_FUSION,
     SKIP_FUSION_MODES,
 )
 from training.models.modules.m2_plus import (
@@ -39,6 +49,7 @@ from training.models.modules.m2_plus import (
     SpatialAwareCrossAttention,
     LocalModalityContrastFusion,
     ResidualContrastBottleneck,
+    GatedSymmetricContrastBottleneck,
     MultiScaleSymmetricContrastBottleneck,
     LegacyM2PlusFusion,
     LEGACY_FUSION,
@@ -47,6 +58,7 @@ from training.models.modules.m2_plus import (
     STANDARD_BOTTLENECK,
     LOCAL_CONTRAST_BOTTLENECK,
     RESIDUAL_CONTRAST_BOTTLENECK,
+    RESIDUAL_CONTRAST_GATED_BOTTLENECK,
     MULTISCALE_CONTRAST_BOTTLENECK,
     BOTTLENECK_FUSION_MODES,
 )
@@ -548,6 +560,12 @@ class LightweightM2PlusNet(M2PlusNet):
                 latent_dim=latent_dim,
                 out_channels=fused_channels,
             )
+        elif self.bottleneck_fusion == RESIDUAL_CONTRAST_GATED_BOTTLENECK:
+            self.cross_attention = GatedSymmetricContrastBottleneck(
+                in_channels=bottleneck_channels,
+                latent_dim=latent_dim,
+                out_channels=fused_channels,
+            )
         elif self.bottleneck_fusion == MULTISCALE_CONTRAST_BOTTLENECK:
             self.cross_attention = MultiScaleSymmetricContrastBottleneck(
                 in_channels=bottleneck_channels,
@@ -588,6 +606,24 @@ class LightweightM2PlusNet(M2PlusNet):
                 NormalizedContrastSkipFusion(skip1_ch),
                 NormalizedContrastSkipFusion(skip2_ch),
             ])
+        elif self.skip_fusion_mode == DECOUPLED_ANAT_CONTRAST_SKIP_FUSION:
+            self.skip_fusions = nn.ModuleList([
+                DecoupledAnatContrastSkipFusion(skip0_ch),
+                DecoupledAnatContrastSkipFusion(skip1_ch),
+                DecoupledAnatContrastSkipFusion(skip2_ch),
+            ])
+        elif self.skip_fusion_mode == NORM_CONTRAST_ANAT_MEAN_SKIP_FUSION:
+            self.skip_fusions = nn.ModuleList([
+                AnatMeanNormalizedContrastSkipFusion(skip0_ch),
+                AnatMeanNormalizedContrastSkipFusion(skip1_ch),
+                AnatMeanNormalizedContrastSkipFusion(skip2_ch),
+            ])
+        elif self.skip_fusion_mode == NORM_CONTRAST_MS_SKIP_FUSION:
+            self.skip_fusions = nn.ModuleList([
+                MultiScaleNormalizedContrastSkipFusion(skip0_ch),
+                MultiScaleNormalizedContrastSkipFusion(skip1_ch),
+                MultiScaleNormalizedContrastSkipFusion(skip2_ch),
+            ])
         else:
             self.skip_fusions = None
 
@@ -621,15 +657,31 @@ class LightweightM2PlusNet(M2PlusNet):
         if self.decoder_refinement_mode == BOUNDARY_DECODER_REFINEMENT:
             self.boundary_refine = BoundaryRefinementBlock(dec_ch[3])
             self.wide_res_fpn = None
+            self.hr_anat_calib = None
+            self.hr_raw_edge = None
         elif self.decoder_refinement_mode == WIDE_RES_FPN_DECODER_REFINEMENT:
             self.boundary_refine = None
             self.wide_res_fpn = WideResidualFullConvDecoder(
                 skip_channels=(skip0_ch, skip1_ch, skip2_ch),
                 dec_channels=tuple(dec_ch),
             )
+            self.hr_anat_calib = None
+            self.hr_raw_edge = None
+        elif self.decoder_refinement_mode == HR_ANAT_CALIB_DECODER_REFINEMENT:
+            self.boundary_refine = None
+            self.wide_res_fpn = None
+            self.hr_anat_calib = HRAnatCalibRefinement(dec_ch[3])
+            self.hr_raw_edge = None
+        elif self.decoder_refinement_mode == HR_RAW_EDGE_DECODER_REFINEMENT:
+            self.boundary_refine = None
+            self.wide_res_fpn = None
+            self.hr_anat_calib = None
+            self.hr_raw_edge = RawModalHDRRefinement(dec_ch[3])
         else:
             self.boundary_refine = None
             self.wide_res_fpn = None
+            self.hr_anat_calib = None
+            self.hr_raw_edge = None
 
         # 6. Final Segmentation Head
         self.head = nn.Conv2d(dec_ch[3], self.num_classes, kernel_size=1)
@@ -746,6 +798,10 @@ class LightweightM2PlusNet(M2PlusNet):
             d4 = self.wide_res_fpn.refine_stage4(d4, d3, d2)
         if self.boundary_refine is not None:
             d4 = self.boundary_refine(d4)
+        if self.hr_anat_calib is not None:
+            d4 = self.hr_anat_calib(d4, cine, psir, t2w)
+        if self.hr_raw_edge is not None:
+            d4 = self.hr_raw_edge(d4, cine, psir, t2w)
 
         # 6. Final Segmentation Head
         logits = self.head(d4)
