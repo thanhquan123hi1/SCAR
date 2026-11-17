@@ -35,6 +35,7 @@ from training.models.modules.fusion import (
     DecoupledAnatContrastSkipFusion,
     AnatMeanNormalizedContrastSkipFusion,
     MultiScaleNormalizedContrastSkipFusion,
+    AnatMeanMSNormalizedContrastSkipFusion,
     MEAN_SKIP_FUSION,
     MODALITY_WEIGHTED_SKIP_FUSION,
     SPATIAL_RESIDUAL_SKIP_FUSION,
@@ -42,6 +43,7 @@ from training.models.modules.fusion import (
     DECOUPLED_ANAT_CONTRAST_SKIP_FUSION,
     NORM_CONTRAST_ANAT_MEAN_SKIP_FUSION,
     NORM_CONTRAST_MS_SKIP_FUSION,
+    NORM_CONTRAST_ANAT_MEAN_MS_SKIP_FUSION,
     SKIP_FUSION_MODES,
 )
 from training.models.modules.m2_plus import (
@@ -588,42 +590,22 @@ class LightweightM2PlusNet(M2PlusNet):
         skip1_ch = 4 * w
         skip2_ch = w
         dec_ch = getattr(self.config, "decoder_channels", (128, 64, 32, 32) if width_factor == 1.0 else (64, 32, 16, 16))
+        skip_channels_tuple = (skip0_ch, skip1_ch, skip2_ch)
+        skip_fusion_builders = {
+            SPATIAL_RESIDUAL_SKIP_FUSION: SpatialResidualSkipFusion,
+            NORM_CONTRAST_SKIP_FUSION: NormalizedContrastSkipFusion,
+            DECOUPLED_ANAT_CONTRAST_SKIP_FUSION: DecoupledAnatContrastSkipFusion,
+            NORM_CONTRAST_ANAT_MEAN_SKIP_FUSION: AnatMeanNormalizedContrastSkipFusion,
+            NORM_CONTRAST_MS_SKIP_FUSION: MultiScaleNormalizedContrastSkipFusion,
+            NORM_CONTRAST_ANAT_MEAN_MS_SKIP_FUSION: AnatMeanMSNormalizedContrastSkipFusion,
+        }
         if self.skip_fusion_mode == MODALITY_WEIGHTED_SKIP_FUSION:
-            self.skip_fusions = nn.ModuleList([
-                TriModalSkipFusion(skip0_ch, reduction=sspa_reduction),
-                TriModalSkipFusion(skip1_ch, reduction=sspa_reduction),
-                TriModalSkipFusion(skip2_ch, reduction=sspa_reduction),
-            ])
-        elif self.skip_fusion_mode == SPATIAL_RESIDUAL_SKIP_FUSION:
-            self.skip_fusions = nn.ModuleList([
-                SpatialResidualSkipFusion(skip0_ch),
-                SpatialResidualSkipFusion(skip1_ch),
-                SpatialResidualSkipFusion(skip2_ch),
-            ])
-        elif self.skip_fusion_mode == NORM_CONTRAST_SKIP_FUSION:
-            self.skip_fusions = nn.ModuleList([
-                NormalizedContrastSkipFusion(skip0_ch),
-                NormalizedContrastSkipFusion(skip1_ch),
-                NormalizedContrastSkipFusion(skip2_ch),
-            ])
-        elif self.skip_fusion_mode == DECOUPLED_ANAT_CONTRAST_SKIP_FUSION:
-            self.skip_fusions = nn.ModuleList([
-                DecoupledAnatContrastSkipFusion(skip0_ch),
-                DecoupledAnatContrastSkipFusion(skip1_ch),
-                DecoupledAnatContrastSkipFusion(skip2_ch),
-            ])
-        elif self.skip_fusion_mode == NORM_CONTRAST_ANAT_MEAN_SKIP_FUSION:
-            self.skip_fusions = nn.ModuleList([
-                AnatMeanNormalizedContrastSkipFusion(skip0_ch),
-                AnatMeanNormalizedContrastSkipFusion(skip1_ch),
-                AnatMeanNormalizedContrastSkipFusion(skip2_ch),
-            ])
-        elif self.skip_fusion_mode == NORM_CONTRAST_MS_SKIP_FUSION:
-            self.skip_fusions = nn.ModuleList([
-                MultiScaleNormalizedContrastSkipFusion(skip0_ch),
-                MultiScaleNormalizedContrastSkipFusion(skip1_ch),
-                MultiScaleNormalizedContrastSkipFusion(skip2_ch),
-            ])
+            self.skip_fusions = nn.ModuleList(
+                [TriModalSkipFusion(ch, reduction=sspa_reduction) for ch in skip_channels_tuple]
+            )
+        elif self.skip_fusion_mode in skip_fusion_builders:
+            builder = skip_fusion_builders[self.skip_fusion_mode]
+            self.skip_fusions = nn.ModuleList([builder(ch) for ch in skip_channels_tuple])
         else:
             self.skip_fusions = None
 

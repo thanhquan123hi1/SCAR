@@ -11,6 +11,7 @@ NORM_CONTRAST_SKIP_FUSION = "norm_contrast"
 DECOUPLED_ANAT_CONTRAST_SKIP_FUSION = "decoupled_anat_contrast"
 NORM_CONTRAST_ANAT_MEAN_SKIP_FUSION = "norm_contrast_anat_mean"
 NORM_CONTRAST_MS_SKIP_FUSION = "norm_contrast_ms"
+NORM_CONTRAST_ANAT_MEAN_MS_SKIP_FUSION = "norm_contrast_anat_mean_ms"
 SKIP_FUSION_MODES = (
     MEAN_SKIP_FUSION,
     MODALITY_WEIGHTED_SKIP_FUSION,
@@ -19,6 +20,7 @@ SKIP_FUSION_MODES = (
     DECOUPLED_ANAT_CONTRAST_SKIP_FUSION,
     NORM_CONTRAST_ANAT_MEAN_SKIP_FUSION,
     NORM_CONTRAST_MS_SKIP_FUSION,
+    NORM_CONTRAST_ANAT_MEAN_MS_SKIP_FUSION,
 )
 
 
@@ -463,46 +465,27 @@ def _compute_4way_contrasts(
     )
 
 
-class AnatMeanNormalizedContrastSkipFusion(nn.Module):
-    """Shared-basis S3 skip fusion enriched with wall-gated myocardial-mean deviation.
+class _BaseAnatMeanContrastSkipFusion(nn.Module):
+    """Shared wall-gated myocardial-mean contrast extraction for S3AnatMean skip variants."""
 
-    Preserves NormalizedContrastSkipFusion (S3)'s shared align_proj and unified
-    1x1 -> full 3x3 -> 1x1 contrast block so CINE/PSIR/T2w keep matched channel
-    semantics and Scar/Edema/NormalMyo interact jointly, while adding:
-      - CINE-anchored soft myocardial wall gate g_wall (suppresses bright outer blood pool)
-      - Wall-mean-centered PSIR & T2w hyper-intensity (no /std noise amplification,
-        and stays positive inside Scar even when raw PSIR < CINE as in dark-core cases).
-    """
-
-    def __init__(self, channels: int):
-        super().__init__()
+    def _init_anat_mean_dims(self, channels: int) -> tuple[int, int, int]:
         if channels < 1:
             raise ValueError("channels must be positive")
         self.channels = channels
         mid = max(channels // 2, 32)
-        gn_mid = _gn_groups(mid, 16)
-        gn_out = _gn_groups(channels, 16)
-        with torch.random.fork_rng(devices=[]):
-            torch.manual_seed(202672 + channels)
-            self.align_proj = _build_align_proj(channels, mid)
-            self.wall_gate = _build_cine_wall_gate()
-            self.contrast_fuse = nn.Sequential(
-                nn.Conv2d(mid * 6 + 1, mid, kernel_size=1, bias=False),
-                nn.GroupNorm(num_groups=gn_mid, num_channels=mid),
-                nn.ReLU(inplace=True),
-                nn.Conv2d(mid, mid, kernel_size=3, padding=1, bias=False),
-                nn.GroupNorm(num_groups=gn_mid, num_channels=mid),
-                nn.ReLU(inplace=True),
-                nn.Conv2d(mid, channels, kernel_size=1, bias=False),
-                nn.GroupNorm(num_groups=gn_out, num_channels=channels),
-            )
-            self.gamma = nn.Parameter(torch.zeros(1, channels, 1, 1))
+        return mid, _gn_groups(mid, 16), _gn_groups(channels, 16)
+
+    def _init_anat_mean_projections(self, channels: int, mid: int) -> None:
+        self.align_proj = _build_align_proj(channels, mid)
+        self.wall_gate = _build_cine_wall_gate()
 
     @staticmethod
     def _wall_mean(feat: torch.Tensor, weight_fp32: torch.Tensor, denom: torch.Tensor) -> torch.Tensor:
         return ((feat.float() * weight_fp32).sum(dim=(2, 3), keepdim=True) / denom).to(feat.dtype)
 
-    def forward(self, cine: torch.Tensor, psir: torch.Tensor, t2w: torch.Tensor) -> torch.Tensor:
+    def _anat_mean_features(
+        self, cine: torch.Tensor, psir: torch.Tensor, t2w: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         base = (cine + psir + t2w) / 3.0
         q_cine = self.align_proj(cine)
         k_psir = self.align_proj(psir)
@@ -521,14 +504,70 @@ class AnatMeanNormalizedContrastSkipFusion(nn.Module):
         d_scar_cine, d_scar_t2, d_edema_pure, d_aar = _compute_4way_contrasts(q_cine, k_psir, k_t2w)
         d_psir_wall = torch.relu(k_psir - mu_psir) * g_wall
         d_t2w_wall = torch.relu(k_t2w - mu_t2w) * g_wall
+        feat = torch.cat((d_scar_cine, d_scar_t2, d_edema_pure, d_aar, d_psir_wall, d_t2w_wall, g_wall), dim=1)
+        return base, feat
 
-        delta = self.contrast_fuse(
-            torch.cat((d_scar_cine, d_scar_t2, d_edema_pure, d_aar, d_psir_wall, d_t2w_wall, g_wall), dim=1)
+
+class _MultiScaleHeadMixin:
+    """Shared 1x1 compress -> (3x3 d=1 + DW 3x3 d=2) -> 1x1 expand head with zero-init gamma."""
+
+    def _init_ms_head(self, in_channels: int, mid: int, out_channels: int, gn_mid: int, gn_out: int) -> None:
+        self.compress = nn.Sequential(
+            nn.Conv2d(in_channels, mid, kernel_size=1, bias=False),
+            nn.GroupNorm(num_groups=gn_mid, num_channels=mid),
+            nn.ReLU(inplace=True),
         )
-        return base + self.gamma * delta
+        self.conv_local = nn.Conv2d(mid, mid, kernel_size=3, padding=1, bias=False)
+        self.conv_dilated = nn.Conv2d(mid, mid, kernel_size=3, padding=2, dilation=2, groups=mid, bias=False)
+        self.ms_norm = nn.GroupNorm(num_groups=gn_mid, num_channels=mid)
+        self.ms_relu = nn.ReLU(inplace=True)
+        self.expand = nn.Sequential(
+            nn.Conv2d(mid, out_channels, kernel_size=1, bias=False),
+            nn.GroupNorm(num_groups=gn_out, num_channels=out_channels),
+        )
+        self.gamma = nn.Parameter(torch.zeros(1, out_channels, 1, 1))
+
+    def _forward_ms_head(self, feat: torch.Tensor) -> torch.Tensor:
+        h = self.compress(feat)
+        ms = self.ms_relu(self.ms_norm(self.conv_local(h) + self.conv_dilated(h)))
+        return self.expand(ms)
 
 
-class MultiScaleNormalizedContrastSkipFusion(nn.Module):
+class AnatMeanNormalizedContrastSkipFusion(_BaseAnatMeanContrastSkipFusion):
+    """Shared-basis S3 skip fusion enriched with wall-gated myocardial-mean deviation.
+
+    Preserves NormalizedContrastSkipFusion (S3)'s shared align_proj and unified
+    1x1 -> full 3x3 -> 1x1 contrast block so CINE/PSIR/T2w keep matched channel
+    semantics and Scar/Edema/NormalMyo interact jointly, while adding:
+      - CINE-anchored soft myocardial wall gate g_wall (suppresses bright outer blood pool)
+      - Wall-mean-centered PSIR & T2w hyper-intensity (no /std noise amplification,
+        and stays positive inside Scar even when raw PSIR < CINE as in dark-core cases).
+    """
+
+    def __init__(self, channels: int):
+        super().__init__()
+        mid, gn_mid, gn_out = self._init_anat_mean_dims(channels)
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(202672 + channels)
+            self._init_anat_mean_projections(channels, mid)
+            self.contrast_fuse = nn.Sequential(
+                nn.Conv2d(mid * 6 + 1, mid, kernel_size=1, bias=False),
+                nn.GroupNorm(num_groups=gn_mid, num_channels=mid),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(mid, mid, kernel_size=3, padding=1, bias=False),
+                nn.GroupNorm(num_groups=gn_mid, num_channels=mid),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(mid, channels, kernel_size=1, bias=False),
+                nn.GroupNorm(num_groups=gn_out, num_channels=channels),
+            )
+            self.gamma = nn.Parameter(torch.zeros(1, channels, 1, 1))
+
+    def forward(self, cine: torch.Tensor, psir: torch.Tensor, t2w: torch.Tensor) -> torch.Tensor:
+        base, feat = self._anat_mean_features(cine, psir, t2w)
+        return base + self.gamma * self.contrast_fuse(feat)
+
+
+class MultiScaleNormalizedContrastSkipFusion(_MultiScaleHeadMixin, nn.Module):
     """Multi-scale S3 skip fusion (3x3 d=1 + dilated 3x3 d=2) in shared aligned space."""
 
     def __init__(self, channels: int):
@@ -542,20 +581,7 @@ class MultiScaleNormalizedContrastSkipFusion(nn.Module):
         with torch.random.fork_rng(devices=[]):
             torch.manual_seed(202682 + channels)
             self.align_proj = _build_align_proj(channels, mid)
-            self.compress = nn.Sequential(
-                nn.Conv2d(mid * 4, mid, kernel_size=1, bias=False),
-                nn.GroupNorm(num_groups=gn_mid, num_channels=mid),
-                nn.ReLU(inplace=True),
-            )
-            self.conv_local = nn.Conv2d(mid, mid, kernel_size=3, padding=1, bias=False)
-            self.conv_dilated = nn.Conv2d(mid, mid, kernel_size=3, padding=2, dilation=2, groups=mid, bias=False)
-            self.ms_norm = nn.GroupNorm(num_groups=gn_mid, num_channels=mid)
-            self.ms_relu = nn.ReLU(inplace=True)
-            self.expand = nn.Sequential(
-                nn.Conv2d(mid, channels, kernel_size=1, bias=False),
-                nn.GroupNorm(num_groups=gn_out, num_channels=channels),
-            )
-            self.gamma = nn.Parameter(torch.zeros(1, channels, 1, 1))
+            self._init_ms_head(mid * 4, mid, channels, gn_mid, gn_out)
 
     def forward(self, cine: torch.Tensor, psir: torch.Tensor, t2w: torch.Tensor) -> torch.Tensor:
         base = (cine + psir + t2w) / 3.0
@@ -563,10 +589,24 @@ class MultiScaleNormalizedContrastSkipFusion(nn.Module):
         k_psir = self.align_proj(psir)
         k_t2w = self.align_proj(t2w)
         c4 = _compute_4way_contrasts(q_cine, k_psir, k_t2w)
-        h = self.compress(torch.cat(c4, dim=1))
-        ms = self.ms_relu(self.ms_norm(self.conv_local(h) + self.conv_dilated(h)))
-        delta = self.expand(ms)
+        delta = self._forward_ms_head(torch.cat(c4, dim=1))
         return base + self.gamma * delta
+
+
+class AnatMeanMSNormalizedContrastSkipFusion(_MultiScaleHeadMixin, _BaseAnatMeanContrastSkipFusion):
+    """Wave 7B: wall-gated myocardial-mean S3 skip fusion with multi-scale (3x3 + DW 3x3 d=2) context."""
+
+    def __init__(self, channels: int):
+        super().__init__()
+        mid, gn_mid, gn_out = self._init_anat_mean_dims(channels)
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(202692 + channels)
+            self._init_anat_mean_projections(channels, mid)
+            self._init_ms_head(mid * 6 + 1, mid, channels, gn_mid, gn_out)
+
+    def forward(self, cine: torch.Tensor, psir: torch.Tensor, t2w: torch.Tensor) -> torch.Tensor:
+        base, feat = self._anat_mean_features(cine, psir, t2w)
+        return base + self.gamma * self._forward_ms_head(feat)
 
 
 __all__ = [
@@ -579,6 +619,7 @@ __all__ = [
     "DecoupledAnatContrastSkipFusion",
     "AnatMeanNormalizedContrastSkipFusion",
     "MultiScaleNormalizedContrastSkipFusion",
+    "AnatMeanMSNormalizedContrastSkipFusion",
     "MEAN_SKIP_FUSION",
     "MODALITY_WEIGHTED_SKIP_FUSION",
     "SPATIAL_RESIDUAL_SKIP_FUSION",
@@ -586,5 +627,6 @@ __all__ = [
     "DECOUPLED_ANAT_CONTRAST_SKIP_FUSION",
     "NORM_CONTRAST_ANAT_MEAN_SKIP_FUSION",
     "NORM_CONTRAST_MS_SKIP_FUSION",
+    "NORM_CONTRAST_ANAT_MEAN_MS_SKIP_FUSION",
     "SKIP_FUSION_MODES",
 ]
