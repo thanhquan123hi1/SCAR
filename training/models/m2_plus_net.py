@@ -19,11 +19,15 @@ from training.models.modules.decoder import (
     WideResidualFullConvDecoder,
     HRAnatCalibRefinement,
     RawModalHDRRefinement,
+    PathologyCrossSkipRefinement,
+    DynamicUpsample2x,
     NO_DECODER_REFINEMENT,
     BOUNDARY_DECODER_REFINEMENT,
     WIDE_RES_FPN_DECODER_REFINEMENT,
     HR_ANAT_CALIB_DECODER_REFINEMENT,
     HR_RAW_EDGE_DECODER_REFINEMENT,
+    PATHOLOGY_CROSS_SKIP_DECODER_REFINEMENT,
+    DYNAMIC_UPSAMPLE_DECODER_REFINEMENT,
     DECODER_REFINEMENT_MODES,
 )
 from training.models.modules.fusion import (
@@ -377,7 +381,7 @@ class M2PlusNet(nn.Module):
 class SlimDecoderBlock(nn.Module):
     """Progressive upsampling block with depthwise-separable skip fusion.
 
-    1. Bilinear upsampling 2x
+    1. Upsampling 2x (bilinear by default)
     2. Input projection: in_channels -> out_channels (1x1 Conv + GroupNorm + ReLU)
     3. Skip fusion (if skip provided):
        - Skip projection: skip_channels -> out_channels // 2 (1x1 Conv + GroupNorm + ReLU)
@@ -385,11 +389,18 @@ class SlimDecoderBlock(nn.Module):
        - Depthwise Separable Conv: 3x3 depthwise conv + 1x1 pointwise conv + GroupNorm + ReLU
     """
 
-    def __init__(self, in_channels: int, skip_channels: int = 0, out_channels: int = 64):
+    def __init__(
+        self,
+        in_channels: int,
+        skip_channels: int = 0,
+        out_channels: int = 64,
+        upsample: nn.Module | None = None,
+    ):
         super().__init__()
         self.in_channels = in_channels
         self.skip_channels = skip_channels
         self.out_channels = out_channels
+        self.upsample = upsample
 
         num_gn = min(8, out_channels)
         while out_channels % num_gn != 0 and num_gn > 1:
@@ -423,7 +434,10 @@ class SlimDecoderBlock(nn.Module):
             self.fuse = None
 
     def forward(self, x: torch.Tensor, skip: torch.Tensor | None = None) -> torch.Tensor:
-        x = F.interpolate(x, scale_factor=2, mode="bilinear", align_corners=False)
+        if self.upsample is None:
+            x = F.interpolate(x, scale_factor=2, mode="bilinear", align_corners=False)
+        else:
+            x = self.upsample(x)
         x = self.proj_in(x)
         if skip is not None and self.proj_skip is not None:
             if x.shape[2:] != skip.shape[2:]:
@@ -518,6 +532,8 @@ class LightweightM2PlusNet(M2PlusNet):
         decoder_refinement = self.config.get("decoder_refinement", NO_DECODER_REFINEMENT)
         if decoder_refinement not in DECODER_REFINEMENT_MODES:
             raise ValueError(f"Unknown decoder_refinement {decoder_refinement!r}; expected {DECODER_REFINEMENT_MODES}")
+        if decoder_refinement == PATHOLOGY_CROSS_SKIP_DECODER_REFINEMENT and self.num_classes != 4:
+            raise ValueError("pathology_cross_skip requires the four canonical SCAR classes")
         self.config.bottleneck_fusion = bottleneck_fusion
         self.config.skip_fusion = skip_fusion_mode
         self.config.decoder_refinement = decoder_refinement
@@ -634,7 +650,10 @@ class LightweightM2PlusNet(M2PlusNet):
         self.dec1 = SlimDecoderBlock(in_channels=fused_channels, skip_channels=skip0_ch, out_channels=dec_ch[0])
         self.dec2 = SlimDecoderBlock(in_channels=dec_ch[0], skip_channels=skip1_ch, out_channels=dec_ch[1])
         self.dec3 = SlimDecoderBlock(in_channels=dec_ch[1], skip_channels=skip2_ch, out_channels=dec_ch[2])
-        self.dec4 = SlimDecoderBlock(in_channels=dec_ch[2], skip_channels=0, out_channels=dec_ch[3])
+        final_upsample = (
+            DynamicUpsample2x(dec_ch[2]) if self.decoder_refinement_mode == DYNAMIC_UPSAMPLE_DECODER_REFINEMENT else None
+        )
+        self.dec4 = SlimDecoderBlock(in_channels=dec_ch[2], out_channels=dec_ch[3], upsample=final_upsample)
         self.decoder = nn.ModuleList([self.dec1, self.dec2, self.dec3, self.dec4])
         if self.decoder_refinement_mode == BOUNDARY_DECODER_REFINEMENT:
             self.boundary_refine = BoundaryRefinementBlock(dec_ch[3])
@@ -672,6 +691,12 @@ class LightweightM2PlusNet(M2PlusNet):
         if zero_head:
             nn.init.zeros_(self.head.weight)
             nn.init.zeros_(self.head.bias)
+
+        self.pathology_cross_skip = (
+            PathologyCrossSkipRefinement(decoder_channels=dec_ch[2], skip_channels=skip2_ch)
+            if self.decoder_refinement_mode == PATHOLOGY_CROSS_SKIP_DECODER_REFINEMENT
+            else None
+        )
 
         if pretrained_path is not None:
             self.load_pretrained_encoders(pretrained_path)
@@ -787,6 +812,8 @@ class LightweightM2PlusNet(M2PlusNet):
 
         # 6. Final Segmentation Head
         logits = self.head(d4)
+        if self.pathology_cross_skip is not None:
+            logits = self.pathology_cross_skip(logits, d3, skips_psir[2], skips_t2w[2])
         return logits
 
     def load_pretrained_encoders(self, path: str | Path):

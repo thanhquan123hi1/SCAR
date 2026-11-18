@@ -55,12 +55,16 @@ BOUNDARY_DECODER_REFINEMENT = "boundary"
 WIDE_RES_FPN_DECODER_REFINEMENT = "wide_res_fpn"
 HR_ANAT_CALIB_DECODER_REFINEMENT = "hr_anat_calib"
 HR_RAW_EDGE_DECODER_REFINEMENT = "hr_raw_edge"
+PATHOLOGY_CROSS_SKIP_DECODER_REFINEMENT = "pathology_cross_skip"
+DYNAMIC_UPSAMPLE_DECODER_REFINEMENT = "dynamic_upsample"
 DECODER_REFINEMENT_MODES = (
     NO_DECODER_REFINEMENT,
     BOUNDARY_DECODER_REFINEMENT,
     WIDE_RES_FPN_DECODER_REFINEMENT,
     HR_ANAT_CALIB_DECODER_REFINEMENT,
     HR_RAW_EDGE_DECODER_REFINEMENT,
+    PATHOLOGY_CROSS_SKIP_DECODER_REFINEMENT,
+    DYNAMIC_UPSAMPLE_DECODER_REFINEMENT,
 )
 
 
@@ -69,6 +73,33 @@ def _gn_groups(channels: int, max_groups: int = 8) -> int:
         if channels % g == 0:
             return g
     return 1
+
+
+class DynamicUpsample2x(nn.Module):
+    """Sample features with bounded, learned offsets from the 2x bilinear grid."""
+
+    def __init__(self, channels: int):
+        super().__init__()
+        # Two displacements for each of the four output positions of an input pixel.
+        with torch.random.fork_rng(devices=[]):
+            self.offset = nn.Conv2d(channels, 8, kernel_size=1)
+        nn.init.zeros_(self.offset.weight)
+        nn.init.zeros_(self.offset.bias)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        height, width = x.shape[-2:]
+        coordinate_dtype = torch.float64 if x.dtype == torch.float64 else torch.float32
+        offsets = F.pixel_shuffle(self.offset(x), 2).to(coordinate_dtype).tanh() * 0.5
+
+        rows = (torch.arange(2 * height, device=x.device, dtype=coordinate_dtype) + 0.5) / height - 1.0
+        cols = (torch.arange(2 * width, device=x.device, dtype=coordinate_dtype) + 0.5) / width - 1.0
+        grid_y, grid_x = torch.meshgrid(rows, cols, indexing="ij")
+        # Convert displacements in input pixels to align_corners=False grid units.
+        grid = torch.stack(
+            (grid_x + offsets[:, 0] * (2.0 / width), grid_y + offsets[:, 1] * (2.0 / height)), dim=-1,
+        )
+        sampled = F.grid_sample(x.to(coordinate_dtype), grid, mode="bilinear", padding_mode="border", align_corners=False)
+        return sampled.to(x.dtype)
 
 
 class BoundaryRefinementBlock(nn.Module):
@@ -326,6 +357,61 @@ class RawModalHDRRefinement(nn.Module):
         ms = self.ms_relu(self.ms_norm(self.conv_local(h) + self.conv_dilated(h)))
         delta = self.fuse_out(ms)
         return d4 + self.gamma * delta
+
+
+class _PathologyCrossSkipHead(nn.Module):
+    """Predict a logit correction with more channels for the primary sequence."""
+
+    def __init__(self, decoder_channels: int, skip_channels: int):
+        super().__init__()
+        primary_channels = max(decoder_channels // 2, 16)
+        context_channels = primary_channels // 2
+        self.primary_proj = nn.Conv2d(skip_channels, primary_channels, kernel_size=1, bias=False)
+        self.context_proj = nn.Conv2d(skip_channels, context_channels, kernel_size=1, bias=False)
+        self.refine = nn.Sequential(
+            nn.Conv2d(
+                decoder_channels + primary_channels + context_channels,
+                primary_channels,
+                kernel_size=3,
+                padding=1,
+                bias=False,
+            ),
+            nn.GroupNorm(_gn_groups(primary_channels), primary_channels),
+            nn.ReLU(inplace=True),
+        )
+        self.output = nn.Conv2d(primary_channels, 1, kernel_size=1)
+        nn.init.zeros_(self.output.weight)
+        nn.init.zeros_(self.output.bias)
+
+    def forward(self, decoded: torch.Tensor, primary: torch.Tensor, context: torch.Tensor) -> torch.Tensor:
+        features = torch.cat((decoded, self.primary_proj(primary), self.context_proj(context)), dim=1)
+        return self.output(self.refine(features))
+
+
+class PathologyCrossSkipRefinement(nn.Module):
+    """Use pre-fusion half-resolution skips to refine edema and scar logits."""
+
+    def __init__(self, decoder_channels: int, skip_channels: int):
+        super().__init__()
+        # Preserve the baseline RNG stream when the optional heads are enabled.
+        with torch.random.fork_rng(devices=[]):
+            self.edema_head = _PathologyCrossSkipHead(decoder_channels, skip_channels)
+            self.scar_head = _PathologyCrossSkipHead(decoder_channels, skip_channels)
+
+    def forward(
+        self,
+        logits: torch.Tensor,
+        decoded: torch.Tensor,
+        psir_skip: torch.Tensor,
+        t2w_skip: torch.Tensor,
+    ) -> torch.Tensor:
+        edema = self.edema_head(decoded, t2w_skip, psir_skip)
+        scar = self.scar_head(decoded, psir_skip, t2w_skip)
+        correction = F.interpolate(
+            torch.cat((edema, scar), dim=1), size=logits.shape[-2:], mode="bilinear", align_corners=False,
+        )
+        # SCAR's channel order is background, normal myocardium, edema, scar.
+        return torch.cat((logits[:, :2], logits[:, 2:] + correction), dim=1)
 
 
 class SegmentationHead(nn.Sequential):

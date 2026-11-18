@@ -13,7 +13,7 @@ from training.models import (
     model_from_config,
     validate_model_config,
 )
-from training.models.modules.decoder import BoundaryRefinementBlock
+from training.models.modules.decoder import BoundaryRefinementBlock, DynamicUpsample2x
 from training.models.modules.fusion import TriModalSkipFusion
 from training.models.modules.m2_plus import LocalModalityContrastFusion
 from training.train import model_config_from_args, parse_args
@@ -131,6 +131,12 @@ def test_trimodal_skip_fusion_uniform_init_and_multistep_grad():
             "skip_fusion": "norm_contrast_anat_mean_ms",
             "decoder_refinement": "hr_raw_edge",
         },
+        {
+            "bottleneck_fusion": "residual_contrast",
+            "skip_fusion": "norm_contrast",
+            "decoder_refinement": "pathology_cross_skip",
+        },
+        {"use_cross_attention": False, "decoder_refinement": "dynamic_upsample"},
     ],
 )
 def test_phase2_forward_backward_flops_and_checkpoint_roundtrip(tmp_path, overrides):
@@ -228,3 +234,55 @@ def test_wave6_configs_step0_equivalence_and_zero_input(cfg_name):
     with torch.no_grad():
         torch.testing.assert_close(model(*imgs), e5(*imgs), rtol=0, atol=1e-6)
         assert torch.isfinite(model(*zeros)).all()
+
+
+def test_pathology_cross_skip_yaml_preserves_initial_logits_and_targets_lesion_channels():
+    base_args, base_merged = parse_args(["--config", "lightweight_e5_b1r_s3_norm_skip"])
+    args, merged = parse_args(["--config", "lightweight_e5_b1r_s3_norm_skip_pathology_cross_skip"])
+
+    torch.manual_seed(7)
+    base = model_from_config(model_config_from_args(base_args, base_merged), img_size=32).eval()
+    torch.manual_seed(7)
+    model = model_from_config(model_config_from_args(args, merged), img_size=32).eval()
+    imgs = [torch.randn(1, 1, 32, 32) for _ in range(3)]
+    refinement = model.pathology_cross_skip
+
+    with torch.no_grad():
+        expected = base(*imgs)
+        torch.testing.assert_close(model(*imgs), expected, rtol=0, atol=0)
+
+        refinement.scar_head.output.bias.fill_(1.0)
+        expected[:, 3] += 1.0
+        torch.testing.assert_close(model(*imgs), expected, rtol=0, atol=0)
+
+        refinement.edema_head.output.bias.fill_(-1.0)
+        expected[:, 2] -= 1.0
+        torch.testing.assert_close(model(*imgs), expected, rtol=0, atol=0)
+
+
+def test_dynamic_upsample_starts_as_bilinear_and_learns_offsets_on_rectangular_input():
+    torch.manual_seed(19)
+    x = torch.randn(2, 8, 5, 7, requires_grad=True)
+    upsample = DynamicUpsample2x(channels=8)
+    expected = torch.nn.functional.interpolate(x, scale_factor=2, mode="bilinear", align_corners=False)
+    actual = upsample(x)
+    torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
+
+    actual.square().mean().backward()
+    for grad in (x.grad, upsample.offset.weight.grad):
+        assert grad is not None and torch.isfinite(grad).all()
+        assert grad.abs().sum() > 0
+
+
+def test_dynamic_upsample_yaml_preserves_e5_at_initialization():
+    base_args, base_merged = parse_args(["--config", "lightweight_no_cross_attention"])
+    args, merged = parse_args(["--config", "lightweight_e5_d4_dynamic_upsample"])
+
+    torch.manual_seed(7)
+    base = model_from_config(model_config_from_args(base_args, base_merged), img_size=32).eval()
+    torch.manual_seed(7)
+    model = model_from_config(model_config_from_args(args, merged), img_size=32).eval()
+    assert sum(isinstance(module, DynamicUpsample2x) for module in model.modules()) == 1
+    imgs = [torch.randn(1, 1, 32, 48) for _ in range(3)]
+    with torch.no_grad():
+        torch.testing.assert_close(model(*imgs), base(*imgs), rtol=1e-5, atol=1e-6)
