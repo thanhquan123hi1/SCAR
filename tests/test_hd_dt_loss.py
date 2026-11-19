@@ -1,0 +1,160 @@
+"""Unit tests for hierarchical batch Dice and distance-transform Hausdorff surrogate losses."""
+from __future__ import annotations
+
+import pytest
+import torch
+
+from training.loss.losses import BOUNDARY_DT_MODES, SegmentationLoss
+from training.train import parse_args
+
+
+def test_zero_weights_exact_backward_compatibility():
+    torch.manual_seed(42)
+    logits = torch.randn(4, 4, 32, 32, requires_grad=True)
+    target = torch.randint(0, 4, (4, 32, 32))
+
+    base = SegmentationLoss(
+        n_classes=4,
+        ce_weight=0.2,
+        dice_weight=0.8,
+        dice_class_weights=[0.5, 1.0, 1.0, 1.0],
+        negative_slice_handling="batch",
+        include_background=True,
+        dice_normalization="classes",
+    )
+    extended = SegmentationLoss(
+        n_classes=4,
+        ce_weight=0.2,
+        dice_weight=0.8,
+        hier_dice_weight=0.0,
+        boundary_dt_weight=0.0,
+        dice_class_weights=[0.5, 1.0, 1.0, 1.0],
+        negative_slice_handling="batch",
+        include_background=True,
+        dice_normalization="classes",
+    )
+    out_base = base(logits, target)
+    out_ext = extended(logits, target)
+    assert set(out_base.keys()) == set(out_ext.keys())
+    for k in out_base:
+        assert torch.allclose(out_base[k], out_ext[k], atol=0.0, rtol=0.0)
+
+
+@pytest.mark.parametrize("mode", BOUNDARY_DT_MODES)
+@pytest.mark.parametrize("target_kind", ["normal", "all_empty", "all_scar", "partial_empty"])
+def test_hd_dt_loss_finite_and_grads_edge_cases(mode, target_kind):
+    torch.manual_seed(7)
+    logits = torch.randn(4, 4, 64, 64, requires_grad=True)
+    if target_kind == "all_empty":
+        target = torch.zeros(4, 64, 64, dtype=torch.long)
+    elif target_kind == "all_scar":
+        target = torch.full((4, 64, 64), 3, dtype=torch.long)
+    elif target_kind == "partial_empty":
+        target = torch.zeros(4, 64, 64, dtype=torch.long)
+        target[0, 20:36, 20:36] = 1
+        target[0, 24:30, 24:30] = 2
+        target[1, 25:35, 25:35] = 3
+    else:
+        target = torch.zeros(4, 64, 64, dtype=torch.long)
+        target[:, 16:48, 16:48] = 1
+        target[:, 22:40, 22:40] = 2
+        target[:, 26:34, 26:34] = 3
+
+    crit = SegmentationLoss(
+        n_classes=4,
+        ce_weight=0.2,
+        dice_weight=0.8,
+        hier_dice_weight=0.20,
+        boundary_dt_weight=0.10,
+        boundary_dt_mode=mode,
+        dice_class_weights=[0.5, 1.0, 1.0, 1.0],
+        negative_slice_handling="batch",
+        include_background=True,
+        dice_normalization="classes",
+    )
+    out = crit(logits, target)
+    for k, v in out.items():
+        assert torch.isfinite(v), f"{mode}/{target_kind}: non-finite {k}={v}"
+        assert v.item() >= 0.0, f"{mode}/{target_kind}: negative {k}={v}"
+    out["loss"].backward()
+    assert logits.grad is not None and torch.isfinite(logits.grad).all()
+
+
+@pytest.mark.parametrize("mode", BOUNDARY_DT_MODES)
+def test_distant_fp_penalized_more_than_near_fp(mode):
+    target = torch.zeros(1, 64, 64, dtype=torch.long)
+    target[0, 28:36, 28:36] = 3  # central scar block
+
+    def make_logits(fp_r, fp_c):
+        logits = torch.full((1, 4, 64, 64), -3.0)
+        logits[0, 0] = 3.0
+        logits[0, 0, 28:36, 28:36] = -3.0
+        logits[0, 3, 28:36, 28:36] = 3.0
+        # Inject identical 4x4 FP scar blob at (fp_r, fp_c)
+        logits[0, 0, fp_r:fp_r + 4, fp_c:fp_c + 4] = -3.0
+        logits[0, 3, fp_r:fp_r + 4, fp_c:fp_c + 4] = 3.0
+        return logits
+
+    crit = SegmentationLoss(
+        n_classes=4,
+        ce_weight=0.2,
+        dice_weight=0.8,
+        hier_dice_weight=0.2,
+        boundary_dt_weight=0.1,
+        boundary_dt_mode=mode,
+        dice_class_weights=[0.5, 1.0, 1.0, 1.0],
+        negative_slice_handling="batch",
+        include_background=True,
+        dice_normalization="classes",
+    )
+    near = crit(make_logits(36, 30), target)["boundary_dt_loss"].item()
+    far = crit(make_logits(2, 2), target)["boundary_dt_loss"].item()
+    assert far > near * 5.0, f"{mode}: expected far ({far}) >> near ({near})"
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for bf16 check")
+@pytest.mark.parametrize("mode", BOUNDARY_DT_MODES)
+def test_bf16_cuda_grads_finite(mode):
+    logits = torch.randn(4, 4, 64, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    target = torch.zeros(4, 64, 64, device="cuda", dtype=torch.long)
+    target[0, 10:30, 10:30] = 1
+    target[0, 15:25, 15:25] = 2
+    target[1, 20:30, 20:30] = 3
+    # slices 2 & 3 intentionally empty
+    crit = SegmentationLoss(
+        n_classes=4,
+        ce_weight=0.2,
+        dice_weight=0.8,
+        hier_dice_weight=0.20,
+        boundary_dt_weight=0.10,
+        boundary_dt_mode=mode,
+        dice_class_weights=[0.5, 1.0, 1.0, 1.0],
+        negative_slice_handling="batch",
+        include_background=True,
+        dice_normalization="classes",
+    )
+    with torch.autocast("cuda", dtype=torch.bfloat16):
+        out = crit(logits, target)
+    assert torch.isfinite(out["loss"])
+    out["loss"].backward()
+    assert logits.grad is not None and torch.isfinite(logits.grad).all()
+
+
+@pytest.mark.parametrize(
+    "cfg_path,expected_mode",
+    [
+        ("training/config/models/lightweight_e5_b1r_s3_l1_symdt_bce.yaml", "sym_bce"),
+        ("training/config/models/lightweight_e5_b1r_s3_l2_karimi_hddt.yaml", "karimi_mse"),
+    ],
+)
+def test_loss_trial_yamls_parse_cleanly(cfg_path, expected_mode):
+    args, merged = parse_args(["--config", cfg_path, "--dataset", "myopspp_unet2d_roi128_1mm"])
+    assert args.boundary_dt_mode == expected_mode
+    assert args.hier_dice_weight > 0.0
+    assert args.boundary_dt_weight > 0.0
+    assert args.max_epochs == 300
+    assert args.batch_size == 16
+    assert args.seed == 1234
+    assert args.no_val is True
+    assert merged["model"]["bottleneck_fusion"] == "residual_contrast"
+    assert merged["model"]["skip_fusion"] == "norm_contrast"
