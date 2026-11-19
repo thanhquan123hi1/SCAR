@@ -1,13 +1,14 @@
 # Research Handoff — Lightweight M2-Plus Optimization on MyoPS++
 
 > Tài liệu bàn giao toàn bộ quá trình thực nghiệm, kết quả định lượng, chẩn đoán lỗi, mã nguồn đã chỉnh sửa, vị trí tài nguyên đã sao lưu và kế hoạch bước tiếp theo để phiên làm việc sau có thể tiếp tục ngay mà không cần train/test lại hay phân tích lại từ đầu.
-> **Mốc tốt nhất hiện tại (`seed=1234`, `test_vol` MyoPS++ — cập nhật đến hết Round 7, 23 trial):**
+> **Mốc tốt nhất hiện tại (`seed=1234`, `test_vol` MyoPS++ — cập nhật đến hết Round 8, 26 trial):**
 > - **#1 Tổng thể theo tiêu chí Pass & HD95 (`6/8` pass — Round 4):** **`R4_L5_CalibTversky`** ([lightweight_e5_b1r_s3_l5_calib_tversky.yaml](training/config/models/lightweight_e5_b1r_s3_l5_calib_tversky.yaml), `15,726,455` params, `9.4695 G` FLOPs) — **`AvgPathIncl = 72.09% / 10.72 mm`** *(duy nhất vượt ngưỡng `≤ 10.93 mm`)*, **`Scar = 70.42% / 7.65 mm`** *(Best Scar HD95)*, `EdemaIncl = 73.76% / 13.79 mm`, `MyoRing = 88.37% / 2.74 mm`, `FP3003 = 22`.
 > - **#2 Tổng thể & #1 Scar Dice / MyoRing HD95 (`5/8` pass — Round 6):** **`R6_L8_MildScaleKarimi`** ([lightweight_e5_b1r_s3_l8_mild_scale_karimi.yaml](training/config/models/lightweight_e5_b1r_s3_l8_mild_scale_karimi.yaml), `15,726,455` params, `9.4695 G` FLOPs) — **`AvgPathIncl = 72.90% / 11.06 mm`**, **`Scar = 72.29% / 7.78 mm`**, **`MyoRing = 88.46% / 2.70 mm`** *(chỉ còn cách ngưỡng `2.67 mm` đúng `0.03 mm`)*, `FP3003 = 26`.
 > - **#3 Tổng thể & #1 Kiến trúc thuần (`5/8` pass — Round 4):** **`R4_A3_B2SA_S3AnatMean`** ([lightweight_e5_b2sa_s3_anat_mean.yaml](training/config/models/lightweight_e5_b2sa_s3_anat_mean.yaml), `17,292,842` params, `9.8039 G` FLOPs) — **`AvgPathIncl = 72.61% / 11.71 mm`**, **`EdemaIncl = 74.57%`** *(Best)*, `AvgPathExcl = 58.34%`, `Scar = 70.65% / 9.53 mm`.
+> - **#1 Combo (`5/8` pass — Round 8):** **`R8_C8_E5B1RS3_RingCtx_L10`** (`15.76M / 10.61G`, `AvgPathIncl = 72.23% / 11.68 mm`, `EdemaIncl = 74.22%`, `MyoRing = 88.40% / 2.74 mm`) & **`R8_C7_B2_S3AnatMean_L10`** (`5/8`, `AvgPathIncl = 72.07% / 11.58 mm`, `Scar HD95 = 8.99 mm`).
 > - **Kỷ lục Dice toàn chiến dịch (`4/8` pass — Round 7):** **`R7_C6_B2GSA_S3AnatMean_RingCtx_L9`** ([lightweight_e5_b2gsa_s3_anat_mean_ring_ctx_l9.yaml](training/config/models/lightweight_e5_b2gsa_s3_anat_mean_ring_ctx_l9.yaml), `17,329,643` params, `10.9474 G` FLOPs) — **`AvgPathIncl Dice = 72.97%`**, **`AvgPathExcl Dice = 59.25%`**, **`EdemaExcl Dice = 46.77%`**.
 > - **Mốc nền Wave 4–6 (Base Loss, tham chiếu trên MyoPS380):** **`E5-B1R-S3-NormSkip`** (`15.73M / 9.47G`, MyoPS380: `Scar = 72.05% / 4.30 vox`, `AvgPathIncl = 73.39%`) và **`E5-B1R-S3AnatMean`** (Wave 6B).
-> **Cập nhật lần cuối:** `2026-11-19 14:20 UTC` (Hoàn thành Wave 7 + Rounds 1–7 Autoresearch `23` trial, Round 8 đang chạy; đã sao lưu toàn bộ log/metric + Top 3 checkpoints + git bundle lên Google Drive)
+> **Cập nhật lần cuối:** `2026-11-19 14:48 UTC` (Hoàn thành đủ Wave 7 + Rounds 1–8 Autoresearch `26` trial; đã đồng bộ log/metric + Top 3 checkpoints lên Drive và push GitHub)
 
 ---
 
@@ -341,9 +342,9 @@ python3 test.py \
 
 ---
 
-## 9. Chiến dịch Autoresearch Tối ưu Toàn diện (Wave 7 + Rounds 1–7 & Round 8 — `2026-11-19`)
+## 9. Chiến dịch Autoresearch Tối ưu Toàn diện (Wave 7 + Rounds 1–8 — `2026-11-19`)
 
-Mục tiêu chiến dịch ngày `2026-11-19` là tối ưu có hệ thống cả **Loss** (Hierarchical Dice/Tversky, Karimi HD-DT, Far-FP dead-zone, per-region scaling, per-slice normalization) và **Kiến trúc** (`B2`, `B2SA`, `B2GSA`, `S3AnatMean`, `AnatRingContextRefinement`, `SSPA-GN`, `CoherentAnatContrastSkip`) trên cùng protocol cố định (`myopspp_unet2d_roi128_1mm`, `seed=1234`, `300 epochs`, `batch_size=16`, `bf16`, `--no-val`, `test_vol` 16 ca), đồng thời theo dõi 8 tiêu chí Pass định lượng.
+Mục tiêu chiến dịch ngày `2026-11-19` là tối ưu có hệ thống cả **Loss** (Hierarchical Dice/Tversky, Karimi HD-DT, Far-FP dead-zone, per-region scaling, per-slice normalization, full-range `max_steps=64`) và **Kiến trúc** (`B2`, `B2SA`, `B2GSA`, `S3AnatMean`, `AnatRingContextRefinement`, `SSPA-GN`, `CoherentAnatContrastSkip`) trên cùng protocol cố định (`myopspp_unet2d_roi128_1mm`, `seed=1234`, `300 epochs`, `batch_size=16`, `bf16`, `--no-val`, `test_vol` 16 ca), đồng thời theo dõi 8 tiêu chí Pass định lượng.
 
 ### 9.1 Bộ 8 Tiêu chí Pass (`all_8_passed`)
 
@@ -352,7 +353,7 @@ Mục tiêu chiến dịch ngày `2026-11-19` là tối ưu có hệ thống c�
 | **Dice (%)** *(càng cao càng tốt)* | `>= 68.91` | `>= 72.75` | `>= 87.97` | `>= 70.83` |
 | **HD95 (mm)** *(càng thấp càng tốt)* | `<= 9.65` | `<= 12.21` | `<= 2.67` | `<= 10.93` |
 
-### 9.2 Bảng Xếp hạng Toàn bộ 23 Trial đã hoàn thành (`Wave 7A/B` + `Rounds 1–7`)
+### 9.2 Bảng Xếp hạng Toàn bộ 26 Trial đã hoàn thành (`Wave 7A/B` + `Rounds 1–8`)
 
 *(Nguồn ledger gốc: `outputs/myopspp_unet2d_roi128_1mm/autoresearch_campaign/results_ledger.csv` & `.jsonl`; sắp xếp theo `Pass / 8` giảm dần → `AvgPathIncl Dice` giảm dần → `AvgPathIncl HD95` tăng dần.)*
 
@@ -362,25 +363,28 @@ Mục tiêu chiến dịch ngày `2026-11-19` là tối ưu có hệ thống c�
 | **2** | **`R6_L8_MildScaleKarimi`** ★ | `loss_only` | **5/8** | `72.90` / `11.06` | **`72.29`** / `7.78` | `73.51` / `14.35` | `88.46` / **`2.70`** | `57.71` / `14.58` | `43.14` / `21.38` | `78.17` / `4.76` | `15.73M / 9.47G` | `26` | `dd336a3` |
 | **3** | **`R4_A3_B2SA_S3AnatMean`** ★ | `arch_only` | **5/8** | `72.61` / `11.71` | `70.65` / `9.53` | **`74.57`** / `13.88` | `88.20` / `2.82` | `58.34` / `14.80` | `46.03` / `20.07` | `78.43` / `4.51` | `17.29M / 9.80G` | `185` | `17e1a0b` |
 | 4 | `R1_L2_KarimiHDDT` | `loss_only` | 5/8 | `72.27` / `11.54` | `70.58` / `9.00` | `73.95` / `14.08` | `88.04` / `2.84` | `57.87` / `14.82` | `45.15` / `20.63` | `77.72` / `4.75` | `15.73M / 9.47G` | `241` | `38c386f` |
-| 5 | `R3_C1_B2_S3AnatMean_L2` | `combo` | 5/8 | `71.78` / `11.56` | `69.89` / `9.63` | `73.66` / `13.50` | `88.07` / `2.82` | `57.25` / `14.62` | `44.60` / **`19.61`** | `77.94` / **`4.40`** | `16.76M / 9.73G` | `192` | `8154e74` |
-| 6 | `R5_L7_ScaleKarimi` | `loss_only` | 5/8 | `71.39` / `12.47` | `69.89` / `9.28` | `72.89` / `15.66` | `88.30` / `2.83` | `56.37` / `15.35` | `42.86` / `21.42` | `78.09` / `4.75` | `15.73M / 9.47G` | `24` | `72090c0` |
-| 7 | `R7_C6_B2GSA_S3AnatMean_RingCtx_L9` | `combo` | 4/8 | **`72.97`** / `11.89` | `71.74` / `10.43` | `74.19` / `13.35` | `88.41` / `2.77` | **`59.25`** / `15.45` | **`46.77`** / `20.47` | `78.49` / `4.74` | `17.33M / 10.95G` | `162` | `0183d69` |
-| 8 | `R2_A1_B2_S3AnatMean` | `arch_only` | 4/8 | `72.37` / `11.02` | `71.83` / `7.86` | `72.91` / `14.17` | `87.96` / `2.89` | `57.89` / **`14.32`** | `43.94` / `20.78` | `77.70` / `4.96` | `16.76M / 9.73G` | **`0`** | `53df72b` |
-| 9 | `R5_C3_B2SA_S3AnatMean_L5` | `combo` | 4/8 | `72.26` / `11.92` | `69.97` / `10.70` | `74.54` / **`13.13`** | `88.34` / `2.71` | `57.10` / `15.27` | `44.22` / `19.85` | **`78.73`** / `4.60` | `17.29M / 9.80G` | `214` | `72090c0` |
-| 10 | `R3_C2_B2_S3AnatMean_RingCtx_L4` | `combo` | 4/8 | `72.22` / `12.09` | `70.53` / `10.56` | `73.91` / `13.62` | `88.14` / `2.85` | `57.64` / `15.60` | `44.74` / `20.65` | `77.86` / `4.53` | `16.80M / 10.88G` | `231` | `8154e74` |
-| 11 | `R6_C4_B2SA_S3AnatMean_RingCtx_L5` | `combo` | 4/8 | `72.22` / `12.25` | `70.38` / `10.74` | `74.06` / `13.76` | **`88.49`** / `2.72` | `57.75` / `15.65` | `45.12` / `20.56` | `78.67` / `4.55` | `17.33M / 10.95G` | `42` | `dd336a3` |
-| 12 | `R2_A2_S3_AnatRingCtx` | `arch_only` | 4/8 | `72.07` / `11.95` | `70.43` / `9.98` | `73.71` / `13.91` | `88.33` / `2.79` | `58.11` / `14.98` | `45.80` / `19.98` | `78.16` / `4.43` | `15.76M / 10.61G` | `199` | `53df72b` |
-| 13 | `R3_L4_HybridFarFP` | `loss_only` | 4/8 | `71.72` / `11.97` | `69.04` / `9.88` | `74.39` / `14.06` | `88.27` / `2.73` | `56.48` / `15.86` | `43.92` / `21.84` | `77.78` / `4.66` | `15.73M / 9.47G` | `204` | `8154e74` |
-| 14 | `R1_Anchor_E5_B1R_S3` | `anchor` | 4/8 | `71.50` / `12.98` | `69.91` / `10.70` | `73.09` / `15.26` | `88.23` / `2.77` | `57.00` / `16.07` | `44.08` / `21.44` | `78.03` / `4.59` | `15.73M / 9.47G` | `96` | `38c386f` |
-| 15 | `R2_L3_StrongKarimi` | `loss_only` | 4/8 | `71.19` / `13.29` | `69.24` / `11.08` | `73.14` / `15.49` | `88.31` / `2.72` | `56.55` / `16.27` | `43.85` / `21.45` | `77.23` / `5.20` | `15.73M / 9.47G` | `180` | `53df72b` |
-| 16 | `R6_A5_B2GatedSA_S3Coherent_RingCtx` | `arch_only` | 3/8 | `72.02` / `12.19` | `71.03` / `9.95` | `73.01` / `14.44` | `87.96` / `2.85` | `57.61` / `15.62` | `44.20` / `21.29` | `77.45` / `4.70` | `17.50M / 11.10G` | `47` | `dd336a3` |
-| 17 | `Wave7A_S3AnatMean_RawHDR` | `pre_campaign` | 3/8 | `72.01` / `12.59` | `71.43` / `10.55` | `72.59` / `14.63` | `88.14` / `2.84` | `57.59` / `15.62` | `43.75` / `20.69` | `77.63` / `4.77` | `15.92M / 10.38G` | `58` | `ae6f101` |
-| 18 | `Wave7B_S3AnatMeanMS_RawHDR` | `pre_campaign` | 3/8 | `71.33` / `12.27` | `69.95` / `10.09` | `72.71` / `14.44` | `87.97` / `2.74` | `57.26` / `15.23` | `44.56` / `20.37` | `77.25` / `4.72` | `15.92M / 10.39G` | `159` | `ae6f101` |
-| 19 | `R1_L1_SymDTBCE` | `loss_only` | 3/8 | `71.15` / `12.15` | `69.32` / `10.74` | `72.98` / `13.55` | `87.92` / `2.90` | `57.01` / `16.23` | `44.70` / `21.72` | `77.56` / `4.66` | `15.73M / 9.47G` | `182` | `38c386f` |
-| 20 | `R5_A4_E5B1RS3_SSPAGN` | `arch_only` | 3/8 | `71.05` / `12.14` | `69.17` / `9.67` | `72.92` / `14.62` | `87.80` / `2.91` | `56.82` / `16.07` | `44.47` / `22.47` | `77.20` / `4.76` | `15.73M / 9.47G` | `161` | `72090c0` |
-| 21 | `R4_L6_CalibFarFP` | `loss_only` | 2/8 | `71.21` / `12.58` | `69.70` / `10.94` | `72.71` / `14.22` | `87.94` / `2.97` | `56.26` / `15.78` | `42.83` / `20.61` | `77.10` / `4.87` | `15.73M / 9.47G` | `93` | `17e1a0b` |
-| 22 | `R7_C5_B2SA_S3AnatMean_L8` | `combo` | 1/8 | `70.75` / `12.33` | `68.86` / `10.80` | `72.64` / `13.85` | `87.98` / `2.86` | `55.91` / `15.70` | `42.97` / `20.59` | `77.91` / `5.03` | `17.29M / 9.80G` | `191` | `0183d69` |
-| 23 | `R7_L9_SliceHierKarimi` | `loss_only` | 1/8 | `70.29` / `13.33` | `68.70` / `10.67` | `71.89` / `15.99` | `88.01` / `2.77` | `55.31` / `16.37` | `41.92` / `22.06` | `77.62` / `4.65` | `15.73M / 9.47G` | `109` | `0183d69` |
+| 5 | **`R8_C8_E5B1RS3_RingCtx_L10`** | `combo` | 5/8 | `72.23` / `11.68` | `70.24` / `9.51` | `74.22` / `13.85` | `88.40` / `2.74` | `57.89` / `14.56` | `45.55` / **`19.61`** | `78.04` / `4.57` | `15.76M / 10.61G` | `262` | `7e2ec5f` |
+| 6 | **`R8_C7_B2_S3AnatMean_L10`** | `combo` | 5/8 | `72.07` / `11.58` | `70.28` / `8.99` | `73.87` / `14.17` | `88.20` / `2.77` | `57.38` / `14.53` | `44.49` / `20.08` | `77.76` / `4.55` | `16.76M / 9.73G` | `61` | `7e2ec5f` |
+| 7 | `R3_C1_B2_S3AnatMean_L2` | `combo` | 5/8 | `71.78` / `11.56` | `69.89` / `9.63` | `73.66` / `13.50` | `88.07` / `2.82` | `57.25` / `14.62` | `44.60` / **`19.61`** | `77.94` / **`4.40`** | `16.76M / 9.73G` | `192` | `8154e74` |
+| 8 | `R5_L7_ScaleKarimi` | `loss_only` | 5/8 | `71.39` / `12.47` | `69.89` / `9.28` | `72.89` / `15.66` | `88.30` / `2.83` | `56.37` / `15.35` | `42.86` / `21.42` | `78.09` / `4.75` | `15.73M / 9.47G` | `24` | `72090c0` |
+| 9 | `R7_C6_B2GSA_S3AnatMean_RingCtx_L9` | `combo` | 4/8 | **`72.97`** / `11.89` | `71.74` / `10.43` | `74.19` / `13.35` | `88.41` / `2.77` | **`59.25`** / `15.45` | **`46.77`** / `20.47` | `78.49` / `4.74` | `17.33M / 10.95G` | `162` | `0183d69` |
+| 10 | `R2_A1_B2_S3AnatMean` | `arch_only` | 4/8 | `72.37` / `11.02` | `71.83` / `7.86` | `72.91` / `14.17` | `87.96` / `2.89` | `57.89` / **`14.32`** | `43.94` / `20.78` | `77.70` / `4.96` | `16.76M / 9.73G` | **`0`** | `53df72b` |
+| 11 | `R5_C3_B2SA_S3AnatMean_L5` | `combo` | 4/8 | `72.26` / `11.92` | `69.97` / `10.70` | `74.54` / **`13.13`** | `88.34` / `2.71` | `57.10` / `15.27` | `44.22` / `19.85` | **`78.73`** / `4.60` | `17.29M / 9.80G` | `214` | `72090c0` |
+| 12 | `R3_C2_B2_S3AnatMean_RingCtx_L4` | `combo` | 4/8 | `72.22` / `12.09` | `70.53` / `10.56` | `73.91` / `13.62` | `88.14` / `2.85` | `57.64` / `15.60` | `44.74` / `20.65` | `77.86` / `4.53` | `16.80M / 10.88G` | `231` | `8154e74` |
+| 13 | `R6_C4_B2SA_S3AnatMean_RingCtx_L5` | `combo` | 4/8 | `72.22` / `12.25` | `70.38` / `10.74` | `74.06` / `13.76` | **`88.49`** / `2.72` | `57.75` / `15.65` | `45.12` / `20.56` | `78.67` / `4.55` | `17.33M / 10.95G` | `42` | `dd336a3` |
+| 14 | `R2_A2_S3_AnatRingCtx` | `arch_only` | 4/8 | `72.07` / `11.95` | `70.43` / `9.98` | `73.71` / `13.91` | `88.33` / `2.79` | `58.11` / `14.98` | `45.80` / `19.98` | `78.16` / `4.43` | `15.76M / 10.61G` | `199` | `53df72b` |
+| 15 | `R3_L4_HybridFarFP` | `loss_only` | 4/8 | `71.72` / `11.97` | `69.04` / `9.88` | `74.39` / `14.06` | `88.27` / `2.73` | `56.48` / `15.86` | `43.92` / `21.84` | `77.78` / `4.66` | `15.73M / 9.47G` | `204` | `8154e74` |
+| 16 | `R8_L10_FullRangeKarimi` | `loss_only` | 4/8 | `71.54` / `12.63` | `69.46` / `11.01` | `73.62` / `14.26` | `88.26` / `2.77` | `57.95` / `15.85` | `46.44` / `20.70` | `78.05` / `4.54` | `15.73M / 9.47G` | `166` | `7e2ec5f` |
+| 17 | `R1_Anchor_E5_B1R_S3` | `anchor` | 4/8 | `71.50` / `12.98` | `69.91` / `10.70` | `73.09` / `15.26` | `88.23` / `2.77` | `57.00` / `16.07` | `44.08` / `21.44` | `78.03` / `4.59` | `15.73M / 9.47G` | `96` | `38c386f` |
+| 18 | `R2_L3_StrongKarimi` | `loss_only` | 4/8 | `71.19` / `13.29` | `69.24` / `11.08` | `73.14` / `15.49` | `88.31` / `2.72` | `56.55` / `16.27` | `43.85` / `21.45` | `77.23` / `5.20` | `15.73M / 9.47G` | `180` | `53df72b` |
+| 19 | `R6_A5_B2GatedSA_S3Coherent_RingCtx` | `arch_only` | 3/8 | `72.02` / `12.19` | `71.03` / `9.95` | `73.01` / `14.44` | `87.96` / `2.85` | `57.61` / `15.62` | `44.20` / `21.29` | `77.45` / `4.70` | `17.50M / 11.10G` | `47` | `dd336a3` |
+| 20 | `Wave7A_S3AnatMean_RawHDR` | `pre_campaign` | 3/8 | `72.01` / `12.59` | `71.43` / `10.55` | `72.59` / `14.63` | `88.14` / `2.84` | `57.59` / `15.62` | `43.75` / `20.69` | `77.63` / `4.77` | `15.92M / 10.38G` | `58` | `ae6f101` |
+| 21 | `Wave7B_S3AnatMeanMS_RawHDR` | `pre_campaign` | 3/8 | `71.33` / `12.27` | `69.95` / `10.09` | `72.71` / `14.44` | `87.97` / `2.74` | `57.26` / `15.23` | `44.56` / `20.37` | `77.25` / `4.72` | `15.92M / 10.39G` | `159` | `ae6f101` |
+| 22 | `R1_L1_SymDTBCE` | `loss_only` | 3/8 | `71.15` / `12.15` | `69.32` / `10.74` | `72.98` / `13.55` | `87.92` / `2.90` | `57.01` / `16.23` | `44.70` / `21.72` | `77.56` / `4.66` | `15.73M / 9.47G` | `182` | `38c386f` |
+| 23 | `R5_A4_E5B1RS3_SSPAGN` | `arch_only` | 3/8 | `71.05` / `12.14` | `69.17` / `9.67` | `72.92` / `14.62` | `87.80` / `2.91` | `56.82` / `16.07` | `44.47` / `22.47` | `77.20` / `4.76` | `15.73M / 9.47G` | `161` | `72090c0` |
+| 24 | `R4_L6_CalibFarFP` | `loss_only` | 2/8 | `71.21` / `12.58` | `69.70` / `10.94` | `72.71` / `14.22` | `87.94` / `2.97` | `56.26` / `15.78` | `42.83` / `20.61` | `77.10` / `4.87` | `15.73M / 9.47G` | `93` | `17e1a0b` |
+| 25 | `R7_C5_B2SA_S3AnatMean_L8` | `combo` | 1/8 | `70.75` / `12.33` | `68.86` / `10.80` | `72.64` / `13.85` | `87.98` / `2.86` | `55.91` / `15.70` | `42.97` / `20.59` | `77.91` / `5.03` | `17.29M / 9.80G` | `191` | `0183d69` |
+| 26 | `R7_L9_SliceHierKarimi` | `loss_only` | 1/8 | `70.29` / `13.33` | `68.70` / `10.67` | `71.89` / `15.99` | `88.01` / `2.77` | `55.31` / `16.37` | `41.92` / `22.06` | `77.62` / `4.65` | `15.73M / 9.47G` | `109` | `0183d69` |
 
 *(Ký hiệu ★: Top 3 model đã sao lưu đầy đủ trọng số `.pt` + config + logs lên Google Drive.)*
 
@@ -411,32 +415,37 @@ Mục tiêu chiến dịch ngày `2026-11-19` là tối ưu có hệ thống c�
 8. **Round 7 (`0183d69`) — Per-slice HierTversky & Per-slice Karimi (`L9`):**
    - `R7_L9_SliceHierKarimi` (`1/8`) và `R7_C5_B2SA_S3AnatMean_L8` (`1/8`) bị tụt mạnh (xác nhận `B2SA` xung đột với Karimi HD-DT mạnh và per-slice weight trên anchor bị nhiễu).
    - Tuy nhiên **`R7_C6_B2GSA_S3AnatMean_RingCtx_L9`** (`4/8`) lập **kỷ lục Dice cao nhất toàn lịch sử**: **`AvgPathIncl Dice = 72.97%`**, **`AvgPathExcl Dice = 59.25%`**, **`EdemaExcl Dice = 46.77%`** (HD95 chưa đạt ngưỡng).
-9. **Round 8 (`32871ab`) — Đang chạy nền lúc bàn giao (`13:56 UTC`):**
-   - Gồm 3 trial tập trung vào **`FullRangeKarimi L10`** (`max_steps=64` để không bị cắt cụt distance transform trên vùng Edema rộng) + các tổ hợp **không dùng Self-Attention** (`R8_L10_FullRangeKarimi`, `R8_C7_B2_S3AnatMean_L10`, `R8_C8_E5B1RS3_RingCtx_L10`).
+9. **Round 8 (`32871ab` / `7e2ec5f`) — Đã hoàn thành: `FullRangeKarimi L10` (`max_steps=64`) & xác nhận Non-SA Combos (`C7`, `C8`):**
+   - `R8_L10_FullRangeKarimi` (`loss_only`, `max_steps=64`, `scales=[10,15,16]`, `max_norm=3.5`) đứng độc lập chỉ đạt `4/8` (`71.54 / 12.63`, nhưng đẩy `EdemaExcl = 46.44%`).
+   - **Điểm sáng lớn nhất của Round 8:** Cả 2 combo **bỏ Self-Attention (`B2SA`)** đều đạt **`5/8` pass** và vươn lên **#1 & #2 trong toàn bộ nhóm `combo`** (#5 và #6 tổng thể):
+     - **`R8_C8_E5B1RS3_RingCtx_L10`**: `5/8` (`AvgIncl = 72.23% / 11.68 mm`, `EdemaIncl = 74.22%`, `MyoRing = 88.40% / 2.74 mm`, `EdemaExcl HD95 = 19.61 mm` đồng Best, `Scar = 70.24% / 9.51 mm`).
+     - **`R8_C7_B2_S3AnatMean_L10`**: `5/8` (`AvgIncl = 72.07% / 11.58 mm`, `Scar = 70.28% / 8.99 mm`, `FP3003 = 61`).
+   - $\Rightarrow$ **Kết luận kiến trúc-loss cực kỳ rõ:** `B2SA` xung đột với Karimi HD-DT (làm `Scar HD95` vọt lên `>10.7 mm`), trong khi các kiến trúc **không SA** (`B2+S3AnatMean`, `E5-B1R-S3+RingCtx`) kết hợp trơn tru với Karimi HD-DT để vượt cả `Scar HD95` lẫn `Dice`.
 
 ### 9.4 Kiểm kê Code, Git & Vị trí Sao lưu trên Google Drive
 
-- **Chuỗi Git commits mới (đã đóng gói trong `SCAR_main.bundle`):**
-  - `38c386f` → `53df72b` → `8154e74` → `17e1a0b` → `72090c0` → `dd336a3` → `0183d69` → **`32871ab` (`HEAD -> main`)**.
+- **Chuỗi Git commits mới (đã push lên GitHub `origin/main` và đóng gói trong `SCAR_main.bundle`):**
+  - `38c386f` → `53df72b` → `8154e74` → `17e1a0b` → `72090c0` → `dd336a3` → `0183d69` → `32871ab` → `7e2ec5f` → **Round 8 handoff update**.
 - **Tài nguyên đã sao lưu đầy đủ lên Google Drive (`gdrive:NCKH_V2/Checkpoints/MyoPS++/The_New_World/` — mount cục bộ tại `/content/Checkpoints/MyoPS++/The_New_World/`):**
-  1. **Toàn bộ Log, Metric & Configs (23 runs Wave 7 + R1–R7):**
-     - `Autoresearch_R1_R7_Summary/results_ledger.csv` & `results_ledger.jsonl`
-     - `Autoresearch_R1_R7_Summary/configs/` *(toàn bộ YAML `lightweight_e5_*.yaml`)*
-     - `Autoresearch_R1_R7_Summary/per_run_logs/<run_id>/logs_*/` *(đầy đủ `train.log`, `metrics.csv`, `metrics.jsonl`, `summary.json`, `config.json`, `test_results/`)*
+  1. **Toàn bộ Log, Metric & Configs (26 runs Wave 7 + R1–R8):**
+     - `Autoresearch_R1_R7_Summary/results_ledger.csv` & `results_ledger.jsonl` *(đã cập nhật đủ 26 trial gồm cả Round 8)*
+     - `Autoresearch_R1_R7_Summary/Autoresearch_R1_R8_per_run_logs.tar.gz` *(toàn bộ `train.log`, `metrics.csv`, `metrics.jsonl`, `summary.json`, `config.json`, `test_results/` của 26 run)*
+     - `Autoresearch_R1_R7_Summary/Autoresearch_R1_R8_configs.tar.gz` *(toàn bộ YAML `lightweight_e5_*.yaml`)*
   2. **Trọng số (`.pt`) + Config + Logs của Top 3 model tốt nhất:**
-     - **`R4_L5_CalibTversky/`** (`lightweighte5b1rs3l5calibtversky_seed1234.pt`, YAML, `logs_*`) — `#1: 6/8 pass, AvgIncl 72.09 / 10.72 mm, Scar HD95 7.65 mm`
-     - **`R6_L8_MildScaleKarimi/`** (`lightweighte5b1rs3l8mildscalekarimi_seed1234.pt`, YAML, `logs_*`) — `#2: 5/8 pass, AvgIncl 72.90 / 11.06 mm, Scar 72.29%, Ring HD95 2.70 mm`
-     - **`R4_A3_B2SA_S3AnatMean/`** (`lightweighte5b2sas3anatmean_seed1234.pt`, YAML, `logs_*`) — `#3: 5/8 pass, Arch-only best, EdemaIncl 74.57%, AvgExcl 58.34%`
+     - **`R4_L5_CalibTversky/`** (`lightweighte5b1rs3l5calibtversky_seed1234.pt`, YAML, `_logs.tar.gz`) — `#1: 6/8 pass, AvgIncl 72.09 / 10.72 mm, Scar HD95 7.65 mm`
+     - **`R6_L8_MildScaleKarimi/`** (`lightweighte5b1rs3l8mildscalekarimi_seed1234.pt`, YAML, `_logs.tar.gz`) — `#2: 5/8 pass, AvgIncl 72.90 / 11.06 mm, Scar 72.29%, Ring HD95 2.70 mm`
+     - **`R4_A3_B2SA_S3AnatMean/`** (`lightweighte5b2sas3anatmean_seed1234.pt`, YAML, `_logs.tar.gz`) — `#3: 5/8 pass, Arch-only best, EdemaIncl 74.57%, AvgExcl 58.34%`
   3. **Code & Tài liệu bàn giao mới nhất:**
-     - `SCAR_Code_Backup/SCAR_main.bundle` *(chứa toàn bộ lịch sử git tới `32871ab`)*
-     - `RESEARCH_HANDOFF.md` *(bản cập nhật này)*
+     - `SCAR_Code_Backup/SCAR_main.bundle` & GitHub `origin/main`
+     - `RESEARCH_HANDOFF.md` *(bản cập nhật đầy đủ Wave 7 + Rounds 1–8)*
 
-### 9.5 Hướng dẫn Tiếp tục Phiên Sau (Không Cần Làm Lại Từ Đầu)
+### 9.5 Hướng dẫn Tiếp tục Phiên Sau (Round 9+ — Không Cần Làm Lại Từ Đầu)
 
-1. **Khôi phục repo & code từ Drive (nếu mở session Colab mới):**
+1. **Khôi phục repo & code từ GitHub hoặc Drive (nếu mở session Colab mới):**
    ```bash
-   git clone /content/Checkpoints/MyoPS++/The_New_World/SCAR_Code_Backup/SCAR_main.bundle /content/SCAR
-   cd /content/SCAR && git checkout main
+   git clone https://github.com/thanhquan123hi1/SCAR.git /content/SCAR
+   # hoặc từ Drive bundle:
+   # git clone /content/Checkpoints/MyoPS++/The_New_World/SCAR_Code_Backup/SCAR_main.bundle /content/SCAR
    ```
 2. **Đánh giá lại trực tiếp Top 3 checkpoint mà không cần train lại:**
    ```bash
@@ -452,9 +461,9 @@ Mục tiêu chiến dịch ngày `2026-11-19` là tối ưu có hệ thống c�
      --data-root data/myopspp_unet2d_roi128_1mm/cache \
      --dataset myopspp_unet2d_roi128_1mm --split test_vol --amp bf16 --save-predictions
    ```
-3. **Bước cải tiến ưu tiên tiếp theo để đạt `8/8` pass:**
-   - **Kiểm tra kết quả Round 8 (`L10_FullRangeKarimi`, `max_steps=64`):** Nếu session bị ngắt trước khi Round 8 hoàn tất, chỉ cần chạy lại 3 config Round 8 đã có sẵn trong commit `32871ab` (`lightweight_e5_b1r_s3_l10_fullrange_karimi.yaml`, `lightweight_e5_b2_s3_anat_mean_l10.yaml`, `lightweight_e5_b1r_s3_ring_ctx_l10.yaml`).
+3. **Bước cải tiến ưu tiên cho Round 9 để đạt `7/8–8/8` pass:**
+   - **Ghép 2 kiến trúc Non-SA đã chứng minh hợp Karimi (`R2_A1_B2_S3AnatMean` và `R2_A2_S3_AnatRingCtx`) trực tiếp với 2 loss mạnh nhất (`R4_L5_CalibTversky` và `R6_L8_MildScaleKarimi`)** *(ở Round 8 mới ghép với `L10` vốn yếu hơn `L5`/`L8`, nhưng đã đạt `5/8`!)*.
    - **Tập trung vào 2 nút thắt cuối cùng chưa model nào pass:**
      1) **`MyoRing HD95 <= 2.67 mm`** *(rất gần: `R6_L8` đã đạt `2.70 mm` — chỉ lệch `0.03 mm`)* $\Rightarrow$ tinh chỉnh nhẹ `ring_beta` / `ring_hd_weight` quanh cấu hình `R4_L5` + `R6_L8`.
-     2) **`EdemaIncl HD95 <= 12.21 mm`** *(hiện tốt nhất là `13.13 mm` ở `R5_C3`, còn cách `0.92 mm`)* $\Rightarrow$ kiểm tra per-case outlier Edema trên `R4_L5` & `R6_L8` (và kết quả `max_steps=64` của `L10`), kết hợp không dùng `B2SA` (vốn hay làm tăng `Scar HD95` khi đi với Karimi loss).
+     2) **`EdemaIncl HD95 <= 12.21 mm`** *(hiện tốt nhất là `13.13 mm` ở `R5_C3`, còn cách `0.92 mm`)* $\Rightarrow$ phân tích per-case outlier Edema trên `R4_L5`, `R6_L8`, `R8_C8` để xử lý dứt điểm các ca gây kéo dài HD95.
    - Sau khi chốt model vượt `7/8–8/8` trên MyoPS++, chạy **kiểm chứng đa seed (`2026`, `1024`)** và chuyển sang **MyoPS380**.
