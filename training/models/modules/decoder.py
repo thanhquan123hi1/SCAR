@@ -55,12 +55,14 @@ BOUNDARY_DECODER_REFINEMENT = "boundary"
 WIDE_RES_FPN_DECODER_REFINEMENT = "wide_res_fpn"
 HR_ANAT_CALIB_DECODER_REFINEMENT = "hr_anat_calib"
 HR_RAW_EDGE_DECODER_REFINEMENT = "hr_raw_edge"
+ANAT_RING_CONTEXT_DECODER_REFINEMENT = "anat_ring_context"
 DECODER_REFINEMENT_MODES = (
     NO_DECODER_REFINEMENT,
     BOUNDARY_DECODER_REFINEMENT,
     WIDE_RES_FPN_DECODER_REFINEMENT,
     HR_ANAT_CALIB_DECODER_REFINEMENT,
     HR_RAW_EDGE_DECODER_REFINEMENT,
+    ANAT_RING_CONTEXT_DECODER_REFINEMENT,
 )
 
 
@@ -323,6 +325,88 @@ class RawModalHDRRefinement(nn.Module):
         t = HRAnatCalibRefinement._first_channel_match(t2w, hw)
         hr_feat = self.raw_stem(torch.cat((c, p, t), dim=1).to(d4.dtype))
         h = self.fuse_in(torch.cat((d4, hr_feat), dim=1))
+        ms = self.ms_relu(self.ms_norm(self.conv_local(h) + self.conv_dilated(h)))
+        delta = self.fuse_out(ms)
+        return d4 + self.gamma * delta
+
+
+class AnatRingContextRefinement(nn.Module):
+    """Full-resolution 128x128 CINE-anchored myocardial ring & global peak-to-mean context refinement.
+
+    Addresses two structural bottlenecks of SlimDecoderBlock's 1x1 final stage:
+      1. Missing 1mm 3x3 boundary context for crisp myocardial ring borders (uses CINE only
+         to avoid injecting bright LGE/T2w blood-pool glare outside the wall).
+      2. Lack of slice-global context at 128x128: computes soft wall-gated mean and peak
+         features across the entire myocardial ring so secondary intensity fluctuations on
+         healthy opposite walls are suppressed relative to the slice's true lesion peak.
+    Zero-initialized residual gate with fork_rng guarantees exact step-0 equivalence.
+    """
+
+    def __init__(self, channels: int):
+        super().__init__()
+        if channels < 1:
+            raise ValueError("channels must be positive")
+        self.channels = channels
+        gn_ch = _gn_groups(channels, 8)
+        gate_mid = max(channels // 2, 16)
+        gn_gate = _gn_groups(gate_mid, 8)
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(202701 + channels)
+            # 1. CINE-anchored full-resolution anatomical wall feature & soft ring mask
+            self.anat_conv = nn.Sequential(
+                nn.Conv2d(channels + 1, channels, kernel_size=3, padding=1, bias=False),
+                nn.GroupNorm(num_groups=gn_ch, num_channels=channels),
+                nn.ReLU(inplace=True),
+            )
+            self.ring_gate = nn.Sequential(
+                nn.Conv2d(channels, gate_mid, kernel_size=3, padding=1, bias=False),
+                nn.GroupNorm(num_groups=gn_gate, num_channels=gate_mid),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(gate_mid, 1, kernel_size=1, bias=True),
+            )
+            # 2. Slice-global Peak-to-Mean modulation over the soft myocardial wall
+            self.ctx_gate = nn.Sequential(
+                nn.Conv2d(channels * 2, gate_mid, kernel_size=1, bias=True),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(gate_mid, channels, kernel_size=1, bias=True),
+                nn.Sigmoid(),
+            )
+            # 3. Multi-scale 1mm residual fusion
+            self.fuse_in = nn.Sequential(
+                nn.Conv2d(channels * 2, channels, kernel_size=1, bias=False),
+                nn.GroupNorm(num_groups=gn_ch, num_channels=channels),
+                nn.ReLU(inplace=True),
+            )
+            self.conv_local = nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False)
+            self.conv_dilated = nn.Conv2d(
+                channels, channels, kernel_size=3, padding=2, dilation=2, groups=channels, bias=False
+            )
+            self.ms_norm = nn.GroupNorm(num_groups=gn_ch, num_channels=channels)
+            self.ms_relu = nn.ReLU(inplace=True)
+            self.fuse_out = nn.Sequential(
+                nn.Conv2d(channels, channels, kernel_size=3, padding=1, bias=False),
+                nn.GroupNorm(num_groups=gn_ch, num_channels=channels),
+            )
+            self.gamma = nn.Parameter(torch.zeros(1, channels, 1, 1))
+
+    def forward(self, d4: torch.Tensor, cine: torch.Tensor) -> torch.Tensor:
+        hw = d4.shape[2:]
+        c = HRAnatCalibRefinement._first_channel_match(cine, hw).to(d4.dtype)
+        f_anat = self.anat_conv(torch.cat((d4, c), dim=1))
+        g_ring = torch.sigmoid(self.ring_gate(f_anat))
+
+        # Wall-weighted global mean & masked peak in fp32 for bf16 stability
+        d4_fp32 = d4.float()
+        w_fp32 = g_ring.float()
+        denom = w_fp32.sum(dim=(2, 3), keepdim=True).clamp_min(1e-4)
+        mu_wall = ((d4_fp32 * w_fp32).sum(dim=(2, 3), keepdim=True) / denom).to(d4.dtype)
+        wall_feat = d4 * g_ring
+        max_wall = wall_feat.amax(dim=(2, 3), keepdim=True)
+
+        ctx = self.ctx_gate(torch.cat((mu_wall, max_wall - mu_wall), dim=1))
+        rel_wall = (d4 - mu_wall) * g_ring * ctx
+
+        h = self.fuse_in(torch.cat((f_anat, rel_wall), dim=1))
         ms = self.ms_relu(self.ms_norm(self.conv_local(h) + self.conv_dilated(h)))
         delta = self.fuse_out(ms)
         return d4 + self.gamma * delta

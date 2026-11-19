@@ -19,11 +19,13 @@ from training.models.modules.decoder import (
     WideResidualFullConvDecoder,
     HRAnatCalibRefinement,
     RawModalHDRRefinement,
+    AnatRingContextRefinement,
     NO_DECODER_REFINEMENT,
     BOUNDARY_DECODER_REFINEMENT,
     WIDE_RES_FPN_DECODER_REFINEMENT,
     HR_ANAT_CALIB_DECODER_REFINEMENT,
     HR_RAW_EDGE_DECODER_REFINEMENT,
+    ANAT_RING_CONTEXT_DECODER_REFINEMENT,
     DECODER_REFINEMENT_MODES,
 )
 from training.models.modules.fusion import (
@@ -636,34 +638,24 @@ class LightweightM2PlusNet(M2PlusNet):
         self.dec3 = SlimDecoderBlock(in_channels=dec_ch[1], skip_channels=skip2_ch, out_channels=dec_ch[2])
         self.dec4 = SlimDecoderBlock(in_channels=dec_ch[2], skip_channels=0, out_channels=dec_ch[3])
         self.decoder = nn.ModuleList([self.dec1, self.dec2, self.dec3, self.dec4])
+        self.boundary_refine = None
+        self.wide_res_fpn = None
+        self.hr_anat_calib = None
+        self.hr_raw_edge = None
+        self.anat_ring_ctx = None
         if self.decoder_refinement_mode == BOUNDARY_DECODER_REFINEMENT:
             self.boundary_refine = BoundaryRefinementBlock(dec_ch[3])
-            self.wide_res_fpn = None
-            self.hr_anat_calib = None
-            self.hr_raw_edge = None
         elif self.decoder_refinement_mode == WIDE_RES_FPN_DECODER_REFINEMENT:
-            self.boundary_refine = None
             self.wide_res_fpn = WideResidualFullConvDecoder(
                 skip_channels=(skip0_ch, skip1_ch, skip2_ch),
                 dec_channels=tuple(dec_ch),
             )
-            self.hr_anat_calib = None
-            self.hr_raw_edge = None
         elif self.decoder_refinement_mode == HR_ANAT_CALIB_DECODER_REFINEMENT:
-            self.boundary_refine = None
-            self.wide_res_fpn = None
             self.hr_anat_calib = HRAnatCalibRefinement(dec_ch[3])
-            self.hr_raw_edge = None
         elif self.decoder_refinement_mode == HR_RAW_EDGE_DECODER_REFINEMENT:
-            self.boundary_refine = None
-            self.wide_res_fpn = None
-            self.hr_anat_calib = None
             self.hr_raw_edge = RawModalHDRRefinement(dec_ch[3])
-        else:
-            self.boundary_refine = None
-            self.wide_res_fpn = None
-            self.hr_anat_calib = None
-            self.hr_raw_edge = None
+        elif self.decoder_refinement_mode == ANAT_RING_CONTEXT_DECODER_REFINEMENT:
+            self.anat_ring_ctx = AnatRingContextRefinement(dec_ch[3])
 
         # 6. Final Segmentation Head
         self.head = nn.Conv2d(dec_ch[3], self.num_classes, kernel_size=1)
@@ -784,6 +776,8 @@ class LightweightM2PlusNet(M2PlusNet):
             d4 = self.hr_anat_calib(d4, cine, psir, t2w)
         if self.hr_raw_edge is not None:
             d4 = self.hr_raw_edge(d4, cine, psir, t2w)
+        if self.anat_ring_ctx is not None:
+            d4 = self.anat_ring_ctx(d4, cine)
 
         # 6. Final Segmentation Head
         logits = self.head(d4)
