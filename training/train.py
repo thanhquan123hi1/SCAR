@@ -93,6 +93,8 @@ def build_parser():
     )
     parser.add_argument("--hier-dice-weight", type=float, default=0.0,
                         help="Weight for clean hierarchical batch Dice over {MyoRing, AAR, Scar} (default: 0.0)")
+    parser.add_argument("--hier-region-weights", nargs="+", type=float, default=None,
+                        help="Optional 3 weights [ring, aar, scar] for hier_dice_loss")
     parser.add_argument("--ring-tversky-beta", type=float, default=0.5,
                         help="Tversky FN weight beta for MyoRing in hier_dice_loss (0.5 = standard Dice)")
     parser.add_argument("--aar-tversky-beta", type=float, default=0.5,
@@ -103,9 +105,14 @@ def build_parser():
                         help="Distance-transform HD loss mode (default: sym_bce)")
     parser.add_argument("--boundary-dt-power", type=float, default=2.0)
     parser.add_argument("--boundary-dt-scale", type=float, default=16.0)
+    parser.add_argument("--boundary-dt-scales", nargs="+", type=float, default=None,
+                        help="Optional 3 per-region distance scales [ring, aar, scar] for boundary_dt_loss")
+    parser.add_argument("--boundary-dt-region-weights", nargs="+", type=float, default=None,
+                        help="Optional 3 region weights [ring, aar, scar] for boundary_dt_loss")
     parser.add_argument("--boundary-dt-max-steps", type=int, default=32)
     parser.add_argument("--boundary-dt-empty-val", type=float, default=1.0)
     parser.add_argument("--boundary-dt-margin", type=float, default=0.0)
+    parser.add_argument("--boundary-dt-max-norm", type=float, default=None)
     parser.add_argument(
         "--dice-class-weights",
         nargs="+",
@@ -273,15 +280,19 @@ def parse_args(argv=None):
             aar_weight=args.aar_weight, scar_weight=args.scar_weight,
             anat_contrast_weight=args.anat_contrast_weight,
             hier_dice_weight=args.hier_dice_weight,
+            hier_region_weights=args.hier_region_weights,
             ring_tversky_beta=args.ring_tversky_beta,
             aar_tversky_beta=args.aar_tversky_beta,
             boundary_dt_weight=args.boundary_dt_weight,
             boundary_dt_mode=args.boundary_dt_mode,
             boundary_dt_power=args.boundary_dt_power,
             boundary_dt_scale=args.boundary_dt_scale,
+            boundary_dt_scales=args.boundary_dt_scales,
+            boundary_dt_region_weights=args.boundary_dt_region_weights,
             boundary_dt_max_steps=args.boundary_dt_max_steps,
             boundary_dt_empty_val=args.boundary_dt_empty_val,
             boundary_dt_margin=args.boundary_dt_margin,
+            boundary_dt_max_norm=args.boundary_dt_max_norm,
             pathology_reduction=args.pathology_reduction,
             negative_slice_handling=args.negative_slice_handling,
             masked_negative_slices=args.masked_negative_slices,

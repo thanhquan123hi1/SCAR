@@ -231,6 +231,7 @@ def test_phase2_pretrained_loads_and_exact_param_prints():
         "lightweight_e5_b2_s3_anat_mean",
         "lightweight_e5_b1r_s3_anat_ring_ctx",
         "lightweight_e5_b2sa_s3_anat_mean",
+        "lightweight_e5_b2sa_s3_anat_mean_l5",
     ],
 )
 def test_wave6_configs_step0_equivalence_and_zero_input(cfg_name):
@@ -249,3 +250,27 @@ def test_wave6_configs_step0_equivalence_and_zero_input(cfg_name):
     with torch.no_grad():
         torch.testing.assert_close(model(*imgs), e5(*imgs), rtol=0, atol=1e-6)
         assert torch.isfinite(model(*zeros)).all()
+
+
+def test_sspa_optimized_gn_eliminates_all_batchnorm_and_is_batch_invariant():
+    base_args, base_merged = parse_args(["--config", "lightweight_e5_b1r_s3_norm_skip"])
+    base_model = model_from_config(model_config_from_args(base_args, base_merged), img_size=32)
+
+    gn_args, gn_merged = parse_args(["--config", "lightweight_e5_b1r_s3_sspa_gn"])
+    gn_model = model_from_config(model_config_from_args(gn_args, gn_merged), img_size=32)
+
+    # Zero BatchNorm anywhere in the entire model
+    bn_layers = [n for n, m in gn_model.named_modules() if isinstance(m, torch.nn.modules.batchnorm._BatchNorm)]
+    assert bn_layers == []
+    # Identical parameter count to anchor E5-B1R-S3
+    assert sum(p.numel() for p in gn_model.parameters()) == sum(p.numel() for p in base_model.parameters())
+
+    # Exact batch-size invariance even in train() mode
+    gn_model.train()
+    torch.manual_seed(17)
+    c, p, t = [torch.randn(2, 1, 32, 32) for _ in range(3)]
+    with torch.no_grad():
+        out_b2 = gn_model(c, p, t)
+        out_b1 = gn_model(c[:1], p[:1], t[:1])
+    torch.testing.assert_close(out_b2[:1], out_b1, rtol=1e-4, atol=1e-4)
+

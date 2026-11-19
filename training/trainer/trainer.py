@@ -222,20 +222,27 @@ def _validate_resume_loss_config(saved_args: dict, args, saved_version: int | No
     if previous != current:
         raise ValueError(f"Resume changes pathology_reduction: {previous} -> {current}")
     for key in ("aar_weight", "scar_weight", "anat_contrast_weight",
-                "hier_dice_weight", "ring_tversky_beta", "aar_tversky_beta", "boundary_dt_weight", "boundary_dt_mode",
-                "boundary_dt_power", "boundary_dt_scale", "boundary_dt_max_steps",
-                "boundary_dt_empty_val", "boundary_dt_margin", "dice_class_weights", "ce_class_weights"):
+                "hier_dice_weight", "hier_region_weights", "ring_tversky_beta", "aar_tversky_beta",
+                "boundary_dt_weight", "boundary_dt_mode",
+                "boundary_dt_power", "boundary_dt_scale", "boundary_dt_scales",
+                "boundary_dt_region_weights", "boundary_dt_max_steps",
+                "boundary_dt_empty_val", "boundary_dt_margin", "boundary_dt_max_norm",
+                "dice_class_weights", "ce_class_weights"):
         defaults = {
             "dice_class_weights": None,
             "ce_class_weights": None,
+            "hier_region_weights": None,
             "ring_tversky_beta": 0.5,
             "aar_tversky_beta": 0.5,
             "boundary_dt_mode": "sym_bce",
             "boundary_dt_power": 2.0,
             "boundary_dt_scale": 16.0,
+            "boundary_dt_scales": None,
+            "boundary_dt_region_weights": None,
             "boundary_dt_max_steps": 32,
             "boundary_dt_empty_val": 1.0,
             "boundary_dt_margin": 0.0,
+            "boundary_dt_max_norm": None,
         }
         default = defaults.get(key, 0.0)
         previous, current = saved_args.get(key, default), getattr(args, key, default)
@@ -570,15 +577,19 @@ def trainer_Myops(args, model, snapshot_path):
         scar_weight=getattr(args, "scar_weight", 0.0),
         anat_contrast_weight=getattr(args, "anat_contrast_weight", 0.0),
         hier_dice_weight=getattr(args, "hier_dice_weight", 0.0),
+        hier_region_weights=getattr(args, "hier_region_weights", None),
         ring_tversky_beta=getattr(args, "ring_tversky_beta", 0.5),
         aar_tversky_beta=getattr(args, "aar_tversky_beta", 0.5),
         boundary_dt_weight=getattr(args, "boundary_dt_weight", 0.0),
         boundary_dt_mode=getattr(args, "boundary_dt_mode", "sym_bce"),
         boundary_dt_power=getattr(args, "boundary_dt_power", 2.0),
         boundary_dt_scale=getattr(args, "boundary_dt_scale", 16.0),
+        boundary_dt_scales=getattr(args, "boundary_dt_scales", None),
+        boundary_dt_region_weights=getattr(args, "boundary_dt_region_weights", None),
         boundary_dt_max_steps=getattr(args, "boundary_dt_max_steps", 32),
         boundary_dt_empty_val=getattr(args, "boundary_dt_empty_val", 1.0),
         boundary_dt_margin=getattr(args, "boundary_dt_margin", 0.0),
+        boundary_dt_max_norm=getattr(args, "boundary_dt_max_norm", None),
         dice_class_weights=getattr(args, "dice_class_weights", None),
         ce_class_weights=getattr(args, "ce_class_weights", None),
         pathology_reduction=getattr(args, "pathology_reduction", "positive"),

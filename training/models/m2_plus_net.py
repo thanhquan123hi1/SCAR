@@ -73,6 +73,7 @@ from training.models.modules.sspanet import (
     IDENTITY_SSPA_GATE,
     LEGACY_SSPA_GATE,
     OPTIMIZED_SSPA_GATE,
+    OPTIMIZED_GN_SSPA_GATE,
     SSPANet_Block,
     OptimizedSSPANet,
 )
@@ -505,8 +506,8 @@ class LightweightM2PlusNet(M2PlusNet):
         if self.config.get("fusion_version", SPATIAL_FUSION) != SPATIAL_FUSION:
             raise ValueError("Lightweight M2-Plus requires spatial_v2 fusion")
         sspa_gate = self.config.get("sspanet_gate", OPTIMIZED_SSPA_GATE)
-        if sspa_gate not in {OPTIMIZED_SSPA_GATE, IDENTITY_SSPA_GATE}:
-            raise ValueError("Lightweight M2-Plus requires optimized or identity SSPANet")
+        if sspa_gate not in {OPTIMIZED_SSPA_GATE, OPTIMIZED_GN_SSPA_GATE, IDENTITY_SSPA_GATE}:
+            raise ValueError("Lightweight M2-Plus requires optimized or identity SSPANet (including optimized_gn)")
         self.config.fusion_version = SPATIAL_FUSION
         self.config.latent_dim = latent_dim
         self.config.use_pos_enc = bool(self.config.get("use_pos_enc", True))
@@ -549,9 +550,10 @@ class LightweightM2PlusNet(M2PlusNet):
             self.sspanet_psir = nn.Identity()
             self.sspanet_t2w = nn.Identity()
         else:
-            self.sspanet_cine = OptimizedSSPANet(bottleneck_channels, reduction_ratio=sspa_reduction, mode="residual")
-            self.sspanet_psir = OptimizedSSPANet(bottleneck_channels, reduction_ratio=sspa_reduction, mode="residual")
-            self.sspanet_t2w = OptimizedSSPANet(bottleneck_channels, reduction_ratio=sspa_reduction, mode="residual")
+            use_gn = (sspa_gate == OPTIMIZED_GN_SSPA_GATE)
+            self.sspanet_cine = OptimizedSSPANet(bottleneck_channels, reduction_ratio=sspa_reduction, mode="residual", use_group_norm=use_gn)
+            self.sspanet_psir = OptimizedSSPANet(bottleneck_channels, reduction_ratio=sspa_reduction, mode="residual", use_group_norm=use_gn)
+            self.sspanet_t2w = OptimizedSSPANet(bottleneck_channels, reduction_ratio=sspa_reduction, mode="residual", use_group_norm=use_gn)
 
         # 3. Bottleneck Fusion: standard SpatialAwareCrossAttention or contrast-aware bottleneck
         if self.bottleneck_fusion == LOCAL_CONTRAST_BOTTLENECK:

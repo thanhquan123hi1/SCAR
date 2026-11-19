@@ -151,6 +151,8 @@ def test_bf16_cuda_grads_finite(mode):
         ("training/config/models/lightweight_e5_b2_s3_anat_mean_ring_ctx_l4.yaml", "hybrid_karimi_farfp"),
         ("training/config/models/lightweight_e5_b1r_s3_l5_calib_tversky.yaml", "karimi_mse"),
         ("training/config/models/lightweight_e5_b1r_s3_l6_calib_farfp.yaml", "hybrid_karimi_farfp"),
+        ("training/config/models/lightweight_e5_b1r_s3_l7_scale_karimi.yaml", "karimi_mse"),
+        ("training/config/models/lightweight_e5_b2sa_s3_anat_mean_l5.yaml", "karimi_mse"),
     ],
 )
 def test_loss_trial_yamls_parse_cleanly(cfg_path, expected_mode):
@@ -191,4 +193,46 @@ def test_ring_tversky_and_deadzone_margin_grads():
     assert torch.isfinite(out["loss"]) and out["loss"].item() > 0.0
     out["loss"].backward()
     assert logits.grad is not None and torch.isfinite(logits.grad).all()
+
+
+def test_per_region_scales_and_weights_bf16_and_empty():
+    torch.manual_seed(123)
+    logits = torch.randn(4, 4, 64, 64, requires_grad=True)
+    target = torch.zeros(4, 64, 64, dtype=torch.long)
+    target[0, 16:48, 16:48] = 1
+    target[0, 22:34, 22:34] = 2
+    target[0, 26:30, 26:30] = 3
+    # Slices 1..3 are completely empty (0) to verify zero-GT stability
+    crit = SegmentationLoss(
+        n_classes=4,
+        ce_weight=0.40,
+        dice_weight=0.60,
+        ce_class_weights=[0.80, 1.10, 0.80, 1.15],
+        dice_class_weights=[0.5, 1.15, 0.75, 1.1],
+        hier_dice_weight=0.30,
+        hier_region_weights=[0.35, 0.40, 0.25],
+        ring_tversky_beta=0.64,
+        aar_tversky_beta=0.39,
+        boundary_dt_weight=0.30,
+        boundary_dt_mode="karimi_mse",
+        boundary_dt_power=2.0,
+        boundary_dt_scale=12.0,
+        boundary_dt_scales=[5.0, 10.0, 14.0],
+        boundary_dt_region_weights=[0.35, 0.45, 0.20],
+        boundary_dt_max_steps=32,
+        boundary_dt_empty_val=2.0,
+        boundary_dt_max_norm=2.5,
+        negative_slice_handling="batch",
+        include_background=True,
+        dice_normalization="classes",
+    )
+    out = crit(logits.to(torch.bfloat16), target)
+    assert torch.isfinite(out["loss"]) and 0.0 < out["loss"].item() < 20.0
+    out["loss"].backward()
+    assert logits.grad is not None and torch.isfinite(logits.grad).all()
+    with pytest.raises(ValueError, match="boundary_dt_scales"):
+        SegmentationLoss(boundary_dt_scales=[5.0, -1.0, 10.0])
+    with pytest.raises(ValueError, match="boundary_dt_max_norm"):
+        SegmentationLoss(boundary_dt_max_norm=0.0)
+
 

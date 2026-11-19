@@ -26,12 +26,20 @@ from training.models.modules.sspanet_formula import PAPER_FORMULA_GATE, PaperFor
 
 
 OPTIMIZED_SSPA_GATE = "optimized"
+OPTIMIZED_GN_SSPA_GATE = "optimized_gn"
 CENTERED_SSPA_GATE = "centered_tanh_v2"
 LEGACY_SSPA_GATE = "legacy_v1"
 DEFAULT_SSPA_GATE = "centered_tanh_v2"
 IDENTITY_SSPA_GATE = "identity"
-SSPA_GATE_MODES = (OPTIMIZED_SSPA_GATE, CENTERED_SSPA_GATE, LEGACY_SSPA_GATE,
+SSPA_GATE_MODES = (OPTIMIZED_SSPA_GATE, OPTIMIZED_GN_SSPA_GATE, CENTERED_SSPA_GATE, LEGACY_SSPA_GATE,
                    PAPER_FORMULA_GATE, IDENTITY_SSPA_GATE)
+
+
+def _sspa_gn_groups(channels: int, max_groups: int = 8) -> int:
+    groups = min(max_groups, channels)
+    while channels % groups != 0 and groups > 1:
+        groups -= 1
+    return groups
 
 
 def _statistics_input(x: torch.Tensor) -> torch.Tensor:
@@ -185,12 +193,19 @@ class SSPA_DirectionalStripPooling(nn.Module):
     - 1D linear projection (C/r -> C) before 2D broadcast addition
     """
 
-    def __init__(self, in_channels: int, reduction: int = 16):
+    def __init__(self, in_channels: int, reduction: int = 16, use_group_norm: bool = False):
         super().__init__()
         mid_channels = max(in_channels // reduction, 16)
+        self.use_group_norm = bool(use_group_norm)
+
+        def _norm(c: int) -> nn.Module:
+            if self.use_group_norm:
+                return nn.GroupNorm(_sspa_gn_groups(c, 8), c)
+            return _SafeBatchNorm2d(c)
+
         self.reduce = nn.Sequential(
             nn.Conv2d(in_channels, mid_channels, 1, bias=False),
-            _SafeBatchNorm2d(mid_channels),
+            _norm(mid_channels),
             nn.ReLU(inplace=True),
         )
         self.conv_h = nn.Sequential(
@@ -202,7 +217,7 @@ class SSPA_DirectionalStripPooling(nn.Module):
                 groups=mid_channels,
                 bias=False,
             ),
-            _SafeBatchNorm2d(mid_channels),
+            _norm(mid_channels),
             nn.ReLU(inplace=True),
         )
         self.conv_w = nn.Sequential(
@@ -214,7 +229,7 @@ class SSPA_DirectionalStripPooling(nn.Module):
                 groups=mid_channels,
                 bias=False,
             ),
-            _SafeBatchNorm2d(mid_channels),
+            _norm(mid_channels),
             nn.ReLU(inplace=True),
         )
         self.expand = nn.Conv2d(mid_channels, in_channels, 1, bias=True)
@@ -288,6 +303,7 @@ class OptimizedSSPANet(nn.Module):
         mode: str = "residual",
         is_skip_gate: bool = False,
         eps: float = 1e-6,
+        use_group_norm: bool = False,
     ):
         super().__init__()
         r = reduction if reduction is not None else reduction_ratio
@@ -299,9 +315,10 @@ class OptimizedSSPANet(nn.Module):
         self.reduction_ratio = r
         self.mode = mode
         self.is_skip_gate = is_skip_gate
+        self.use_group_norm = bool(use_group_norm)
 
         self.channel_attn = SSPA_ZPoolChannelAttention(in_channels, reduction=r)
-        self.strip_pooling = SSPA_DirectionalStripPooling(in_channels, reduction=r)
+        self.strip_pooling = SSPA_DirectionalStripPooling(in_channels, reduction=r, use_group_norm=self.use_group_norm)
         self.style_pooling = SSPA_StylePooling(in_channels, reduction=r, eps=eps)
 
     def compute_logits(self, x: torch.Tensor) -> torch.Tensor:
@@ -352,11 +369,12 @@ class SSPANet_Block(nn.Module):
             self.paper_formula = PaperFormulaSSPANet(in_channels)
         elif gate_mode == IDENTITY_SSPA_GATE:
             pass
-        elif gate_mode == OPTIMIZED_SSPA_GATE:
+        elif gate_mode in (OPTIMIZED_SSPA_GATE, OPTIMIZED_GN_SSPA_GATE):
             self.optimized = OptimizedSSPANet(
                 in_channels=in_channels,
                 reduction_ratio=reduction_ratio,
                 mode="residual",
+                use_group_norm=(gate_mode == OPTIMIZED_GN_SSPA_GATE),
             )
             self.channel_attn = self.optimized.channel_attn
             self.strip_pooling = self.optimized.strip_pooling
@@ -370,7 +388,7 @@ class SSPANet_Block(nn.Module):
             return self.paper_formula(x)
         if self.gate_mode == IDENTITY_SSPA_GATE:
             return x
-        if self.gate_mode == OPTIMIZED_SSPA_GATE:
+        if self.gate_mode in (OPTIMIZED_SSPA_GATE, OPTIMIZED_GN_SSPA_GATE):
             return self.optimized(x)
         if self.gate_mode == LEGACY_SSPA_GATE:
             return x + x * torch.sigmoid(self.channel(x) + self.spatial(x))
@@ -380,6 +398,7 @@ class SSPANet_Block(nn.Module):
 
 __all__ = [
     "OPTIMIZED_SSPA_GATE",
+    "OPTIMIZED_GN_SSPA_GATE",
     "CENTERED_SSPA_GATE",
     "LEGACY_SSPA_GATE",
     "DEFAULT_SSPA_GATE",

@@ -261,15 +261,20 @@ def _octagonal_outside_dist(
 def _octagonal_outside_dt(
     mask: torch.Tensor,
     max_steps: int = 32,
-    d_scale: float = 16.0,
+    d_scale: float | torch.Tensor = 16.0,
     power: float = 2.0,
     empty_val: float = 1.0,
     margin: float | torch.Tensor = 0.0,
+    max_norm: float | None = None,
 ) -> torch.Tensor:
-    """Weighted outside distance map with optional dead-zone margin."""
+    """Weighted outside distance map with optional dead-zone margin and norm clamp."""
     dist, has_fg = _octagonal_outside_dist(mask, max_steps=max_steps)
     eff_dist = (dist - margin).clamp_min(0.0)
-    weight_map = (eff_dist / float(d_scale)).pow(float(power))
+    scale = d_scale if isinstance(d_scale, torch.Tensor) else float(d_scale)
+    norm_dist = eff_dist / scale
+    if max_norm is not None:
+        norm_dist = norm_dist.clamp(max=float(max_norm))
+    weight_map = norm_dist.pow(float(power))
     return torch.where(has_fg, weight_map, torch.full_like(weight_map, float(empty_val)))
 
 
@@ -285,15 +290,19 @@ class SegmentationLoss(nn.Module):
         scar_weight=0.0,
         anat_contrast_weight=0.0,
         hier_dice_weight=0.0,
+        hier_region_weights=None,
         ring_tversky_beta=0.5,
         aar_tversky_beta=0.5,
         boundary_dt_weight=0.0,
         boundary_dt_mode="sym_bce",
         boundary_dt_power=2.0,
         boundary_dt_scale=16.0,
+        boundary_dt_scales=None,
+        boundary_dt_region_weights=None,
         boundary_dt_max_steps=32,
         boundary_dt_empty_val=1.0,
         boundary_dt_margin=0.0,
+        boundary_dt_max_norm=None,
         dice_class_weights=None,
         ce_class_weights=None,
         pathology_reduction="positive",
@@ -328,6 +337,20 @@ class SegmentationLoss(nn.Module):
                             ("boundary_dt_scale", boundary_dt_scale)):
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(f"{name} must be finite and positive")
+        if boundary_dt_max_norm is not None:
+            if not math.isfinite(boundary_dt_max_norm) or boundary_dt_max_norm <= 0:
+                raise ValueError("boundary_dt_max_norm must be finite and positive")
+        if boundary_dt_scales is not None:
+            scales_t = torch.as_tensor(boundary_dt_scales, dtype=torch.float32)
+            if scales_t.shape != (3,) or not torch.isfinite(scales_t).all() or (scales_t <= 0).any():
+                raise ValueError("boundary_dt_scales must have 3 finite positive values [ring, aar, scar]")
+        for name, values in (("hier_region_weights", hier_region_weights),
+                             ("boundary_dt_region_weights", boundary_dt_region_weights)):
+            if values is not None:
+                rw = torch.as_tensor(values, dtype=torch.float32)
+                if (rw.shape != (3,) or not torch.isfinite(rw).all()
+                        or (rw < 0).any() or not torch.isfinite(rw.sum()) or rw.sum() <= 0):
+                    raise ValueError(f"{name} must have 3 finite nonnegative weights with positive sum")
         for name, values in (("dice_class_weights", dice_class_weights), ("ce_class_weights", ce_class_weights)):
             if values is not None:
                 weights = torch.as_tensor(values, dtype=torch.float32)
@@ -340,15 +363,21 @@ class SegmentationLoss(nn.Module):
         self.scar_weight = scar_weight
         self.anat_contrast_weight = anat_contrast_weight
         self.hier_dice_weight = hier_dice_weight
+        self.hier_region_weights = [float(v) for v in hier_region_weights] if hier_region_weights is not None else None
         self.ring_tversky_beta = float(ring_tversky_beta)
         self.aar_tversky_beta = float(aar_tversky_beta)
         self.boundary_dt_weight = boundary_dt_weight
         self.boundary_dt_mode = boundary_dt_mode
         self.boundary_dt_power = float(boundary_dt_power)
         self.boundary_dt_scale = float(boundary_dt_scale)
+        self.boundary_dt_scales = [float(v) for v in boundary_dt_scales] if boundary_dt_scales is not None else None
+        self.boundary_dt_region_weights = (
+            [float(v) for v in boundary_dt_region_weights] if boundary_dt_region_weights is not None else None
+        )
         self.boundary_dt_max_steps = int(boundary_dt_max_steps)
         self.boundary_dt_empty_val = float(boundary_dt_empty_val)
         self.boundary_dt_margin = float(boundary_dt_margin)
+        self.boundary_dt_max_norm = float(boundary_dt_max_norm) if boundary_dt_max_norm is not None else None
         self.dice_class_weights = dice_class_weights
         self.ce_class_weights = ce_class_weights
         self.masked_negative_slices = masked_negative_slices
@@ -486,7 +515,13 @@ class SegmentationLoss(nn.Module):
                 ),
                 dim=1,
             ).float()
-            region_weights = torch.tensor((0.30, 0.35, 0.35), device=logits.device, dtype=torch.float32)
+            hier_rw_vals = self.hier_region_weights if self.hier_region_weights is not None else (0.30, 0.35, 0.35)
+            hier_rw = torch.tensor(hier_rw_vals, device=logits.device, dtype=torch.float32)
+            hier_rw = hier_rw / hier_rw.sum()
+            bdt_rw_default = (0.30, 0.40, 0.30) if self.boundary_dt_mode == "hybrid_karimi_farfp" else (0.30, 0.35, 0.35)
+            bdt_rw_vals = self.boundary_dt_region_weights if self.boundary_dt_region_weights is not None else bdt_rw_default
+            bdt_rw = torch.tensor(bdt_rw_vals, device=logits.device, dtype=torch.float32)
+            bdt_rw = bdt_rw / bdt_rw.sum()
 
         if self.hier_dice_weight > 0.0:
             if abs(self.ring_tversky_beta - 0.5) < 1e-6 and abs(self.aar_tversky_beta - 0.5) < 1e-6:
@@ -509,21 +544,28 @@ class SegmentationLoss(nn.Module):
                 aar_h_loss = _region_tversky_or_dice(1, self.aar_tversky_beta)
                 scar_h_loss = _region_tversky_or_dice(2, 0.5)
                 per_reg_h = torch.stack((ring_loss, aar_h_loss, scar_h_loss), dim=0)
-            hier_dice_loss = (per_reg_h * region_weights).sum()
+            hier_dice_loss = (per_reg_h * hier_rw).sum()
         else:
             hier_dice_loss = torch.tensor(0.0, device=logits.device, dtype=torch.float32)
 
         if self.boundary_dt_weight > 0.0:
             y_neg = 1.0 - y_pos
             fg_denom = y_pos.sum(dim=(0, 2, 3)) + p_pos.detach().sum(dim=(0, 2, 3)) + 1.0
+            if self.boundary_dt_scales is not None:
+                scale_3 = torch.tensor(self.boundary_dt_scales, device=logits.device, dtype=torch.float32).view(1, 3, 1, 1)
+                scale_6 = torch.cat((scale_3, scale_3), dim=1)
+            else:
+                scale_3 = self.boundary_dt_scale
+                scale_6 = self.boundary_dt_scale
             if self.boundary_dt_mode == "fp_bce":
                 w_gt = _octagonal_outside_dt(
                     y_pos,
                     max_steps=self.boundary_dt_max_steps,
-                    d_scale=self.boundary_dt_scale,
+                    d_scale=scale_3,
                     power=self.boundary_dt_power,
                     empty_val=self.boundary_dt_empty_val,
                     margin=self.boundary_dt_margin,
+                    max_norm=self.boundary_dt_max_norm,
                 )
                 fp_err = (-torch.log(p_neg.clamp(min=1e-6))).clamp(max=10.0)
                 per_reg = (w_gt * y_neg * fp_err).sum(dim=(0, 2, 3)) / fg_denom
@@ -544,14 +586,19 @@ class SegmentationLoss(nn.Module):
                 d_gt, h_gt = dist_both[:, :3], has_fg_both[:, :3]
                 d_pr, h_pr = dist_both[:, 3:], has_fg_both[:, 3:]
 
+                n_gt = d_gt / scale_3
+                n_pr = d_pr / scale_3
+                if self.boundary_dt_max_norm is not None:
+                    n_gt = n_gt.clamp(max=self.boundary_dt_max_norm)
+                    n_pr = n_pr.clamp(max=self.boundary_dt_max_norm)
                 w_gt = torch.where(
                     h_gt,
-                    (d_gt / self.boundary_dt_scale).pow(self.boundary_dt_power),
+                    n_gt.pow(self.boundary_dt_power),
                     torch.full_like(d_gt, 1.0),
                 )
                 w_pr = torch.where(
                     h_pr,
-                    (d_pr / self.boundary_dt_scale).pow(self.boundary_dt_power),
+                    n_pr.pow(self.boundary_dt_power),
                     torch.full_like(d_pr, 1.0),
                 )
                 # Dead-zone margin: half-margin on thin MyoRing, full margin on AAR/Scar
@@ -561,16 +608,18 @@ class SegmentationLoss(nn.Module):
                     device=logits.device,
                     dtype=torch.float32,
                 ).view(1, 3, 1, 1)
+                n_far = (d_gt - margins).clamp_min(0.0) / scale_3
+                if self.boundary_dt_max_norm is not None:
+                    n_far = n_far.clamp(max=self.boundary_dt_max_norm)
                 w_far = torch.where(
                     h_gt,
-                    ((d_gt - margins).clamp_min(0.0) / self.boundary_dt_scale).pow(self.boundary_dt_power),
+                    n_far.pow(self.boundary_dt_power),
                     torch.full_like(d_gt, self.boundary_dt_empty_val),
                 )
                 karimi_reg = (y_neg * p_pos.square() * w_gt + y_pos * p_neg.square() * w_pr).sum(dim=(0, 2, 3)) / fg_denom
                 fp_err = (-torch.log(p_neg.clamp(min=1e-6))).clamp(max=10.0)
                 far_fp_reg = (w_far * y_neg * fp_err).sum(dim=(0, 2, 3)) / fg_denom
                 per_reg = karimi_reg + 0.30 * far_fp_reg
-                region_weights = torch.tensor((0.30, 0.40, 0.30), device=logits.device, dtype=torch.float32)
             else:
                 pred_cls = logits.detach().argmax(1)
                 pred_pos = torch.stack(
@@ -584,10 +633,11 @@ class SegmentationLoss(nn.Module):
                 both_dt = _octagonal_outside_dt(
                     torch.cat((y_pos, pred_pos), dim=1),
                     max_steps=self.boundary_dt_max_steps,
-                    d_scale=self.boundary_dt_scale,
+                    d_scale=scale_6,
                     power=self.boundary_dt_power,
                     empty_val=self.boundary_dt_empty_val,
                     margin=self.boundary_dt_margin,
+                    max_norm=self.boundary_dt_max_norm,
                 )
                 w_gt, w_pr = both_dt[:, :3], both_dt[:, 3:]
                 if self.boundary_dt_mode == "sym_bce":
@@ -597,7 +647,7 @@ class SegmentationLoss(nn.Module):
                 else:  # karimi_mse
                     err_map = y_neg * p_pos.square() * w_gt + y_pos * p_neg.square() * w_pr
                     per_reg = err_map.sum(dim=(0, 2, 3)) / fg_denom
-            boundary_dt_loss = (per_reg * region_weights).sum()
+            boundary_dt_loss = (per_reg * bdt_rw).sum()
         else:
             boundary_dt_loss = torch.tensor(0.0, device=logits.device, dtype=torch.float32)
 
