@@ -145,6 +145,10 @@ def test_bf16_cuda_grads_finite(mode):
     [
         ("training/config/models/lightweight_e5_b1r_s3_l1_symdt_bce.yaml", "sym_bce"),
         ("training/config/models/lightweight_e5_b1r_s3_l2_karimi_hddt.yaml", "karimi_mse"),
+        ("training/config/models/lightweight_e5_b1r_s3_l3_strong_karimi.yaml", "karimi_mse"),
+        ("training/config/models/lightweight_e5_b1r_s3_l4_hybrid_farfp.yaml", "hybrid_karimi_farfp"),
+        ("training/config/models/lightweight_e5_b2_s3_anat_mean_l2_karimi.yaml", "karimi_mse"),
+        ("training/config/models/lightweight_e5_b2_s3_anat_mean_ring_ctx_l4.yaml", "hybrid_karimi_farfp"),
     ],
 )
 def test_loss_trial_yamls_parse_cleanly(cfg_path, expected_mode):
@@ -156,5 +160,32 @@ def test_loss_trial_yamls_parse_cleanly(cfg_path, expected_mode):
     assert args.batch_size == 16
     assert args.seed == 1234
     assert args.no_val is True
-    assert merged["model"]["bottleneck_fusion"] == "residual_contrast"
-    assert merged["model"]["skip_fusion"] == "norm_contrast"
+
+
+def test_ring_tversky_and_deadzone_margin_grads():
+    torch.manual_seed(99)
+    logits = torch.randn(4, 4, 64, 64, requires_grad=True)
+    target = torch.zeros(4, 64, 64, dtype=torch.long)
+    target[0, 16:48, 16:48] = 1
+    target[0, 24:36, 24:36] = 2
+    target[1, 20:40, 20:40] = 3
+    crit = SegmentationLoss(
+        n_classes=4,
+        ce_weight=0.2,
+        dice_weight=0.8,
+        hier_dice_weight=0.25,
+        ring_tversky_beta=0.60,
+        boundary_dt_weight=0.25,
+        boundary_dt_mode="hybrid_karimi_farfp",
+        boundary_dt_margin=4.0,
+        boundary_dt_empty_val=1.5,
+        dice_class_weights=[0.5, 1.0, 1.0, 1.0],
+        negative_slice_handling="batch",
+        include_background=True,
+        dice_normalization="classes",
+    )
+    out = crit(logits, target)
+    assert torch.isfinite(out["loss"]) and out["loss"].item() > 0.0
+    out["loss"].backward()
+    assert logits.grad is not None and torch.isfinite(logits.grad).all()
+
