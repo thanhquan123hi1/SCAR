@@ -236,6 +236,8 @@ def test_phase2_pretrained_loads_and_exact_param_prints():
         "lightweight_e5_b2sa_s3_anat_mean_ring_ctx_l5",
         "lightweight_e5_b2sa_s3_anat_mean_l8",
         "lightweight_e5_b2gsa_s3_anat_mean_ring_ctx_l9",
+        "lightweight_e5_b2_s3_anat_mean_l10",
+        "lightweight_e5_b1r_s3_ring_ctx_l10",
     ],
 )
 def test_wave6_configs_step0_equivalence_and_zero_input(cfg_name):
