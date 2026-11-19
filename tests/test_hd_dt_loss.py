@@ -155,6 +155,9 @@ def test_bf16_cuda_grads_finite(mode):
         ("training/config/models/lightweight_e5_b2sa_s3_anat_mean_l5.yaml", "karimi_mse"),
         ("training/config/models/lightweight_e5_b1r_s3_l8_mild_scale_karimi.yaml", "karimi_mse"),
         ("training/config/models/lightweight_e5_b2sa_s3_anat_mean_ring_ctx_l5.yaml", "karimi_mse"),
+        ("training/config/models/lightweight_e5_b1r_s3_l9_slice_hier_karimi.yaml", "karimi_mse"),
+        ("training/config/models/lightweight_e5_b2sa_s3_anat_mean_l8.yaml", "karimi_mse"),
+        ("training/config/models/lightweight_e5_b2gsa_s3_anat_mean_ring_ctx_l9.yaml", "karimi_mse"),
     ],
 )
 def test_loss_trial_yamls_parse_cleanly(cfg_path, expected_mode):
@@ -236,5 +239,43 @@ def test_per_region_scales_and_weights_bf16_and_empty():
         SegmentationLoss(boundary_dt_scales=[5.0, -1.0, 10.0])
     with pytest.raises(ValueError, match="boundary_dt_max_norm"):
         SegmentationLoss(boundary_dt_max_norm=0.0)
+
+
+def test_slice_hier_and_slice_karimi_bf16_and_empty():
+    torch.manual_seed(77)
+    logits = torch.randn(4, 4, 64, 64, requires_grad=True)
+    target = torch.zeros(4, 64, 64, dtype=torch.long)
+    target[0, 10:50, 10:50] = 1
+    target[0, 20:35, 20:35] = 2
+    target[0, 24:30, 24:30] = 3
+    # Small apical slice on index 1, completely empty slices on 2 and 3
+    target[1, 28:36, 28:36] = 1
+    target[1, 30:34, 30:34] = 3
+    crit = SegmentationLoss(
+        n_classes=4,
+        ce_weight=0.40,
+        dice_weight=0.60,
+        ce_class_weights=[0.85, 1.05, 0.85, 1.15],
+        dice_class_weights=[0.5, 1.1, 0.80, 1.1],
+        hier_dice_weight=0.20,
+        slice_hier_weight=0.15,
+        ring_tversky_beta=0.62,
+        aar_tversky_beta=0.42,
+        boundary_dt_weight=0.25,
+        boundary_dt_slice_weight=0.50,
+        boundary_dt_mode="karimi_mse",
+        boundary_dt_scales=[8.0, 13.0, 15.0],
+        boundary_dt_empty_val=1.75,
+        negative_slice_handling="batch",
+        include_background=True,
+        dice_normalization="classes",
+    )
+    out = crit(logits.to(torch.bfloat16), target)
+    assert torch.isfinite(out["loss"]) and 0.0 < out["loss"].item() < 15.0
+    out["loss"].backward()
+    assert logits.grad is not None and torch.isfinite(logits.grad).all()
+    with pytest.raises(ValueError, match="boundary_dt_slice_weight"):
+        SegmentationLoss(boundary_dt_slice_weight=1.5)
+
 
 

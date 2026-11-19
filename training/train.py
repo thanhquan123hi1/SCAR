@@ -93,6 +93,8 @@ def build_parser():
     )
     parser.add_argument("--hier-dice-weight", type=float, default=0.0,
                         help="Weight for clean hierarchical batch Dice over {MyoRing, AAR, Scar} (default: 0.0)")
+    parser.add_argument("--slice-hier-weight", type=float, default=0.0,
+                        help="Weight for per-slice positive-masked hierarchical Tversky/Dice over {MyoRing, AAR, Scar} (default: 0.0)")
     parser.add_argument("--hier-region-weights", nargs="+", type=float, default=None,
                         help="Optional 3 weights [ring, aar, scar] for hier_dice_loss")
     parser.add_argument("--ring-tversky-beta", type=float, default=0.5,
@@ -101,6 +103,8 @@ def build_parser():
                         help="Tversky FN weight beta for AAR/EdemaIncl in hier_dice_loss (0.5 = standard Dice)")
     parser.add_argument("--boundary-dt-weight", type=float, default=0.0,
                         help="Weight for distance-transform Hausdorff surrogate loss over {MyoRing, AAR, Scar} (default: 0.0)")
+    parser.add_argument("--boundary-dt-slice-weight", type=float, default=0.0,
+                        help="Blend fraction [0, 1] for per-slice normalized Karimi HD-DT (default: 0.0)")
     parser.add_argument("--boundary-dt-mode", choices=BOUNDARY_DT_MODES, default="sym_bce",
                         help="Distance-transform HD loss mode (default: sym_bce)")
     parser.add_argument("--boundary-dt-power", type=float, default=2.0)
@@ -280,10 +284,12 @@ def parse_args(argv=None):
             aar_weight=args.aar_weight, scar_weight=args.scar_weight,
             anat_contrast_weight=args.anat_contrast_weight,
             hier_dice_weight=args.hier_dice_weight,
+            slice_hier_weight=args.slice_hier_weight,
             hier_region_weights=args.hier_region_weights,
             ring_tversky_beta=args.ring_tversky_beta,
             aar_tversky_beta=args.aar_tversky_beta,
             boundary_dt_weight=args.boundary_dt_weight,
+            boundary_dt_slice_weight=args.boundary_dt_slice_weight,
             boundary_dt_mode=args.boundary_dt_mode,
             boundary_dt_power=args.boundary_dt_power,
             boundary_dt_scale=args.boundary_dt_scale,

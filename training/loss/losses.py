@@ -290,10 +290,12 @@ class SegmentationLoss(nn.Module):
         scar_weight=0.0,
         anat_contrast_weight=0.0,
         hier_dice_weight=0.0,
+        slice_hier_weight=0.0,
         hier_region_weights=None,
         ring_tversky_beta=0.5,
         aar_tversky_beta=0.5,
         boundary_dt_weight=0.0,
+        boundary_dt_slice_weight=0.0,
         boundary_dt_mode="sym_bce",
         boundary_dt_power=2.0,
         boundary_dt_scale=16.0,
@@ -328,11 +330,15 @@ class SegmentationLoss(nn.Module):
                             ("aar_weight", aar_weight), ("scar_weight", scar_weight),
                             ("anat_contrast_weight", anat_contrast_weight),
                             ("hier_dice_weight", hier_dice_weight),
+                            ("slice_hier_weight", slice_hier_weight),
                             ("boundary_dt_weight", boundary_dt_weight),
+                            ("boundary_dt_slice_weight", boundary_dt_slice_weight),
                             ("boundary_dt_empty_val", boundary_dt_empty_val),
                             ("boundary_dt_margin", boundary_dt_margin)):
             if not math.isfinite(value) or value < 0:
                 raise ValueError(f"{name} must be finite and nonnegative")
+        if boundary_dt_slice_weight > 1.0:
+            raise ValueError("boundary_dt_slice_weight must be between 0.0 and 1.0")
         for name, value in (("boundary_dt_power", boundary_dt_power),
                             ("boundary_dt_scale", boundary_dt_scale)):
             if not math.isfinite(value) or value <= 0:
@@ -363,10 +369,12 @@ class SegmentationLoss(nn.Module):
         self.scar_weight = scar_weight
         self.anat_contrast_weight = anat_contrast_weight
         self.hier_dice_weight = hier_dice_weight
+        self.slice_hier_weight = float(slice_hier_weight)
         self.hier_region_weights = [float(v) for v in hier_region_weights] if hier_region_weights is not None else None
         self.ring_tversky_beta = float(ring_tversky_beta)
         self.aar_tversky_beta = float(aar_tversky_beta)
         self.boundary_dt_weight = boundary_dt_weight
+        self.boundary_dt_slice_weight = float(boundary_dt_slice_weight)
         self.boundary_dt_mode = boundary_dt_mode
         self.boundary_dt_power = float(boundary_dt_power)
         self.boundary_dt_scale = float(boundary_dt_scale)
@@ -485,9 +493,10 @@ class SegmentationLoss(nn.Module):
         else:
             anat_contrast_loss = torch.tensor(0.0, device=logits.device, dtype=torch.float32)
 
-        # 6. Clean Hierarchical Composite Batch-Dice (MyoRing, AAR/Edema-Incl, Scar)
+        # 6. Clean Hierarchical Composite Batch-Dice (MyoRing, AAR/Edema-Incl, Scar),
+        #    Per-Slice Positive-Masked Hierarchical Tversky/Dice,
         #    and Distance-Transform Hausdorff Surrogate Loss
-        if self.hier_dice_weight > 0.0 or self.boundary_dt_weight > 0.0:
+        if self.hier_dice_weight > 0.0 or self.slice_hier_weight > 0.0 or self.boundary_dt_weight > 0.0:
             probs = logits.float().softmax(1)
             # Compute positive and complementary negative region probabilities directly
             # from class sums to avoid 1 - (1 - eps) precision loss in float32/bf16.
@@ -547,6 +556,28 @@ class SegmentationLoss(nn.Module):
             hier_dice_loss = (per_reg_h * hier_rw).sum()
         else:
             hier_dice_loss = torch.tensor(0.0, device=logits.device, dtype=torch.float32)
+
+        if self.slice_hier_weight > 0.0:
+            # Per-slice positive-masked hierarchical Tversky/Dice: ensures smaller/fainter
+            # apical and basal positive slices (which are 15-46x smaller than mid-ventricular
+            # slices in the batch sum) receive equal slice-level gradient.
+            betas = torch.tensor(
+                (self.ring_tversky_beta, self.aar_tversky_beta, 0.5),
+                device=logits.device,
+                dtype=torch.float32,
+            ).view(1, 3)
+            alphas = 1.0 - betas
+            tp_s = (p_pos * y_pos).sum(dim=(2, 3))
+            fp_s = (p_pos * (1.0 - y_pos)).sum(dim=(2, 3))
+            fn_s = (p_neg * y_pos).sum(dim=(2, 3))
+            slice_scores = (tp_s + 1e-5) / (tp_s + alphas * fp_s + betas * fn_s + 1e-5)
+            slice_reg_losses = 1.0 - slice_scores  # (B, 3)
+            has_fg_s = (y_pos.sum(dim=(2, 3)) > 0).float()  # (B, 3)
+            pos_counts = has_fg_s.sum(dim=0).clamp_min(1.0)
+            per_reg_slice_h = (slice_reg_losses * has_fg_s).sum(dim=0) / pos_counts
+            slice_hier_loss = (per_reg_slice_h * hier_rw).sum()
+        else:
+            slice_hier_loss = torch.tensor(0.0, device=logits.device, dtype=torch.float32)
 
         if self.boundary_dt_weight > 0.0:
             y_neg = 1.0 - y_pos
@@ -646,7 +677,15 @@ class SegmentationLoss(nn.Module):
                     per_reg = (w_gt * y_neg * fp_err + w_pr * y_pos * fn_err).sum(dim=(0, 2, 3)) / fg_denom
                 else:  # karimi_mse
                     err_map = y_neg * p_pos.square() * w_gt + y_pos * p_neg.square() * w_pr
-                    per_reg = err_map.sum(dim=(0, 2, 3)) / fg_denom
+                    batch_reg = err_map.sum(dim=(0, 2, 3)) / fg_denom
+                    if self.boundary_dt_slice_weight > 0.0:
+                        slice_floors = torch.tensor((400.0, 200.0, 100.0), device=logits.device, dtype=torch.float32).view(1, 3)
+                        slice_denom = y_pos.sum(dim=(2, 3)) + p_pos.detach().sum(dim=(2, 3)) + slice_floors
+                        slice_reg = (err_map.sum(dim=(2, 3)) / slice_denom).mean(dim=0)
+                        sw = self.boundary_dt_slice_weight
+                        per_reg = (1.0 - sw) * batch_reg + sw * slice_reg
+                    else:
+                        per_reg = batch_reg
             boundary_dt_loss = (per_reg * bdt_rw).sum()
         else:
             boundary_dt_loss = torch.tensor(0.0, device=logits.device, dtype=torch.float32)
@@ -658,6 +697,7 @@ class SegmentationLoss(nn.Module):
             + self.scar_weight * scar_loss
             + self.anat_contrast_weight * anat_contrast_loss
             + self.hier_dice_weight * hier_dice_loss
+            + self.slice_hier_weight * slice_hier_loss
             + self.boundary_dt_weight * boundary_dt_loss
         )
         result = {
@@ -668,8 +708,8 @@ class SegmentationLoss(nn.Module):
             "scar_loss": scar_loss,
             "anat_contrast_loss": anat_contrast_loss,
         }
-        if self.hier_dice_weight > 0.0 or self.boundary_dt_weight > 0.0:
-            result["hier_dice_loss"] = hier_dice_loss
+        if self.hier_dice_weight > 0.0 or self.slice_hier_weight > 0.0 or self.boundary_dt_weight > 0.0:
+            result["hier_dice_loss"] = hier_dice_loss + slice_hier_loss
             result["boundary_dt_loss"] = boundary_dt_loss
         return result
 
