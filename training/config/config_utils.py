@@ -40,6 +40,7 @@ YAML_KEY_TO_DEST: dict[str, str] = {
     "loss.anat_contrast_weight": "anat_contrast_weight",
     "loss.hier_dice_weight": "hier_dice_weight",
     "loss.ring_tversky_beta": "ring_tversky_beta",
+    "loss.aar_tversky_beta": "aar_tversky_beta",
     "loss.boundary_dt_weight": "boundary_dt_weight",
     "loss.boundary_dt_mode": "boundary_dt_mode",
     "loss.boundary_dt_power": "boundary_dt_power",

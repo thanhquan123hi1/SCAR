@@ -95,6 +95,8 @@ def build_parser():
                         help="Weight for clean hierarchical batch Dice over {MyoRing, AAR, Scar} (default: 0.0)")
     parser.add_argument("--ring-tversky-beta", type=float, default=0.5,
                         help="Tversky FN weight beta for MyoRing in hier_dice_loss (0.5 = standard Dice)")
+    parser.add_argument("--aar-tversky-beta", type=float, default=0.5,
+                        help="Tversky FN weight beta for AAR/EdemaIncl in hier_dice_loss (0.5 = standard Dice)")
     parser.add_argument("--boundary-dt-weight", type=float, default=0.0,
                         help="Weight for distance-transform Hausdorff surrogate loss over {MyoRing, AAR, Scar} (default: 0.0)")
     parser.add_argument("--boundary-dt-mode", choices=BOUNDARY_DT_MODES, default="sym_bce",
@@ -234,7 +236,7 @@ def parse_args(argv=None):
         parser.error("img_size must be a multiple of 16 and >=32")
     if args.base_lr <= 0 or args.weight_decay < 0 or (not args.no_val and not 0 < args.val_fraction < 1):
         parser.error("Require lr>0, weight_decay>=0, 0<val_fraction<1")
-    for key in ("base_lr", "weight_decay", "val_fraction", "min_delta", "clip_grad", "ce_weight", "dice_weight", "aar_weight", "scar_weight", "anat_contrast_weight", "hier_dice_weight", "ring_tversky_beta", "boundary_dt_weight", "boundary_dt_power", "boundary_dt_scale", "boundary_dt_empty_val", "boundary_dt_margin"):
+    for key in ("base_lr", "weight_decay", "val_fraction", "min_delta", "clip_grad", "ce_weight", "dice_weight", "aar_weight", "scar_weight", "anat_contrast_weight", "hier_dice_weight", "ring_tversky_beta", "aar_tversky_beta", "boundary_dt_weight", "boundary_dt_power", "boundary_dt_scale", "boundary_dt_empty_val", "boundary_dt_margin"):
         if not math.isfinite(getattr(args, key)):
             parser.error(f"{key} must be finite")
     for key in ("num_workers", "patience", "min_delta", "save_every", "epochs_per_run", "clip_grad", "ce_weight", "dice_weight", "aar_weight", "scar_weight", "anat_contrast_weight", "hier_dice_weight", "boundary_dt_weight", "boundary_dt_empty_val", "boundary_dt_margin"):
@@ -242,8 +244,8 @@ def parse_args(argv=None):
             parser.error(f"{key} must be nonnegative")
     if args.boundary_dt_power <= 0 or args.boundary_dt_scale <= 0 or args.boundary_dt_max_steps < 1:
         parser.error("boundary_dt_power, boundary_dt_scale, and boundary_dt_max_steps must be positive")
-    if not 0.0 < args.ring_tversky_beta < 1.0:
-        parser.error("ring_tversky_beta must be strictly between 0 and 1")
+    if not 0.0 < args.ring_tversky_beta < 1.0 or not 0.0 < args.aar_tversky_beta < 1.0:
+        parser.error("ring_tversky_beta and aar_tversky_beta must be strictly between 0 and 1")
     if args.ce_weight + args.dice_weight <= 0:
         parser.error("At least one loss weight must be positive")
     for key in ("dice_class_weights", "ce_class_weights"):
@@ -272,6 +274,7 @@ def parse_args(argv=None):
             anat_contrast_weight=args.anat_contrast_weight,
             hier_dice_weight=args.hier_dice_weight,
             ring_tversky_beta=args.ring_tversky_beta,
+            aar_tversky_beta=args.aar_tversky_beta,
             boundary_dt_weight=args.boundary_dt_weight,
             boundary_dt_mode=args.boundary_dt_mode,
             boundary_dt_power=args.boundary_dt_power,

@@ -143,6 +143,12 @@ def test_trimodal_skip_fusion_uniform_init_and_multistep_grad():
             "skip_fusion": "norm_contrast_anat_mean",
             "decoder_refinement": "none",
         },
+        {
+            "sspanet_gate": "optimized",
+            "bottleneck_fusion": "multiscale_contrast_sa",
+            "skip_fusion": "norm_contrast_anat_mean",
+            "decoder_refinement": "none",
+        },
     ],
 )
 def test_phase2_forward_backward_flops_and_checkpoint_roundtrip(tmp_path, overrides):
@@ -224,6 +230,7 @@ def test_phase2_pretrained_loads_and_exact_param_prints():
         "lightweight_e5_b1r_s3_anat_mean_ms_raw_hdr",
         "lightweight_e5_b2_s3_anat_mean",
         "lightweight_e5_b1r_s3_anat_ring_ctx",
+        "lightweight_e5_b2sa_s3_anat_mean",
     ],
 )
 def test_wave6_configs_step0_equivalence_and_zero_input(cfg_name):

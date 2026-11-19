@@ -222,13 +222,14 @@ def _validate_resume_loss_config(saved_args: dict, args, saved_version: int | No
     if previous != current:
         raise ValueError(f"Resume changes pathology_reduction: {previous} -> {current}")
     for key in ("aar_weight", "scar_weight", "anat_contrast_weight",
-                "hier_dice_weight", "ring_tversky_beta", "boundary_dt_weight", "boundary_dt_mode",
+                "hier_dice_weight", "ring_tversky_beta", "aar_tversky_beta", "boundary_dt_weight", "boundary_dt_mode",
                 "boundary_dt_power", "boundary_dt_scale", "boundary_dt_max_steps",
                 "boundary_dt_empty_val", "boundary_dt_margin", "dice_class_weights", "ce_class_weights"):
         defaults = {
             "dice_class_weights": None,
             "ce_class_weights": None,
             "ring_tversky_beta": 0.5,
+            "aar_tversky_beta": 0.5,
             "boundary_dt_mode": "sym_bce",
             "boundary_dt_power": 2.0,
             "boundary_dt_scale": 16.0,
@@ -570,6 +571,7 @@ def trainer_Myops(args, model, snapshot_path):
         anat_contrast_weight=getattr(args, "anat_contrast_weight", 0.0),
         hier_dice_weight=getattr(args, "hier_dice_weight", 0.0),
         ring_tversky_beta=getattr(args, "ring_tversky_beta", 0.5),
+        aar_tversky_beta=getattr(args, "aar_tversky_beta", 0.5),
         boundary_dt_weight=getattr(args, "boundary_dt_weight", 0.0),
         boundary_dt_mode=getattr(args, "boundary_dt_mode", "sym_bce"),
         boundary_dt_power=getattr(args, "boundary_dt_power", 2.0),

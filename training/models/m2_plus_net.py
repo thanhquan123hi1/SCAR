@@ -55,6 +55,7 @@ from training.models.modules.m2_plus import (
     ResidualContrastBottleneck,
     GatedSymmetricContrastBottleneck,
     MultiScaleSymmetricContrastBottleneck,
+    MultiScaleContrastSelfAttnBottleneck,
     LegacyM2PlusFusion,
     LEGACY_FUSION,
     SPATIAL_FUSION,
@@ -64,6 +65,7 @@ from training.models.modules.m2_plus import (
     RESIDUAL_CONTRAST_BOTTLENECK,
     RESIDUAL_CONTRAST_GATED_BOTTLENECK,
     MULTISCALE_CONTRAST_BOTTLENECK,
+    MULTISCALE_CONTRAST_SA_BOTTLENECK,
     BOTTLENECK_FUSION_MODES,
 )
 from training.models.modules.sspanet import (
@@ -575,6 +577,13 @@ class LightweightM2PlusNet(M2PlusNet):
                 in_channels=bottleneck_channels,
                 latent_dim=latent_dim,
                 out_channels=fused_channels,
+            )
+        elif self.bottleneck_fusion == MULTISCALE_CONTRAST_SA_BOTTLENECK:
+            self.cross_attention = MultiScaleContrastSelfAttnBottleneck(
+                in_channels=bottleneck_channels,
+                latent_dim=latent_dim,
+                out_channels=fused_channels,
+                num_heads=cross_heads,
             )
         else:
             self.cross_attention = SpatialAwareCrossAttention(

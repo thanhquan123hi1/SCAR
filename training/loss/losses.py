@@ -286,6 +286,7 @@ class SegmentationLoss(nn.Module):
         anat_contrast_weight=0.0,
         hier_dice_weight=0.0,
         ring_tversky_beta=0.5,
+        aar_tversky_beta=0.5,
         boundary_dt_weight=0.0,
         boundary_dt_mode="sym_bce",
         boundary_dt_power=2.0,
@@ -311,6 +312,8 @@ class SegmentationLoss(nn.Module):
             raise ValueError("boundary_dt_max_steps must be a positive integer")
         if not math.isfinite(ring_tversky_beta) or not 0.0 < ring_tversky_beta < 1.0:
             raise ValueError("ring_tversky_beta must be strictly between 0 and 1")
+        if not math.isfinite(aar_tversky_beta) or not 0.0 < aar_tversky_beta < 1.0:
+            raise ValueError("aar_tversky_beta must be strictly between 0 and 1")
         self.pathology_reduction = pathology_reduction
         for name, value in (("ce_weight", ce_weight), ("dice_weight", dice_weight),
                             ("aar_weight", aar_weight), ("scar_weight", scar_weight),
@@ -338,6 +341,7 @@ class SegmentationLoss(nn.Module):
         self.anat_contrast_weight = anat_contrast_weight
         self.hier_dice_weight = hier_dice_weight
         self.ring_tversky_beta = float(ring_tversky_beta)
+        self.aar_tversky_beta = float(aar_tversky_beta)
         self.boundary_dt_weight = boundary_dt_weight
         self.boundary_dt_mode = boundary_dt_mode
         self.boundary_dt_power = float(boundary_dt_power)
@@ -485,24 +489,26 @@ class SegmentationLoss(nn.Module):
             region_weights = torch.tensor((0.30, 0.35, 0.35), device=logits.device, dtype=torch.float32)
 
         if self.hier_dice_weight > 0.0:
-            if abs(self.ring_tversky_beta - 0.5) < 1e-6:
+            if abs(self.ring_tversky_beta - 0.5) < 1e-6 and abs(self.aar_tversky_beta - 0.5) < 1e-6:
                 inter_h = 2.0 * (p_pos * y_pos).sum(dim=(0, 2, 3)) + 1e-5
                 denom_h = p_pos.square().sum(dim=(0, 2, 3)) + y_pos.sum(dim=(0, 2, 3)) + 1e-5
                 per_reg_h = 1.0 - inter_h / denom_h
             else:
-                # Recall-balanced batch Tversky on MyoRing (index 0) to counter thin-wall FN erosion;
-                # standard squared-denominator batch Dice on AAR (index 1) and Scar (index 2).
-                beta = self.ring_tversky_beta
-                alpha = 1.0 - beta
-                tp_r = (p_pos[:, 0] * y_pos[:, 0]).sum()
-                fp_r = (p_pos[:, 0] * (1.0 - y_pos[:, 0])).sum()
-                fn_r = (p_neg[:, 0] * y_pos[:, 0]).sum()
-                ring_loss = 1.0 - (tp_r + 1e-5) / (tp_r + alpha * fp_r + beta * fn_r + 1e-5)
+                def _region_tversky_or_dice(idx: int, beta: float) -> torch.Tensor:
+                    if abs(beta - 0.5) < 1e-6:
+                        inter = 2.0 * (p_pos[:, idx] * y_pos[:, idx]).sum() + 1e-5
+                        denom = p_pos[:, idx].square().sum() + y_pos[:, idx].sum() + 1e-5
+                        return 1.0 - inter / denom
+                    alpha = 1.0 - beta
+                    tp = (p_pos[:, idx] * y_pos[:, idx]).sum()
+                    fp = (p_pos[:, idx] * (1.0 - y_pos[:, idx])).sum()
+                    fn = (p_neg[:, idx] * y_pos[:, idx]).sum()
+                    return 1.0 - (tp + 1e-5) / (tp + alpha * fp + beta * fn + 1e-5)
 
-                inter_p = 2.0 * (p_pos[:, 1:] * y_pos[:, 1:]).sum(dim=(0, 2, 3)) + 1e-5
-                denom_p = p_pos[:, 1:].square().sum(dim=(0, 2, 3)) + y_pos[:, 1:].sum(dim=(0, 2, 3)) + 1e-5
-                patho_losses = 1.0 - inter_p / denom_p
-                per_reg_h = torch.cat((ring_loss.unsqueeze(0), patho_losses), dim=0)
+                ring_loss = _region_tversky_or_dice(0, self.ring_tversky_beta)
+                aar_h_loss = _region_tversky_or_dice(1, self.aar_tversky_beta)
+                scar_h_loss = _region_tversky_or_dice(2, 0.5)
+                per_reg_h = torch.stack((ring_loss, aar_h_loss, scar_h_loss), dim=0)
             hier_dice_loss = (per_reg_h * region_weights).sum()
         else:
             hier_dice_loss = torch.tensor(0.0, device=logits.device, dtype=torch.float32)

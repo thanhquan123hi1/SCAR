@@ -149,6 +149,8 @@ def test_bf16_cuda_grads_finite(mode):
         ("training/config/models/lightweight_e5_b1r_s3_l4_hybrid_farfp.yaml", "hybrid_karimi_farfp"),
         ("training/config/models/lightweight_e5_b2_s3_anat_mean_l2_karimi.yaml", "karimi_mse"),
         ("training/config/models/lightweight_e5_b2_s3_anat_mean_ring_ctx_l4.yaml", "hybrid_karimi_farfp"),
+        ("training/config/models/lightweight_e5_b1r_s3_l5_calib_tversky.yaml", "karimi_mse"),
+        ("training/config/models/lightweight_e5_b1r_s3_l6_calib_farfp.yaml", "hybrid_karimi_farfp"),
     ],
 )
 def test_loss_trial_yamls_parse_cleanly(cfg_path, expected_mode):
@@ -175,6 +177,7 @@ def test_ring_tversky_and_deadzone_margin_grads():
         dice_weight=0.8,
         hier_dice_weight=0.25,
         ring_tversky_beta=0.60,
+        aar_tversky_beta=0.40,
         boundary_dt_weight=0.25,
         boundary_dt_mode="hybrid_karimi_farfp",
         boundary_dt_margin=4.0,

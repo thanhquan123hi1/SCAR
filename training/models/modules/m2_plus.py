@@ -28,12 +28,14 @@ LOCAL_CONTRAST_BOTTLENECK = "local_contrast"
 RESIDUAL_CONTRAST_BOTTLENECK = "residual_contrast"
 RESIDUAL_CONTRAST_GATED_BOTTLENECK = "residual_contrast_gated"
 MULTISCALE_CONTRAST_BOTTLENECK = "multiscale_contrast"
+MULTISCALE_CONTRAST_SA_BOTTLENECK = "multiscale_contrast_sa"
 BOTTLENECK_FUSION_MODES = (
     STANDARD_BOTTLENECK,
     LOCAL_CONTRAST_BOTTLENECK,
     RESIDUAL_CONTRAST_BOTTLENECK,
     RESIDUAL_CONTRAST_GATED_BOTTLENECK,
     MULTISCALE_CONTRAST_BOTTLENECK,
+    MULTISCALE_CONTRAST_SA_BOTTLENECK,
 )
 
 
@@ -595,16 +597,69 @@ class GatedSymmetricContrastBottleneck(nn.Module):
         return F.relu(base_out + self.contrast_gamma * delta, inplace=True)
 
 
+class MultiScaleContrastSelfAttnBottleneck(MultiScaleSymmetricContrastBottleneck):
+    """B2 bottleneck followed by zero-initialized 2D positional spatial self-attention.
+
+    Unlike cross-modality MHA (which broke pixel-to-pixel alignment between CINE,
+    PSIR, and T2w), self-attention operates *after* pixel-aligned multi-modal fusion
+    so every 8x8 sector compares its aligned pathology signature against all other
+    sectors in the slice — suppressing disconnected opposite-wall T2w shading FPs
+    and enforcing global closed myocardial ring consistency.
+    """
+
+    def __init__(
+        self,
+        in_channels: int = 1024,
+        latent_dim: int = 256,
+        out_channels: int = 512,
+        num_heads: int = 8,
+    ):
+        super().__init__(in_channels=in_channels, latent_dim=latent_dim, out_channels=out_channels)
+        sa_dim = max(latent_dim, 64)
+        # Ensure divisibility by 4 (for 2D sin-cos PE) and num_heads
+        while sa_dim % num_heads != 0 or sa_dim % 4 != 0:
+            num_heads = max(num_heads // 2, 1)
+        self.sa_dim = sa_dim
+        self.sa_heads = num_heads
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(202711 + in_channels + latent_dim + out_channels)
+            self.sa_in = nn.Sequential(
+                nn.Conv2d(out_channels, sa_dim, kernel_size=1, bias=False),
+                nn.GroupNorm(num_groups=_get_group_norm_groups(sa_dim, 32), num_channels=sa_dim),
+            )
+            self.sa_norm = nn.LayerNorm(sa_dim)
+            self.sa_mha = nn.MultiheadAttention(sa_dim, num_heads, batch_first=True)
+            self.sa_out = nn.Sequential(
+                nn.Conv2d(sa_dim, out_channels, kernel_size=1, bias=False),
+                nn.GroupNorm(num_groups=_get_group_norm_groups(out_channels, 32), num_channels=out_channels),
+            )
+            self.sa_gamma = nn.Parameter(torch.zeros(1, out_channels, 1, 1))
+
+    def forward(self, cine: torch.Tensor, psir: torch.Tensor, t2w: torch.Tensor) -> torch.Tensor:
+        fused = super().forward(cine, psir, t2w)
+        b, _, h, w = fused.shape
+        x = self.sa_in(fused)
+        pos = build_2d_sinusoidal_positional_encoding(h, w, dim=self.sa_dim, device=x.device, dtype=x.dtype)
+        tokens = x.flatten(2).transpose(1, 2)
+        qkv = self.sa_norm(tokens) + pos
+        attn_out, _ = self.sa_mha(qkv, qkv, tokens, need_weights=False)
+        attn_map = attn_out.transpose(1, 2).reshape(b, self.sa_dim, h, w)
+        delta = self.sa_out(attn_map)
+        return F.relu(fused + self.sa_gamma * delta, inplace=True)
+
+
 __all__ = [
     "LEGACY_FUSION", "SPATIAL_FUSION", "FUSION_VERSIONS", "LegacyM2PlusFusion",
     "STANDARD_BOTTLENECK", "LOCAL_CONTRAST_BOTTLENECK", "RESIDUAL_CONTRAST_BOTTLENECK",
     "RESIDUAL_CONTRAST_GATED_BOTTLENECK", "MULTISCALE_CONTRAST_BOTTLENECK",
+    "MULTISCALE_CONTRAST_SA_BOTTLENECK",
     "BOTTLENECK_FUSION_MODES",
     "SpatialAwareCrossAttention",
     "LocalModalityContrastFusion",
     "ResidualContrastBottleneck",
     "GatedSymmetricContrastBottleneck",
     "MultiScaleSymmetricContrastBottleneck",
+    "MultiScaleContrastSelfAttnBottleneck",
     "M2Plus_Fusion",
     "build_2d_sinusoidal_positional_encoding",
     "build_2d_sincos_position_embedding",
