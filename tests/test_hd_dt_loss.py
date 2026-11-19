@@ -153,6 +153,8 @@ def test_bf16_cuda_grads_finite(mode):
         ("training/config/models/lightweight_e5_b1r_s3_l6_calib_farfp.yaml", "hybrid_karimi_farfp"),
         ("training/config/models/lightweight_e5_b1r_s3_l7_scale_karimi.yaml", "karimi_mse"),
         ("training/config/models/lightweight_e5_b2sa_s3_anat_mean_l5.yaml", "karimi_mse"),
+        ("training/config/models/lightweight_e5_b1r_s3_l8_mild_scale_karimi.yaml", "karimi_mse"),
+        ("training/config/models/lightweight_e5_b2sa_s3_anat_mean_ring_ctx_l5.yaml", "karimi_mse"),
     ],
 )
 def test_loss_trial_yamls_parse_cleanly(cfg_path, expected_mode):

@@ -29,6 +29,7 @@ RESIDUAL_CONTRAST_BOTTLENECK = "residual_contrast"
 RESIDUAL_CONTRAST_GATED_BOTTLENECK = "residual_contrast_gated"
 MULTISCALE_CONTRAST_BOTTLENECK = "multiscale_contrast"
 MULTISCALE_CONTRAST_SA_BOTTLENECK = "multiscale_contrast_sa"
+MULTISCALE_CONTRAST_GATED_SA_BOTTLENECK = "multiscale_contrast_gated_sa"
 BOTTLENECK_FUSION_MODES = (
     STANDARD_BOTTLENECK,
     LOCAL_CONTRAST_BOTTLENECK,
@@ -36,6 +37,7 @@ BOTTLENECK_FUSION_MODES = (
     RESIDUAL_CONTRAST_GATED_BOTTLENECK,
     MULTISCALE_CONTRAST_BOTTLENECK,
     MULTISCALE_CONTRAST_SA_BOTTLENECK,
+    MULTISCALE_CONTRAST_GATED_SA_BOTTLENECK,
 )
 
 
@@ -648,11 +650,50 @@ class MultiScaleContrastSelfAttnBottleneck(MultiScaleSymmetricContrastBottleneck
         return F.relu(fused + self.sa_gamma * delta, inplace=True)
 
 
+class MultiScaleContrastGatedSelfAttnBottleneck(MultiScaleContrastSelfAttnBottleneck):
+    """B2SA bottleneck where 2D spatial self-attention is gated by B2's Peak-to-Mean slice gate.
+
+    Prevents self-attention from re-injecting ungated background/coil noise on
+    low-peak or empty-scar slices (e.g., Case3003 z=2 and Case3026 z=4) while
+    preserving full cross-wall spatial comparison on pathology-bearing slices.
+    """
+
+    def forward(self, cine: torch.Tensor, psir: torch.Tensor, t2w: torch.Tensor) -> torch.Tensor:
+        q_feat = self.proj_in(cine)
+        k_scar = self.proj_in(psir)
+        k_edema = self.proj_in(t2w)
+        base_out = self.proj_out(torch.cat((q_feat, k_scar, k_edema), dim=1))
+
+        d_scar_cine = F.relu(k_scar - q_feat)
+        d_scar_t2 = F.relu(k_scar - k_edema)
+        d_edema_pure = F.relu(k_edema - k_scar)
+        d_aar = F.relu(k_edema - q_feat)
+
+        c = self.compress(torch.cat((d_scar_cine, d_scar_t2, d_edema_pure, d_aar), dim=1))
+        m = F.relu(self.ms_norm(self.ms_conv3x3(c) + self.ms_dilated(c) + c), inplace=True)
+        m_avg = m.mean(dim=(2, 3), keepdim=True)
+        m_max = m.amax(dim=(2, 3), keepdim=True)
+        g = self.slice_gate(torch.cat((m_avg, m_max - m_avg), dim=1))
+        delta_b2 = self.expand(m * g)
+        fused = F.relu(base_out + self.contrast_gamma * delta_b2, inplace=True)
+
+        b, _, h, w = fused.shape
+        x = self.sa_in(fused)
+        pos = build_2d_sinusoidal_positional_encoding(h, w, dim=self.sa_dim, device=x.device, dtype=x.dtype)
+        tokens = x.flatten(2).transpose(1, 2)
+        qkv = self.sa_norm(tokens) + pos
+        attn_out, _ = self.sa_mha(qkv, qkv, tokens, need_weights=False)
+        attn_map = attn_out.transpose(1, 2).reshape(b, self.sa_dim, h, w)
+        g_slice = g.mean(dim=1, keepdim=True)
+        delta_sa = self.sa_out(attn_map) * g_slice
+        return F.relu(fused + self.sa_gamma * delta_sa, inplace=True)
+
+
 __all__ = [
     "LEGACY_FUSION", "SPATIAL_FUSION", "FUSION_VERSIONS", "LegacyM2PlusFusion",
     "STANDARD_BOTTLENECK", "LOCAL_CONTRAST_BOTTLENECK", "RESIDUAL_CONTRAST_BOTTLENECK",
     "RESIDUAL_CONTRAST_GATED_BOTTLENECK", "MULTISCALE_CONTRAST_BOTTLENECK",
-    "MULTISCALE_CONTRAST_SA_BOTTLENECK",
+    "MULTISCALE_CONTRAST_SA_BOTTLENECK", "MULTISCALE_CONTRAST_GATED_SA_BOTTLENECK",
     "BOTTLENECK_FUSION_MODES",
     "SpatialAwareCrossAttention",
     "LocalModalityContrastFusion",
@@ -660,6 +701,7 @@ __all__ = [
     "GatedSymmetricContrastBottleneck",
     "MultiScaleSymmetricContrastBottleneck",
     "MultiScaleContrastSelfAttnBottleneck",
+    "MultiScaleContrastGatedSelfAttnBottleneck",
     "M2Plus_Fusion",
     "build_2d_sinusoidal_positional_encoding",
     "build_2d_sincos_position_embedding",

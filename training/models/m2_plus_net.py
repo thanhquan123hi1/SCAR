@@ -38,6 +38,7 @@ from training.models.modules.fusion import (
     AnatMeanNormalizedContrastSkipFusion,
     MultiScaleNormalizedContrastSkipFusion,
     AnatMeanMSNormalizedContrastSkipFusion,
+    CoherentAnatContrastSkipFusion,
     MEAN_SKIP_FUSION,
     MODALITY_WEIGHTED_SKIP_FUSION,
     SPATIAL_RESIDUAL_SKIP_FUSION,
@@ -46,6 +47,7 @@ from training.models.modules.fusion import (
     NORM_CONTRAST_ANAT_MEAN_SKIP_FUSION,
     NORM_CONTRAST_MS_SKIP_FUSION,
     NORM_CONTRAST_ANAT_MEAN_MS_SKIP_FUSION,
+    NORM_CONTRAST_ANAT_COHERENT_SKIP_FUSION,
     SKIP_FUSION_MODES,
 )
 from training.models.modules.m2_plus import (
@@ -56,6 +58,7 @@ from training.models.modules.m2_plus import (
     GatedSymmetricContrastBottleneck,
     MultiScaleSymmetricContrastBottleneck,
     MultiScaleContrastSelfAttnBottleneck,
+    MultiScaleContrastGatedSelfAttnBottleneck,
     LegacyM2PlusFusion,
     LEGACY_FUSION,
     SPATIAL_FUSION,
@@ -66,6 +69,7 @@ from training.models.modules.m2_plus import (
     RESIDUAL_CONTRAST_GATED_BOTTLENECK,
     MULTISCALE_CONTRAST_BOTTLENECK,
     MULTISCALE_CONTRAST_SA_BOTTLENECK,
+    MULTISCALE_CONTRAST_GATED_SA_BOTTLENECK,
     BOTTLENECK_FUSION_MODES,
 )
 from training.models.modules.sspanet import (
@@ -587,6 +591,13 @@ class LightweightM2PlusNet(M2PlusNet):
                 out_channels=fused_channels,
                 num_heads=cross_heads,
             )
+        elif self.bottleneck_fusion == MULTISCALE_CONTRAST_GATED_SA_BOTTLENECK:
+            self.cross_attention = MultiScaleContrastGatedSelfAttnBottleneck(
+                in_channels=bottleneck_channels,
+                latent_dim=latent_dim,
+                out_channels=fused_channels,
+                num_heads=cross_heads,
+            )
         else:
             self.cross_attention = SpatialAwareCrossAttention(
                 in_channels=bottleneck_channels,
@@ -611,6 +622,7 @@ class LightweightM2PlusNet(M2PlusNet):
             NORM_CONTRAST_ANAT_MEAN_SKIP_FUSION: AnatMeanNormalizedContrastSkipFusion,
             NORM_CONTRAST_MS_SKIP_FUSION: MultiScaleNormalizedContrastSkipFusion,
             NORM_CONTRAST_ANAT_MEAN_MS_SKIP_FUSION: AnatMeanMSNormalizedContrastSkipFusion,
+            NORM_CONTRAST_ANAT_COHERENT_SKIP_FUSION: CoherentAnatContrastSkipFusion,
         }
         if self.skip_fusion_mode == MODALITY_WEIGHTED_SKIP_FUSION:
             self.skip_fusions = nn.ModuleList(

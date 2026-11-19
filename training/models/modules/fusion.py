@@ -12,6 +12,7 @@ DECOUPLED_ANAT_CONTRAST_SKIP_FUSION = "decoupled_anat_contrast"
 NORM_CONTRAST_ANAT_MEAN_SKIP_FUSION = "norm_contrast_anat_mean"
 NORM_CONTRAST_MS_SKIP_FUSION = "norm_contrast_ms"
 NORM_CONTRAST_ANAT_MEAN_MS_SKIP_FUSION = "norm_contrast_anat_mean_ms"
+NORM_CONTRAST_ANAT_COHERENT_SKIP_FUSION = "norm_contrast_anat_coherent"
 SKIP_FUSION_MODES = (
     MEAN_SKIP_FUSION,
     MODALITY_WEIGHTED_SKIP_FUSION,
@@ -21,6 +22,7 @@ SKIP_FUSION_MODES = (
     NORM_CONTRAST_ANAT_MEAN_SKIP_FUSION,
     NORM_CONTRAST_MS_SKIP_FUSION,
     NORM_CONTRAST_ANAT_MEAN_MS_SKIP_FUSION,
+    NORM_CONTRAST_ANAT_COHERENT_SKIP_FUSION,
 )
 
 
@@ -609,6 +611,77 @@ class AnatMeanMSNormalizedContrastSkipFusion(_MultiScaleHeadMixin, _BaseAnatMean
         return base + self.gamma * self._forward_ms_head(feat)
 
 
+class CoherentAnatContrastSkipFusion(_BaseAnatMeanContrastSkipFusion):
+    """Biophysically coherent wall-mean contrast skip fusion suppressing T2w coil-shading FPs.
+
+    Across the 64-patient training set, T2w-bright healthy myocardium (surface-coil
+    shading) has negative LGE/CINE deviation from the myocardial wall mean
+    ((LGE - mu_lge) + (CINE - mu_cine) = -0.0258), which artificially inflates
+    naive ReLU(T2w - LGE) (+0.1990) above True Edema (+0.1653, where LGE and CINE
+    are co-elevated by +0.1019). This module:
+      1. Clamps reference baselines at the wall mean (max(k_psir, mu_psir),
+         max(q_cine, mu_cine)) so dark-LGE or dark-CINE signal drops on healthy
+         opposite walls cannot inflate Edema/AAR differences.
+      2. Gates all 4 inter-modality contrasts by CINE wall mask g_wall.
+      3. Adds wall-centered CINE deviation d_cine_wall and multi-sequence AAR
+         co-elevation min(d_t2w_wall, d_psir_wall + d_cine_wall).
+    """
+
+    def __init__(self, channels: int):
+        super().__init__()
+        mid, gn_mid, gn_out = self._init_anat_mean_dims(channels)
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(202722 + channels)
+            self._init_anat_mean_projections(channels, mid)
+            self.contrast_fuse = nn.Sequential(
+                nn.Conv2d(mid * 8 + 1, mid, kernel_size=1, bias=False),
+                nn.GroupNorm(num_groups=gn_mid, num_channels=mid),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(mid, mid, kernel_size=3, padding=1, bias=False),
+                nn.GroupNorm(num_groups=gn_mid, num_channels=mid),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(mid, channels, kernel_size=1, bias=False),
+                nn.GroupNorm(num_groups=gn_out, num_channels=channels),
+            )
+            self.gamma = nn.Parameter(torch.zeros(1, channels, 1, 1))
+
+    def forward(self, cine: torch.Tensor, psir: torch.Tensor, t2w: torch.Tensor) -> torch.Tensor:
+        base = (cine + psir + t2w) / 3.0
+        q_cine = self.align_proj(cine)
+        k_psir = self.align_proj(psir)
+        k_t2w = self.align_proj(t2w)
+
+        sp = torch.cat(
+            (DecoupledAnatContrastSkipFusion._spatial_desc(q_cine), DecoupledAnatContrastSkipFusion._spatial_desc(base)),
+            dim=1,
+        )
+        g_wall = self.wall_gate(sp)
+        w_fp32 = g_wall.float()
+        denom = w_fp32.sum(dim=(2, 3), keepdim=True).clamp_min(1e-4)
+        mu_cine = self._wall_mean(q_cine, w_fp32, denom)
+        mu_psir = self._wall_mean(k_psir, w_fp32, denom)
+        mu_t2w = self._wall_mean(k_t2w, w_fp32, denom)
+
+        q_cine_ref = torch.maximum(q_cine, mu_cine)
+        k_psir_ref = torch.maximum(k_psir, mu_psir)
+
+        d_scar_cine = torch.relu(k_psir - q_cine_ref) * g_wall
+        d_scar_t2 = torch.relu(k_psir - k_t2w) * g_wall
+        d_edema_pure = torch.relu(k_t2w - k_psir_ref) * g_wall
+        d_aar = torch.relu(k_t2w - q_cine_ref) * g_wall
+
+        d_psir_wall = torch.relu(k_psir - mu_psir) * g_wall
+        d_t2w_wall = torch.relu(k_t2w - mu_t2w) * g_wall
+        d_cine_wall = torch.relu(q_cine - mu_cine) * g_wall
+        d_coact_aar = torch.minimum(d_t2w_wall, d_psir_wall + d_cine_wall)
+
+        feat = torch.cat(
+            (d_scar_cine, d_scar_t2, d_edema_pure, d_aar, d_psir_wall, d_t2w_wall, d_cine_wall, d_coact_aar, g_wall),
+            dim=1,
+        )
+        return base + self.gamma * self.contrast_fuse(feat)
+
+
 __all__ = [
     "ConcatFusion",
     "Fusion_Embed",
@@ -620,6 +693,7 @@ __all__ = [
     "AnatMeanNormalizedContrastSkipFusion",
     "MultiScaleNormalizedContrastSkipFusion",
     "AnatMeanMSNormalizedContrastSkipFusion",
+    "CoherentAnatContrastSkipFusion",
     "MEAN_SKIP_FUSION",
     "MODALITY_WEIGHTED_SKIP_FUSION",
     "SPATIAL_RESIDUAL_SKIP_FUSION",
@@ -628,5 +702,6 @@ __all__ = [
     "NORM_CONTRAST_ANAT_MEAN_SKIP_FUSION",
     "NORM_CONTRAST_MS_SKIP_FUSION",
     "NORM_CONTRAST_ANAT_MEAN_MS_SKIP_FUSION",
+    "NORM_CONTRAST_ANAT_COHERENT_SKIP_FUSION",
     "SKIP_FUSION_MODES",
 ]
