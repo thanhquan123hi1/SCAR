@@ -149,6 +149,12 @@ def test_trimodal_skip_fusion_uniform_init_and_multistep_grad():
             "skip_fusion": "norm_contrast_anat_mean",
             "decoder_refinement": "none",
         },
+        {
+            "sspanet_gate": "optimized",
+            "bottleneck_fusion": "residual_contrast_proto",
+            "skip_fusion": "norm_contrast",
+            "decoder_refinement": "none",
+        },
     ],
 )
 def test_phase2_forward_backward_flops_and_checkpoint_roundtrip(tmp_path, overrides):
@@ -241,6 +247,9 @@ def test_phase2_pretrained_loads_and_exact_param_prints():
         "lightweight_e5_b1r_s3_anat_mean_l5",
         "lightweight_e5_b2_s3_anat_mean_l5",
         "lightweight_e5_b1r_s3_l11_fullreach_aar_karimi",
+        "lightweight_e5_b1r_proto_s3_l5",
+        "lightweight_e5_b1r_s3_l12_myofp_karimi",
+        "lightweight_e5_b1r_s3_l13_anat_norm_myo_karimi",
     ],
 )
 def test_wave6_configs_step0_equivalence_and_zero_input(cfg_name):
@@ -282,4 +291,24 @@ def test_sspa_optimized_gn_eliminates_all_batchnorm_and_is_batch_invariant():
         out_b2 = gn_model(c, p, t)
         out_b1 = gn_model(c[:1], p[:1], t[:1])
     torch.testing.assert_close(out_b2[:1], out_b1, rtol=1e-4, atol=1e-4)
+
+
+def test_residual_proto_contrast_bottleneck_multistep_grad():
+    from training.models.modules.m2_plus import ResidualProtoContrastBottleneck
+
+    torch.manual_seed(23)
+    mod = ResidualProtoContrastBottleneck(in_channels=32, latent_dim=16, out_channels=32)
+    c, p, t = [torch.randn(2, 32, 8, 8) for _ in range(3)]
+    target = torch.randn(2, 32, 8, 8)
+    opt = torch.optim.SGD(mod.parameters(), lr=0.1)
+    for _ in range(2):
+        opt.zero_grad()
+        loss = (mod(c, p, t) - target).square().mean()
+        loss.backward()
+        opt.step()
+    for name, param in mod.named_parameters():
+        assert param.grad is not None and torch.isfinite(param.grad).all(), name
+        if name.startswith(("myo_gate.", "proto_branch.")):
+            assert param.grad.abs().sum() > 0, f"{name} received zero grad after 2 steps"
+
 

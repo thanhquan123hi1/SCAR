@@ -27,6 +27,7 @@ STANDARD_BOTTLENECK = "standard"
 LOCAL_CONTRAST_BOTTLENECK = "local_contrast"
 RESIDUAL_CONTRAST_BOTTLENECK = "residual_contrast"
 RESIDUAL_CONTRAST_GATED_BOTTLENECK = "residual_contrast_gated"
+RESIDUAL_CONTRAST_PROTO_BOTTLENECK = "residual_contrast_proto"
 MULTISCALE_CONTRAST_BOTTLENECK = "multiscale_contrast"
 MULTISCALE_CONTRAST_SA_BOTTLENECK = "multiscale_contrast_sa"
 MULTISCALE_CONTRAST_GATED_SA_BOTTLENECK = "multiscale_contrast_gated_sa"
@@ -35,6 +36,7 @@ BOTTLENECK_FUSION_MODES = (
     LOCAL_CONTRAST_BOTTLENECK,
     RESIDUAL_CONTRAST_BOTTLENECK,
     RESIDUAL_CONTRAST_GATED_BOTTLENECK,
+    RESIDUAL_CONTRAST_PROTO_BOTTLENECK,
     MULTISCALE_CONTRAST_BOTTLENECK,
     MULTISCALE_CONTRAST_SA_BOTTLENECK,
     MULTISCALE_CONTRAST_GATED_SA_BOTTLENECK,
@@ -689,16 +691,88 @@ class MultiScaleContrastGatedSelfAttnBottleneck(MultiScaleContrastSelfAttnBottle
         return F.relu(fused + self.sa_gamma * delta_sa, inplace=True)
 
 
+class ResidualProtoContrastBottleneck(ResidualContrastBottleneck):
+    """E5-B1R bottleneck enhanced with CINE-guided myocardial prototype contrast calibration.
+
+    Motivated by RPT (MICCAI 2023) and GLFNet (2024):
+    1. Extracts a soft myocardial wall mask w_myo from CINE bottleneck features q_feat.
+    2. Pools CINE-weighted regional myocardial prototypes proto_myo for [d_scar, d_edema, d_aar]
+       to subtract slice-wide low-frequency T2w/PSIR coil-shading offsets across the myocardial ring
+       without dense 64x64 background token mixing.
+    3. Refines prototype-centered focal contrast via a zero-initialized residual branch (proto_gamma=0),
+       preserving exact step-0 equivalence with ResidualContrastBottleneck (B1R).
+    """
+
+    def __init__(
+        self,
+        in_channels: int = 1024,
+        latent_dim: int = 256,
+        out_channels: int = 512,
+    ):
+        super().__init__(in_channels=in_channels, latent_dim=latent_dim, out_channels=out_channels)
+        mid = max(latent_dim // 2, 32)
+        g_mid = _get_group_norm_groups(mid, 16)
+        gate_mid = max(latent_dim // 4, 16)
+        g_gate = _get_group_norm_groups(gate_mid, 8)
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(202731 + in_channels + latent_dim + out_channels)
+            self.myo_gate = nn.Sequential(
+                nn.Conv2d(latent_dim, gate_mid, kernel_size=3, padding=1, bias=False),
+                nn.GroupNorm(num_groups=g_gate, num_channels=gate_mid),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(gate_mid, 1, kernel_size=1, bias=True),
+                nn.Sigmoid(),
+            )
+            self.proto_scale = nn.Parameter(torch.full((1, latent_dim * 3, 1, 1), 0.5))
+            self.proto_branch = nn.Sequential(
+                nn.Conv2d(latent_dim * 3, mid, kernel_size=1, bias=False),
+                nn.GroupNorm(num_groups=g_mid, num_channels=mid),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(mid, mid, kernel_size=3, padding=1, groups=mid, bias=False),
+                nn.GroupNorm(num_groups=g_mid, num_channels=mid),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(mid, out_channels, kernel_size=1, bias=False),
+                nn.GroupNorm(num_groups=_get_group_norm_groups(out_channels, 32), num_channels=out_channels),
+            )
+            self.proto_gamma = nn.Parameter(torch.zeros(1, out_channels, 1, 1))
+
+    def forward(self, cine: torch.Tensor, psir: torch.Tensor, t2w: torch.Tensor) -> torch.Tensor:
+        q_feat = self.proj_in(cine)
+        k_scar = self.proj_in(psir)
+        k_edema = self.proj_in(t2w)
+        base_out = self.proj_out(torch.cat((q_feat, k_scar, k_edema), dim=1))
+
+        d_scar = F.relu(k_scar - q_feat)
+        d_edema = F.relu(k_edema - k_scar)
+        d_aar = F.relu(k_edema - q_feat)
+        diff_cat = torch.cat((d_scar, d_edema, d_aar), dim=1)
+        delta_b1r = self.contrast_branch(diff_cat)
+
+        w_myo = self.myo_gate(q_feat)
+        w_sum = w_myo.sum(dim=(2, 3), keepdim=True).clamp_min(1e-4)
+        proto_myo = (diff_cat * w_myo).sum(dim=(2, 3), keepdim=True) / w_sum
+        scale = self.proto_scale.clamp(0.0, 1.5)
+        focal_diff = F.relu(diff_cat - scale * proto_myo) * (0.5 + 0.5 * w_myo)
+        delta_proto = self.proto_branch(focal_diff)
+
+        return F.relu(
+            base_out + self.contrast_gamma * delta_b1r + self.proto_gamma * delta_proto,
+            inplace=True,
+        )
+
+
 __all__ = [
     "LEGACY_FUSION", "SPATIAL_FUSION", "FUSION_VERSIONS", "LegacyM2PlusFusion",
     "STANDARD_BOTTLENECK", "LOCAL_CONTRAST_BOTTLENECK", "RESIDUAL_CONTRAST_BOTTLENECK",
-    "RESIDUAL_CONTRAST_GATED_BOTTLENECK", "MULTISCALE_CONTRAST_BOTTLENECK",
+    "RESIDUAL_CONTRAST_GATED_BOTTLENECK", "RESIDUAL_CONTRAST_PROTO_BOTTLENECK",
+    "MULTISCALE_CONTRAST_BOTTLENECK",
     "MULTISCALE_CONTRAST_SA_BOTTLENECK", "MULTISCALE_CONTRAST_GATED_SA_BOTTLENECK",
     "BOTTLENECK_FUSION_MODES",
     "SpatialAwareCrossAttention",
     "LocalModalityContrastFusion",
     "ResidualContrastBottleneck",
     "GatedSymmetricContrastBottleneck",
+    "ResidualProtoContrastBottleneck",
     "MultiScaleSymmetricContrastBottleneck",
     "MultiScaleContrastSelfAttnBottleneck",
     "MultiScaleContrastGatedSelfAttnBottleneck",

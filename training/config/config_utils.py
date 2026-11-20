@@ -54,6 +54,8 @@ YAML_KEY_TO_DEST: dict[str, str] = {
     "loss.boundary_dt_empty_val": "boundary_dt_empty_val",
     "loss.boundary_dt_margin": "boundary_dt_margin",
     "loss.boundary_dt_max_norm": "boundary_dt_max_norm",
+    "loss.boundary_dt_myo_fp_alpha": "boundary_dt_myo_fp_alpha",
+    "loss.norm_myo_dt_weight": "norm_myo_dt_weight",
     "loss.dice_class_weights": "dice_class_weights",
     "loss.dice_normalization": "dice_normalization",
     "loss.ce_class_weights": "ce_class_weights",

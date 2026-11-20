@@ -56,6 +56,7 @@ from training.models.modules.m2_plus import (
     LocalModalityContrastFusion,
     ResidualContrastBottleneck,
     GatedSymmetricContrastBottleneck,
+    ResidualProtoContrastBottleneck,
     MultiScaleSymmetricContrastBottleneck,
     MultiScaleContrastSelfAttnBottleneck,
     MultiScaleContrastGatedSelfAttnBottleneck,
@@ -67,6 +68,7 @@ from training.models.modules.m2_plus import (
     LOCAL_CONTRAST_BOTTLENECK,
     RESIDUAL_CONTRAST_BOTTLENECK,
     RESIDUAL_CONTRAST_GATED_BOTTLENECK,
+    RESIDUAL_CONTRAST_PROTO_BOTTLENECK,
     MULTISCALE_CONTRAST_BOTTLENECK,
     MULTISCALE_CONTRAST_SA_BOTTLENECK,
     MULTISCALE_CONTRAST_GATED_SA_BOTTLENECK,
@@ -574,6 +576,12 @@ class LightweightM2PlusNet(M2PlusNet):
             )
         elif self.bottleneck_fusion == RESIDUAL_CONTRAST_GATED_BOTTLENECK:
             self.cross_attention = GatedSymmetricContrastBottleneck(
+                in_channels=bottleneck_channels,
+                latent_dim=latent_dim,
+                out_channels=fused_channels,
+            )
+        elif self.bottleneck_fusion == RESIDUAL_CONTRAST_PROTO_BOTTLENECK:
+            self.cross_attention = ResidualProtoContrastBottleneck(
                 in_channels=bottleneck_channels,
                 latent_dim=latent_dim,
                 out_channels=fused_channels,

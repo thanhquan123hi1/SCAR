@@ -284,4 +284,52 @@ def test_slice_hier_and_slice_karimi_bf16_and_empty():
         SegmentationLoss(boundary_dt_slice_weight=1.5)
 
 
+def test_myo_fp_alpha_and_norm_myo_dt_loss():
+    torch.manual_seed(99)
+    target = torch.zeros(2, 64, 64, dtype=torch.long)
+    target[0, 12:52, 12:52] = 1
+    target[0, 20:28, 20:28] = 2
+
+    # Logits predicting normal myocardium (class 1) everywhere in myocardium, except a false Edema blob inside GT normal myo
+    logits_fp_in_myo = torch.zeros(2, 4, 64, 64)
+    logits_fp_in_myo[:, 0] = 3.0
+    logits_fp_in_myo[0, 1, 12:52, 12:52] = 5.0
+    logits_fp_in_myo[0, 2, 20:28, 20:28] = 5.0
+    logits_fp_in_myo[0, 2, 40:46, 40:46] = 6.0  # false Edema inside GT normal myocardium
+
+    base_crit = SegmentationLoss(
+        n_classes=4, ce_weight=0.40, dice_weight=0.60, hier_dice_weight=0.25,
+        boundary_dt_weight=0.25, boundary_dt_mode="karimi_mse", boundary_dt_scales=[8.5, 14.0, 16.0],
+        boundary_dt_myo_fp_alpha=0.0, negative_slice_handling="batch", include_background=True, dice_normalization="classes",
+    )
+    boost_crit = SegmentationLoss(
+        n_classes=4, ce_weight=0.40, dice_weight=0.60, hier_dice_weight=0.25,
+        boundary_dt_weight=0.25, boundary_dt_mode="karimi_mse", boundary_dt_scales=[8.5, 14.0, 16.0],
+        boundary_dt_myo_fp_alpha=1.5, negative_slice_handling="batch", include_background=True, dice_normalization="classes",
+    )
+    out_base = base_crit(logits_fp_in_myo, target)
+    out_boost = boost_crit(logits_fp_in_myo, target)
+    assert out_boost["boundary_dt_loss"].item() > out_base["boundary_dt_loss"].item()
+
+    logits_grad = logits_fp_in_myo.clone().detach().requires_grad_(True)
+    nm_crit = SegmentationLoss(
+        n_classes=4, ce_weight=0.40, dice_weight=0.60, hier_dice_weight=0.25,
+        boundary_dt_weight=0.25, boundary_dt_mode="karimi_mse", boundary_dt_scales=[8.5, 15.0, 16.0],
+        norm_myo_dt_weight=0.12, negative_slice_handling="batch", include_background=True, dice_normalization="classes",
+    )
+    out_nm = nm_crit(logits_grad.to(torch.bfloat16), target)
+    assert "norm_myo_dt_loss" in out_nm and torch.isfinite(out_nm["norm_myo_dt_loss"])
+    assert torch.isfinite(out_nm["loss"]) and out_nm["loss"].item() > 0.0
+    out_nm["loss"].backward()
+    assert logits_grad.grad is not None and torch.isfinite(logits_grad.grad).all()
+
+    with pytest.raises(ValueError, match="accum_steps=1"):
+        SegmentationLoss(norm_myo_dt_weight=0.1).validate_accumulation(2)
+    with pytest.raises(ValueError, match="boundary_dt_myo_fp_alpha"):
+        SegmentationLoss(boundary_dt_myo_fp_alpha=-0.5)
+    with pytest.raises(ValueError, match="norm_myo_dt_weight"):
+        SegmentationLoss(norm_myo_dt_weight=-0.1)
+
+
+
 

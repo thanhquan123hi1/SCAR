@@ -305,6 +305,8 @@ class SegmentationLoss(nn.Module):
         boundary_dt_empty_val=1.0,
         boundary_dt_margin=0.0,
         boundary_dt_max_norm=None,
+        boundary_dt_myo_fp_alpha=0.0,
+        norm_myo_dt_weight=0.0,
         dice_class_weights=None,
         ce_class_weights=None,
         pathology_reduction="positive",
@@ -334,7 +336,9 @@ class SegmentationLoss(nn.Module):
                             ("boundary_dt_weight", boundary_dt_weight),
                             ("boundary_dt_slice_weight", boundary_dt_slice_weight),
                             ("boundary_dt_empty_val", boundary_dt_empty_val),
-                            ("boundary_dt_margin", boundary_dt_margin)):
+                            ("boundary_dt_margin", boundary_dt_margin),
+                            ("boundary_dt_myo_fp_alpha", boundary_dt_myo_fp_alpha),
+                            ("norm_myo_dt_weight", norm_myo_dt_weight)):
             if not math.isfinite(value) or value < 0:
                 raise ValueError(f"{name} must be finite and nonnegative")
         if boundary_dt_slice_weight > 1.0:
@@ -386,6 +390,8 @@ class SegmentationLoss(nn.Module):
         self.boundary_dt_empty_val = float(boundary_dt_empty_val)
         self.boundary_dt_margin = float(boundary_dt_margin)
         self.boundary_dt_max_norm = float(boundary_dt_max_norm) if boundary_dt_max_norm is not None else None
+        self.boundary_dt_myo_fp_alpha = float(boundary_dt_myo_fp_alpha)
+        self.norm_myo_dt_weight = float(norm_myo_dt_weight)
         self.dice_class_weights = dice_class_weights
         self.ce_class_weights = ce_class_weights
         self.masked_negative_slices = masked_negative_slices
@@ -403,7 +409,7 @@ class SegmentationLoss(nn.Module):
     def validate_accumulation(self, accum_steps):
         if accum_steps > 1 and self.dice.batch_dice and self.dice_weight > 0:
             raise ValueError("Batch Dice requires accum_steps=1; use per-image Dice for gradient accumulation")
-        if accum_steps > 1 and (self.hier_dice_weight > 0 or self.boundary_dt_weight > 0):
+        if accum_steps > 1 and (self.hier_dice_weight > 0 or self.boundary_dt_weight > 0 or self.norm_myo_dt_weight > 0):
             raise ValueError("Batch-level hierarchical/distance losses require accum_steps=1")
         if (accum_steps > 1 and self.pathology_reduction == "positive"
                 and (self.aar_weight > 0 or self.scar_weight > 0 or self.anat_contrast_weight > 0)):
@@ -496,7 +502,12 @@ class SegmentationLoss(nn.Module):
         # 6. Clean Hierarchical Composite Batch-Dice (MyoRing, AAR/Edema-Incl, Scar),
         #    Per-Slice Positive-Masked Hierarchical Tversky/Dice,
         #    and Distance-Transform Hausdorff Surrogate Loss
-        if self.hier_dice_weight > 0.0 or self.slice_hier_weight > 0.0 or self.boundary_dt_weight > 0.0:
+        if (
+            self.hier_dice_weight > 0.0
+            or self.slice_hier_weight > 0.0
+            or self.boundary_dt_weight > 0.0
+            or self.norm_myo_dt_weight > 0.0
+        ):
             probs = logits.float().softmax(1)
             # Compute positive and complementary negative region probabilities directly
             # from class sums to avoid 1 - (1 - eps) precision loss in float32/bf16.
@@ -582,6 +593,11 @@ class SegmentationLoss(nn.Module):
         if self.boundary_dt_weight > 0.0:
             y_neg = 1.0 - y_pos
             fg_denom = y_pos.sum(dim=(0, 2, 3)) + p_pos.detach().sum(dim=(0, 2, 3)) + 1.0
+            myo_boost = None
+            if self.boundary_dt_myo_fp_alpha > 0.0:
+                in_norm_myo = (target == 1).float().unsqueeze(1)
+                myo_fp_scale = 1.0 + self.boundary_dt_myo_fp_alpha * in_norm_myo
+                myo_boost = torch.cat((torch.ones_like(in_norm_myo), myo_fp_scale, myo_fp_scale), dim=1)
             if self.boundary_dt_scales is not None:
                 scale_3 = torch.tensor(self.boundary_dt_scales, device=logits.device, dtype=torch.float32).view(1, 3, 1, 1)
                 scale_6 = torch.cat((scale_3, scale_3), dim=1)
@@ -598,6 +614,8 @@ class SegmentationLoss(nn.Module):
                     margin=self.boundary_dt_margin,
                     max_norm=self.boundary_dt_max_norm,
                 )
+                if myo_boost is not None:
+                    w_gt = w_gt * myo_boost
                 fp_err = (-torch.log(p_neg.clamp(min=1e-6))).clamp(max=10.0)
                 per_reg = (w_gt * y_neg * fp_err).sum(dim=(0, 2, 3)) / fg_denom
             elif self.boundary_dt_mode == "hybrid_karimi_farfp":
@@ -647,6 +665,9 @@ class SegmentationLoss(nn.Module):
                     n_far.pow(self.boundary_dt_power),
                     torch.full_like(d_gt, self.boundary_dt_empty_val),
                 )
+                if myo_boost is not None:
+                    w_gt = w_gt * myo_boost
+                    w_far = w_far * myo_boost
                 karimi_reg = (y_neg * p_pos.square() * w_gt + y_pos * p_neg.square() * w_pr).sum(dim=(0, 2, 3)) / fg_denom
                 fp_err = (-torch.log(p_neg.clamp(min=1e-6))).clamp(max=10.0)
                 far_fp_reg = (w_far * y_neg * fp_err).sum(dim=(0, 2, 3)) / fg_denom
@@ -671,6 +692,8 @@ class SegmentationLoss(nn.Module):
                     max_norm=self.boundary_dt_max_norm,
                 )
                 w_gt, w_pr = both_dt[:, :3], both_dt[:, 3:]
+                if myo_boost is not None:
+                    w_gt = w_gt * myo_boost
                 if self.boundary_dt_mode == "sym_bce":
                     fp_err = (-torch.log(p_neg.clamp(min=1e-6))).clamp(max=10.0)
                     fn_err = (-torch.log(p_pos.clamp(min=1e-6))).clamp(max=10.0)
@@ -690,6 +713,30 @@ class SegmentationLoss(nn.Module):
         else:
             boundary_dt_loss = torch.tensor(0.0, device=logits.device, dtype=torch.float32)
 
+        if self.norm_myo_dt_weight > 0.0:
+            y_myo = (target == 1).float().unsqueeze(1)
+            p_myo = probs[:, 1:2]
+            p_not_myo = probs[:, 0:1] + probs[:, 2:3] + probs[:, 3:4]
+            inter_myo = 2.0 * (p_myo * y_myo).sum() + 1e-5
+            denom_myo = p_myo.square().sum() + y_myo.sum() + 1e-5
+            myo_dice_loss = 1.0 - inter_myo / denom_myo
+
+            pred_myo = (logits.detach().argmax(1) == 1).float().unsqueeze(1)
+            myo_dt = _octagonal_outside_dt(
+                torch.cat((y_myo, pred_myo), dim=1),
+                max_steps=self.boundary_dt_max_steps,
+                d_scale=12.0,
+                power=self.boundary_dt_power,
+                empty_val=self.boundary_dt_empty_val,
+            )
+            w_myo_gt, w_myo_pr = myo_dt[:, :1], myo_dt[:, 1:]
+            myo_denom = y_myo.sum() + p_myo.detach().sum() + 1.0
+            myo_err = (1.0 - y_myo) * p_myo.square() * w_myo_gt + y_myo * p_not_myo.square() * w_myo_pr
+            myo_karimi_loss = myo_err.sum() / myo_denom
+            norm_myo_dt_loss = 0.5 * myo_dice_loss + 0.5 * myo_karimi_loss
+        else:
+            norm_myo_dt_loss = torch.tensor(0.0, device=logits.device, dtype=torch.float32)
+
         total_loss = (
             self.ce_weight * ce
             + self.dice_weight * dice
@@ -699,6 +746,7 @@ class SegmentationLoss(nn.Module):
             + self.hier_dice_weight * hier_dice_loss
             + self.slice_hier_weight * slice_hier_loss
             + self.boundary_dt_weight * boundary_dt_loss
+            + self.norm_myo_dt_weight * norm_myo_dt_loss
         )
         result = {
             "loss": total_loss,
@@ -711,6 +759,8 @@ class SegmentationLoss(nn.Module):
         if self.hier_dice_weight > 0.0 or self.slice_hier_weight > 0.0 or self.boundary_dt_weight > 0.0:
             result["hier_dice_loss"] = hier_dice_loss + slice_hier_loss
             result["boundary_dt_loss"] = boundary_dt_loss
+        if self.norm_myo_dt_weight > 0.0:
+            result["norm_myo_dt_loss"] = norm_myo_dt_loss
         return result
 
 
