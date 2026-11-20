@@ -28,6 +28,7 @@ LOCAL_CONTRAST_BOTTLENECK = "local_contrast"
 RESIDUAL_CONTRAST_BOTTLENECK = "residual_contrast"
 RESIDUAL_CONTRAST_GATED_BOTTLENECK = "residual_contrast_gated"
 RESIDUAL_CONTRAST_PROTO_BOTTLENECK = "residual_contrast_proto"
+RESIDUAL_CONTRAST_COS_ATTN_BOTTLENECK = "residual_contrast_cos_attn"
 MULTISCALE_CONTRAST_BOTTLENECK = "multiscale_contrast"
 MULTISCALE_CONTRAST_SA_BOTTLENECK = "multiscale_contrast_sa"
 MULTISCALE_CONTRAST_GATED_SA_BOTTLENECK = "multiscale_contrast_gated_sa"
@@ -37,6 +38,7 @@ BOTTLENECK_FUSION_MODES = (
     RESIDUAL_CONTRAST_BOTTLENECK,
     RESIDUAL_CONTRAST_GATED_BOTTLENECK,
     RESIDUAL_CONTRAST_PROTO_BOTTLENECK,
+    RESIDUAL_CONTRAST_COS_ATTN_BOTTLENECK,
     MULTISCALE_CONTRAST_BOTTLENECK,
     MULTISCALE_CONTRAST_SA_BOTTLENECK,
     MULTISCALE_CONTRAST_GATED_SA_BOTTLENECK,
@@ -761,10 +763,140 @@ class ResidualProtoContrastBottleneck(ResidualContrastBottleneck):
         )
 
 
+class ResidualContrastCosAttnBottleneck(nn.Module):
+    """E5/B1R-anchored bottleneck with I-MMSeg-inspired parameter-free cross-modal cosine attention.
+
+    Preserves ResidualContrastBottleneck (B1R) exactly as the primary pathway and adds a
+    lightweight, zero-initialized global cross-modal cosine-attention branch at the 8x8
+    bottleneck (no heavy Q/K/V projection matrices to avoid overfitting with Karimi HD-DT):
+      1. Slice-conditioned GAP spatial importance masks suppress background tokens per modality.
+      2. L2-normalized pairwise cross-modal |cosine similarity| correlates tokens across the
+         full myocardial ring (e.g., comparing opposite myocardial walls).
+      3. Cross-modal aggregated features are fused and added via a zero-initialized scale.
+    """
+
+    def __init__(
+        self,
+        in_channels: int = 1024,
+        latent_dim: int = 256,
+        out_channels: int = 512,
+    ):
+        super().__init__()
+        if in_channels < 1 or latent_dim < 1 or out_channels < 1:
+            raise ValueError("Bottleneck fusion channel dimensions must be positive")
+        self.in_channels = in_channels
+        self.latent_dim = latent_dim
+        self.out_channels = out_channels
+
+        self.proj_in = nn.Sequential(
+            nn.Conv2d(in_channels, latent_dim, kernel_size=1, bias=False),
+            nn.GroupNorm(num_groups=_get_group_norm_groups(latent_dim, 32), num_channels=latent_dim),
+            nn.ReLU(inplace=True),
+        )
+        self.proj_out = nn.Sequential(
+            nn.Conv2d(latent_dim * 3, out_channels, kernel_size=1, bias=False),
+            nn.GroupNorm(num_groups=_get_group_norm_groups(out_channels, 32), num_channels=out_channels),
+            nn.ReLU(inplace=False),
+        )
+
+        mid = max(latent_dim // 2, 32)
+        g_mid = _get_group_norm_groups(mid, 16)
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(202601 + in_channels + latent_dim + out_channels)
+            self.contrast_branch = nn.Sequential(
+                nn.Conv2d(latent_dim * 3, mid, kernel_size=1, bias=False),
+                nn.GroupNorm(num_groups=g_mid, num_channels=mid),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(mid, mid, kernel_size=3, padding=1, groups=mid, bias=False),
+                nn.GroupNorm(num_groups=g_mid, num_channels=mid),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(mid, out_channels, kernel_size=1, bias=False),
+                nn.GroupNorm(num_groups=_get_group_norm_groups(out_channels, 32), num_channels=out_channels),
+            )
+            self.contrast_gamma = nn.Parameter(torch.zeros(1, out_channels, 1, 1))
+
+        gate_mid = max(latent_dim // 4, 32)
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(202641 + in_channels + latent_dim + out_channels)
+            self.mask_ctx = nn.ModuleList([
+                nn.Sequential(
+                    nn.AdaptiveAvgPool2d(1),
+                    nn.Conv2d(latent_dim, gate_mid, kernel_size=1, bias=True),
+                    nn.ReLU(inplace=True),
+                    nn.Conv2d(gate_mid, latent_dim, kernel_size=1, bias=True),
+                    nn.Tanh(),
+                )
+                for _ in range(3)
+            ])
+            self.mask_spatial = nn.ModuleList([
+                nn.Conv2d(latent_dim, 1, kernel_size=1, bias=True)
+                for _ in range(3)
+            ])
+            # Softplus(1.0) + 0.5 ≈ 1.81 initial cosine-attention temperature
+            self.cos_log_temp = nn.Parameter(torch.tensor(1.0))
+            self.cos_fuse = nn.Sequential(
+                nn.Conv2d(latent_dim * 3, mid, kernel_size=1, bias=False),
+                nn.GroupNorm(num_groups=g_mid, num_channels=mid),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(mid, out_channels, kernel_size=1, bias=False),
+                nn.GroupNorm(num_groups=_get_group_norm_groups(out_channels, 32), num_channels=out_channels),
+            )
+            self.cos_gamma = nn.Parameter(torch.zeros(1, out_channels, 1, 1))
+
+    @staticmethod
+    def _cos_attn_update(val_bcn: torch.Tensor, sim_bnn: torch.Tensor, temp: torch.Tensor) -> torch.Tensor:
+        attn = torch.softmax(sim_bnn * temp, dim=-1)  # (B, N, N)
+        # (B, N, N) @ (B, N, C) -> (B, N, C) -> (B, C, N)
+        return torch.bmm(attn, val_bcn.transpose(1, 2)).transpose(1, 2)
+
+    def forward(self, cine: torch.Tensor, psir: torch.Tensor, t2w: torch.Tensor) -> torch.Tensor:
+        q_feat = self.proj_in(cine)
+        k_scar = self.proj_in(psir)
+        k_edema = self.proj_in(t2w)
+        base_out = self.proj_out(torch.cat((q_feat, k_scar, k_edema), dim=1))
+
+        d_scar = F.relu(k_scar - q_feat)
+        d_edema = F.relu(k_edema - k_scar)
+        d_aar = F.relu(k_edema - q_feat)
+        delta_b1r = self.contrast_branch(torch.cat((d_scar, d_edema, d_aar), dim=1))
+
+        # Slice-conditioned spatial masking + parameter-free cross-modal cosine attention (fp32 for bf16 safety)
+        b, c, h, w = q_feat.shape
+        mods = (q_feat, k_scar, k_edema)
+        masked = []
+        normed = []
+        for idx, feat in enumerate(mods):
+            ctx = self.mask_ctx[idx](feat)
+            sp_mask = torch.sigmoid(self.mask_spatial[idx](feat * (1.0 + ctx)))
+            u = (feat * sp_mask).float().flatten(2)  # (B, C, N)
+            masked.append(u)
+            normed.append(F.normalize(u, p=2, dim=1, eps=1e-6))
+
+        u_c, u_p, u_t = masked
+        n_c, n_p, n_t = normed
+        sim_cp = torch.abs(torch.bmm(n_c.transpose(1, 2), n_p))  # (B, N, N)
+        sim_ct = torch.abs(torch.bmm(n_c.transpose(1, 2), n_t))
+        sim_pt = torch.abs(torch.bmm(n_p.transpose(1, 2), n_t))
+
+        temp = F.softplus(self.cos_log_temp.float()) + 0.5
+        c_upd = 0.5 * (self._cos_attn_update(u_p, sim_cp, temp) + self._cos_attn_update(u_t, sim_ct, temp))
+        p_upd = 0.5 * (self._cos_attn_update(u_c, sim_cp.transpose(1, 2), temp) + self._cos_attn_update(u_t, sim_pt, temp))
+        t_upd = 0.5 * (self._cos_attn_update(u_c, sim_ct.transpose(1, 2), temp) + self._cos_attn_update(u_p, sim_pt.transpose(1, 2), temp))
+
+        cos_cat = torch.cat((c_upd, p_upd, t_upd), dim=1).reshape(b, 3 * c, h, w).to(base_out.dtype)
+        delta_cos = self.cos_fuse(cos_cat)
+
+        return F.relu(
+            base_out + self.contrast_gamma * delta_b1r + self.cos_gamma * delta_cos,
+            inplace=True,
+        )
+
+
 __all__ = [
     "LEGACY_FUSION", "SPATIAL_FUSION", "FUSION_VERSIONS", "LegacyM2PlusFusion",
     "STANDARD_BOTTLENECK", "LOCAL_CONTRAST_BOTTLENECK", "RESIDUAL_CONTRAST_BOTTLENECK",
     "RESIDUAL_CONTRAST_GATED_BOTTLENECK", "RESIDUAL_CONTRAST_PROTO_BOTTLENECK",
+    "RESIDUAL_CONTRAST_COS_ATTN_BOTTLENECK",
     "MULTISCALE_CONTRAST_BOTTLENECK",
     "MULTISCALE_CONTRAST_SA_BOTTLENECK", "MULTISCALE_CONTRAST_GATED_SA_BOTTLENECK",
     "BOTTLENECK_FUSION_MODES",
@@ -773,6 +905,7 @@ __all__ = [
     "ResidualContrastBottleneck",
     "GatedSymmetricContrastBottleneck",
     "ResidualProtoContrastBottleneck",
+    "ResidualContrastCosAttnBottleneck",
     "MultiScaleSymmetricContrastBottleneck",
     "MultiScaleContrastSelfAttnBottleneck",
     "MultiScaleContrastGatedSelfAttnBottleneck",

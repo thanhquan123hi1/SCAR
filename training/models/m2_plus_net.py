@@ -20,6 +20,8 @@ from training.models.modules.decoder import (
     HRAnatCalibRefinement,
     RawModalHDRRefinement,
     AnatRingContextRefinement,
+    DynamicSliceConditionedHead,
+    ModalityAuxSupervisionHeads,
     NO_DECODER_REFINEMENT,
     BOUNDARY_DECODER_REFINEMENT,
     WIDE_RES_FPN_DECODER_REFINEMENT,
@@ -27,6 +29,9 @@ from training.models.modules.decoder import (
     HR_RAW_EDGE_DECODER_REFINEMENT,
     ANAT_RING_CONTEXT_DECODER_REFINEMENT,
     DECODER_REFINEMENT_MODES,
+    STATIC_HEAD,
+    DYNAMIC_COND_HEAD,
+    HEAD_MODES,
 )
 from training.models.modules.fusion import (
     Fusion_Embed,
@@ -59,6 +64,7 @@ from training.models.modules.m2_plus import (
     ResidualContrastBottleneck,
     GatedSymmetricContrastBottleneck,
     ResidualProtoContrastBottleneck,
+    ResidualContrastCosAttnBottleneck,
     MultiScaleSymmetricContrastBottleneck,
     MultiScaleContrastSelfAttnBottleneck,
     MultiScaleContrastGatedSelfAttnBottleneck,
@@ -71,6 +77,7 @@ from training.models.modules.m2_plus import (
     RESIDUAL_CONTRAST_BOTTLENECK,
     RESIDUAL_CONTRAST_GATED_BOTTLENECK,
     RESIDUAL_CONTRAST_PROTO_BOTTLENECK,
+    RESIDUAL_CONTRAST_COS_ATTN_BOTTLENECK,
     MULTISCALE_CONTRAST_BOTTLENECK,
     MULTISCALE_CONTRAST_SA_BOTTLENECK,
     MULTISCALE_CONTRAST_GATED_SA_BOTTLENECK,
@@ -104,6 +111,8 @@ def get_lightweight_config() -> ConfigDict:
     config.bottleneck_fusion = STANDARD_BOTTLENECK
     config.skip_fusion = MEAN_SKIP_FUSION
     config.decoder_refinement = NO_DECODER_REFINEMENT
+    config.head_mode = STATIC_HEAD
+    config.use_modality_aux = False
     config.n_skip = 3
     config.n_classes = 4
     config.ablation = "LIGHTWEIGHT_M2_PLUS"
@@ -531,9 +540,15 @@ class LightweightM2PlusNet(M2PlusNet):
         decoder_refinement = self.config.get("decoder_refinement", NO_DECODER_REFINEMENT)
         if decoder_refinement not in DECODER_REFINEMENT_MODES:
             raise ValueError(f"Unknown decoder_refinement {decoder_refinement!r}; expected {DECODER_REFINEMENT_MODES}")
+        head_mode = self.config.get("head_mode", STATIC_HEAD)
+        if head_mode not in HEAD_MODES:
+            raise ValueError(f"Unknown head_mode {head_mode!r}; expected {HEAD_MODES}")
+        use_modality_aux = bool(self.config.get("use_modality_aux", False))
         self.config.bottleneck_fusion = bottleneck_fusion
         self.config.skip_fusion = skip_fusion_mode
         self.config.decoder_refinement = decoder_refinement
+        self.config.head_mode = head_mode
+        self.config.use_modality_aux = use_modality_aux
         self.config.sspanet_gate = sspa_gate
         self.config.sspanet_reduction = sspa_reduction
 
@@ -543,6 +558,8 @@ class LightweightM2PlusNet(M2PlusNet):
         self.bottleneck_fusion = bottleneck_fusion
         self.skip_fusion_mode = skip_fusion_mode
         self.decoder_refinement_mode = decoder_refinement
+        self.head_mode = head_mode
+        self.use_modality_aux = use_modality_aux
 
         # 1. Shared ResNetV2 backbone with 3 independent 1-channel stems and optional FiLM adapters
         self.encoder = SharedResNetV2(
@@ -584,6 +601,12 @@ class LightweightM2PlusNet(M2PlusNet):
             )
         elif self.bottleneck_fusion == RESIDUAL_CONTRAST_PROTO_BOTTLENECK:
             self.cross_attention = ResidualProtoContrastBottleneck(
+                in_channels=bottleneck_channels,
+                latent_dim=latent_dim,
+                out_channels=fused_channels,
+            )
+        elif self.bottleneck_fusion == RESIDUAL_CONTRAST_COS_ATTN_BOTTLENECK:
+            self.cross_attention = ResidualContrastCosAttnBottleneck(
                 in_channels=bottleneck_channels,
                 latent_dim=latent_dim,
                 out_channels=fused_channels,
@@ -691,9 +714,26 @@ class LightweightM2PlusNet(M2PlusNet):
         elif self.decoder_refinement_mode == ANAT_RING_CONTEXT_DECODER_REFINEMENT:
             self.anat_ring_ctx = AnatRingContextRefinement(dec_ch[3])
 
-        # 6. Final Segmentation Head
+        # 6. Final Segmentation Head (static or slice-conditioned dynamic head)
         self.head = nn.Conv2d(dec_ch[3], self.num_classes, kernel_size=1)
         self.segmentation_head = self.head
+        self.dynamic_head = (
+            DynamicSliceConditionedHead(
+                in_channels=dec_ch[3],
+                num_classes=self.num_classes,
+                context_channels=(fused_channels, skip0_ch, skip1_ch, skip2_ch),
+            )
+            if self.head_mode == DYNAMIC_COND_HEAD
+            else None
+        )
+        self.mod_aux = (
+            ModalityAuxSupervisionHeads(
+                skip_channels=skip_channels_tuple,
+                num_classes=self.num_classes,
+            )
+            if self.use_modality_aux
+            else None
+        )
 
         if zero_head:
             nn.init.zeros_(self.head.weight)
@@ -814,7 +854,15 @@ class LightweightM2PlusNet(M2PlusNet):
             d4 = self.anat_ring_ctx(d4, cine)
 
         # 6. Final Segmentation Head
-        logits = self.head(d4)
+        if self.dynamic_head is not None:
+            logits = self.dynamic_head(d4, self.head, (fused, skip0, skip1, skip2))
+        else:
+            logits = self.head(d4)
+        if self.training and self.mod_aux is not None:
+            return {
+                "logits": logits,
+                "mod_aux": self.mod_aux(skips_cine, skips_psir, skips_t2w, (target_h, target_w)),
+            }
         return logits
 
     def load_pretrained_encoders(self, path: str | Path):

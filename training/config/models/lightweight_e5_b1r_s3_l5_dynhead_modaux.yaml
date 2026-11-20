@@ -1,0 +1,36 @@
+model:
+  architecture: lightweight_m2_plus
+  model_name: Lightweight-E5-B1R-S3-L5-DynHead-ModAux
+  ablation: LIGHTWEIGHT_M2_PLUS
+  decoder_channels: [128, 64, 32, 32]
+  latent_dim: 256
+  fusion_version: spatial_v2
+  use_pos_enc: true
+  use_skip_gates: true
+  use_film: true
+  use_cross_attention: false
+  sspanet_gate: optimized
+  sspanet_reduction: 16
+  bottleneck_fusion: residual_contrast
+  skip_fusion: norm_contrast
+  head_mode: dynamic_cond
+  use_modality_aux: true
+  transformer:
+    dropout_rate: 0.0
+
+loss:
+  ce_weight: 0.40
+  dice_weight: 0.60
+  ce_class_weights: [0.85, 1.05, 0.85, 1.15]
+  dice_class_weights: [0.5, 1.1, 0.80, 1.1]
+  hier_dice_weight: 0.25
+  ring_tversky_beta: 0.60
+  aar_tversky_beta: 0.42
+  boundary_dt_weight: 0.25
+  boundary_dt_mode: karimi_mse
+  boundary_dt_power: 2.0
+  boundary_dt_scale: 16.0
+  boundary_dt_max_steps: 32
+  boundary_dt_empty_val: 1.5
+  mod_aux_weight: 0.25
+  mod_contrast_weight: 0.05

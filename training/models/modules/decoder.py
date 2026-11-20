@@ -65,6 +65,10 @@ DECODER_REFINEMENT_MODES = (
     ANAT_RING_CONTEXT_DECODER_REFINEMENT,
 )
 
+STATIC_HEAD = "static"
+DYNAMIC_COND_HEAD = "dynamic_cond"
+HEAD_MODES = (STATIC_HEAD, DYNAMIC_COND_HEAD)
+
 
 def _gn_groups(channels: int, max_groups: int = 8) -> int:
     for g in range(min(max_groups, channels), 0, -1):
@@ -416,3 +420,209 @@ class SegmentationHead(nn.Sequential):
     def __init__(self, in_channels, out_channels, kernel_size=3):
         super().__init__(nn.Conv2d(in_channels, out_channels, kernel_size,
                                   padding=kernel_size // 2))
+
+
+class DynamicSliceConditionedHead(nn.Module):
+    """I-MMSeg-inspired slice-conditioned dynamic classification head + 128x128 spatial refinement.
+
+    Distills I-MMSeg's ForwardPredictionHead into a lightweight, fully vectorized 2D module:
+      1. Full-resolution 3x3 depthwise-separable residual refinement (fixes SlimDecoderBlock's
+         lack of spatial convolutions at 128x128).
+      2. Multi-scale GAP slice summary (fused + skip0/1/2) combined with learnable class
+         prototypes generates per-slice, per-class 2-layer dynamic 1x1 classifier weights.
+      3. Zero-initialized final dynamic layer & edge gate preserve exact step-0 equivalence
+         with static head while allowing immediate non-zero gradients at step 0.
+    """
+
+    def __init__(
+        self,
+        in_channels: int = 32,
+        num_classes: int = 4,
+        context_channels: tuple[int, ...] = (512, 512, 256, 64),
+        ctx_dim: int = 64,
+        precls_dim: int = 8,
+    ):
+        super().__init__()
+        self.in_channels = in_channels
+        self.num_classes = num_classes
+        self.ctx_dim = ctx_dim
+        self.precls_dim = precls_dim
+
+        gn_in = _gn_groups(in_channels, 8)
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(202651 + in_channels + num_classes)
+            # 1. Lightweight 128x128 spatial edge refinement
+            self.edge_refine = nn.Sequential(
+                nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1, groups=in_channels, bias=False),
+                nn.Conv2d(in_channels, in_channels, kernel_size=1, bias=False),
+                nn.GroupNorm(num_groups=gn_in, num_channels=in_channels),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1, groups=in_channels, bias=False),
+                nn.Conv2d(in_channels, in_channels, kernel_size=1, bias=False),
+                nn.GroupNorm(num_groups=gn_in, num_channels=in_channels),
+            )
+            self.edge_gamma = nn.Parameter(torch.zeros(1, in_channels, 1, 1))
+
+            # 2. Multi-scale slice GAP context encoders
+            self.gap_projs = nn.ModuleList([
+                nn.Sequential(
+                    nn.GroupNorm(num_groups=_gn_groups(ch, 8), num_channels=ch),
+                    nn.ReLU(inplace=True),
+                    nn.AdaptiveAvgPool2d(1),
+                    nn.Conv2d(ch, ctx_dim, kernel_size=1, bias=True),
+                )
+                for ch in context_channels
+            ])
+            self.class_protos = nn.Parameter(torch.randn(num_classes, ctx_dim) * 0.05)
+
+            # 3. Shared pre-classification features + slice-conditioned dynamic controller
+            self.precls_conv = nn.Sequential(
+                nn.GroupNorm(num_groups=gn_in, num_channels=in_channels),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(in_channels, precls_dim, kernel_size=1, bias=True),
+            )
+            self.controller_shared = nn.Sequential(
+                nn.Linear(ctx_dim * 2, ctx_dim),
+                nn.ReLU(inplace=True),
+            )
+            # Layer 1 dynamic conv: (precls_dim -> precls_dim) + bias
+            self.controller_l1 = nn.Linear(ctx_dim, precls_dim * precls_dim + precls_dim)
+            # Layer 2 dynamic conv: (precls_dim -> 1) + bias, zero-init for exact step-0 equivalence
+            self.controller_l2 = nn.Linear(ctx_dim, precls_dim + 1)
+            nn.init.zeros_(self.controller_l2.weight)
+            nn.init.zeros_(self.controller_l2.bias)
+
+    def forward(
+        self,
+        d4: torch.Tensor,
+        static_head: nn.Module,
+        context_feats: tuple[torch.Tensor, ...],
+    ) -> torch.Tensor:
+        d4_ref = F.relu(d4 + self.edge_gamma * self.edge_refine(d4), inplace=True)
+        base_logits = static_head(d4_ref)
+
+        # Multi-scale slice summary (B, ctx_dim)
+        slice_ctx = sum(proj(feat).flatten(1) for proj, feat in zip(self.gap_projs, context_feats)) / len(self.gap_projs)
+        b = d4.shape[0]
+        k = self.num_classes
+        p = self.precls_dim
+
+        # Per-slice, per-class conditioning vector (B, K, 2*ctx_dim)
+        s_exp = slice_ctx.unsqueeze(1).expand(b, k, self.ctx_dim)
+        c_exp = self.class_protos.unsqueeze(0).expand(b, k, self.ctx_dim)
+        cond = self.controller_shared(torch.cat((s_exp, c_exp), dim=-1))  # (B, K, ctx_dim)
+
+        l1_params = self.controller_l1(cond).float()  # (B, K, p*p + p)
+        l2_params = self.controller_l2(cond).float()  # (B, K, p + 1)
+        w1 = l1_params[..., : p * p].reshape(b, k, p, p)
+        b1 = l1_params[..., p * p :]  # (B, K, p)
+        w2 = l2_params[..., :p]  # (B, K, p)
+        b2 = l2_params[..., p]  # (B, K)
+
+        precls = self.precls_conv(d4_ref).float()  # (B, p, H, W)
+        # Vectorized dynamic 2-layer 1x1 conv across batch & classes
+        h1 = F.relu(torch.einsum("bchw,bkdc->bkdhw", precls, w1) + b1[:, :, :, None, None], inplace=True)
+        dyn_logits = torch.einsum("bkdhw,bkd->bkhw", h1, w2) + b2[:, :, None, None]
+        return base_logits + dyn_logits.to(base_logits.dtype)
+
+
+class ModalityAuxSupervisionHeads(nn.Module):
+    """Training-only per-modality auxiliary heads & multi-scale contrastive projections.
+
+    Never executed during eval(), so inference FLOPs overhead is strictly zero.
+    Physics-aligned per-modality targets:
+      - CINE (bSSFP): 2-class anatomical segmentation (bg vs myocardial_ring)
+      - PSIR (LGE):   3-class segmentation (bg vs non_scar_myo vs scar)
+      - T2w:          3-class segmentation (bg vs normal_myo vs AAR/edema_inclusive)
+    Plus 3-scale (H/2, H/4, H/8) 64-dim embeddings + learnable class prototypes for
+    I-MMSeg-style biology-aware supervised contrastive alignment.
+    """
+
+    def __init__(
+        self,
+        skip_channels: tuple[int, int, int] = (512, 256, 64),
+        fpn_dim: int = 32,
+        embed_dim: int = 64,
+        num_classes: int = 4,
+    ):
+        super().__init__()
+        self.skip_channels = tuple(skip_channels)
+        self.embed_dim = embed_dim
+        self.num_classes = num_classes
+        s0, s1, s2 = skip_channels  # (512 @ H/8, 256 @ H/4, 64 @ H/2)
+        gn_fpn = _gn_groups(fpn_dim, 8)
+        gn_emb = _gn_groups(embed_dim, 8)
+
+        def _make_fpn_head(out_classes: int) -> nn.ModuleDict:
+            return nn.ModuleDict({
+                "p0": nn.Conv2d(s0, fpn_dim, kernel_size=1, bias=False),
+                "p1": nn.Conv2d(s1, fpn_dim, kernel_size=1, bias=False),
+                "p2": nn.Conv2d(s2, fpn_dim, kernel_size=1, bias=False),
+                "fuse": nn.Sequential(
+                    nn.GroupNorm(num_groups=gn_fpn, num_channels=fpn_dim),
+                    nn.ReLU(inplace=True),
+                    nn.Conv2d(fpn_dim, fpn_dim, kernel_size=3, padding=1, groups=fpn_dim, bias=False),
+                    nn.Conv2d(fpn_dim, fpn_dim, kernel_size=1, bias=False),
+                    nn.GroupNorm(num_groups=gn_fpn, num_channels=fpn_dim),
+                    nn.ReLU(inplace=True),
+                    nn.Conv2d(fpn_dim, out_classes, kernel_size=1, bias=True),
+                ),
+            })
+
+        def _make_embed_proj(in_ch: int) -> nn.Sequential:
+            return nn.Sequential(
+                nn.Conv2d(in_ch, embed_dim, kernel_size=1, bias=False),
+                nn.GroupNorm(num_groups=gn_emb, num_channels=embed_dim),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(embed_dim, embed_dim, kernel_size=1, bias=True),
+            )
+
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(202661 + s0 + s1 + s2)
+            self.head_cine = _make_fpn_head(2)
+            self.head_psir = _make_fpn_head(3)
+            self.head_t2w = _make_fpn_head(3)
+            # 3 scales ordered [high->low]: (skip2 @ H/2, skip1 @ H/4, skip0 @ H/8)
+            scale_chs = (s2, s1, s0)
+            self.embed_cine = nn.ModuleList([_make_embed_proj(c) for c in scale_chs])
+            self.embed_psir = nn.ModuleList([_make_embed_proj(c) for c in scale_chs])
+            self.embed_t2w = nn.ModuleList([_make_embed_proj(c) for c in scale_chs])
+            self.class_protos = nn.Parameter(torch.randn(3, num_classes, embed_dim) * 0.1)
+
+    @staticmethod
+    def _run_fpn(head: nn.ModuleDict, skips: list[torch.Tensor], target_hw: tuple[int, int]) -> torch.Tensor:
+        s0, s1, s2 = skips[0], skips[1], skips[2]
+        hw_mid = s2.shape[2:]
+        f = (
+            F.interpolate(head["p0"](s0), size=hw_mid, mode="bilinear", align_corners=False)
+            + F.interpolate(head["p1"](s1), size=hw_mid, mode="bilinear", align_corners=False)
+            + head["p2"](s2)
+        )
+        logits_mid = head["fuse"](f)
+        if logits_mid.shape[2:] != target_hw:
+            logits_mid = F.interpolate(logits_mid, size=target_hw, mode="bilinear", align_corners=False)
+        return logits_mid
+
+    def forward(
+        self,
+        skips_cine: list[torch.Tensor],
+        skips_psir: list[torch.Tensor],
+        skips_t2w: list[torch.Tensor],
+        target_hw: tuple[int, int],
+    ) -> dict[str, object]:
+        aux_cine = self._run_fpn(self.head_cine, skips_cine, target_hw)
+        aux_psir = self._run_fpn(self.head_psir, skips_psir, target_hw)
+        aux_t2w = self._run_fpn(self.head_t2w, skips_t2w, target_hw)
+        # Embeddings ordered [H/2, H/4, H/8]
+        emb_cine = [proj(s) for proj, s in zip(self.embed_cine, (skips_cine[2], skips_cine[1], skips_cine[0]))]
+        emb_psir = [proj(s) for proj, s in zip(self.embed_psir, (skips_psir[2], skips_psir[1], skips_psir[0]))]
+        emb_t2w = [proj(s) for proj, s in zip(self.embed_t2w, (skips_t2w[2], skips_t2w[1], skips_t2w[0]))]
+        return {
+            "aux_cine": aux_cine,
+            "aux_psir": aux_psir,
+            "aux_t2w": aux_t2w,
+            "emb_cine": emb_cine,
+            "emb_psir": emb_psir,
+            "emb_t2w": emb_t2w,
+            "class_protos": self.class_protos,
+        }

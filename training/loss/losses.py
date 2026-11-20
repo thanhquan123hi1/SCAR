@@ -314,6 +314,8 @@ class SegmentationLoss(nn.Module):
         norm_myo_dt_weight=0.0,
         intra_myo_far_fp_weight=0.0,
         empty_slice_fp_weight=0.0,
+        mod_aux_weight=0.0,
+        mod_contrast_weight=0.0,
         dice_class_weights=None,
         ce_class_weights=None,
         pathology_reduction="positive",
@@ -347,7 +349,9 @@ class SegmentationLoss(nn.Module):
                             ("boundary_dt_myo_fp_alpha", boundary_dt_myo_fp_alpha),
                             ("norm_myo_dt_weight", norm_myo_dt_weight),
                             ("intra_myo_far_fp_weight", intra_myo_far_fp_weight),
-                            ("empty_slice_fp_weight", empty_slice_fp_weight)):
+                            ("empty_slice_fp_weight", empty_slice_fp_weight),
+                            ("mod_aux_weight", mod_aux_weight),
+                            ("mod_contrast_weight", mod_contrast_weight)):
             if not math.isfinite(value) or value < 0:
                 raise ValueError(f"{name} must be finite and nonnegative")
         if boundary_dt_slice_weight > 1.0:
@@ -410,6 +414,8 @@ class SegmentationLoss(nn.Module):
         self.norm_myo_dt_weight = float(norm_myo_dt_weight)
         self.intra_myo_far_fp_weight = float(intra_myo_far_fp_weight)
         self.empty_slice_fp_weight = float(empty_slice_fp_weight)
+        self.mod_aux_weight = float(mod_aux_weight)
+        self.mod_contrast_weight = float(mod_contrast_weight)
         self.dice_class_weights = dice_class_weights
         self.ce_class_weights = ce_class_weights
         self.masked_negative_slices = masked_negative_slices
@@ -433,13 +439,120 @@ class SegmentationLoss(nn.Module):
             or self.norm_myo_dt_weight > 0
             or self.intra_myo_far_fp_weight > 0
             or self.empty_slice_fp_weight > 0
+            or self.mod_aux_weight > 0
+            or self.mod_contrast_weight > 0
         ):
-            raise ValueError("Batch-level hierarchical/distance losses require accum_steps=1")
+            raise ValueError("Batch-level hierarchical/distance/modality losses require accum_steps=1")
         if (accum_steps > 1 and self.pathology_reduction == "positive"
                 and (self.aar_weight > 0 or self.scar_weight > 0 or self.anat_contrast_weight > 0)):
             raise ValueError("Auxiliary positive reduction requires accum_steps=1; use pathology_reduction='sample'")
 
-    def forward(self, logits, target):
+    @staticmethod
+    def _aux_ce_dice(logits: torch.Tensor, target: torch.Tensor, class_weights: tuple[float, ...]) -> torch.Tensor:
+        logits_f = logits.float()
+        target_l = target.long()
+        ce = F.cross_entropy(logits_f, target_l)
+        probs = logits_f.softmax(1)
+        dice_sum = 0.0
+        n_cls = len(class_weights)
+        for c, w in enumerate(class_weights):
+            p = probs[:, c]
+            y = (target_l == c).float()
+            inter = 2.0 * (p * y).sum() + 1e-5
+            denom = p.square().sum() + y.sum() + 1e-5
+            dice_sum = dice_sum + w * (1.0 - inter / denom)
+        dice = dice_sum / n_cls
+        return 0.4 * ce + 0.6 * dice
+
+    @staticmethod
+    def _supcon_loss(anchors: torch.Tensor, labels: torch.Tensor, temperature: float = 0.07) -> torch.Tensor:
+        m = anchors.shape[0]
+        if m < 2:
+            return anchors.sum() * 0.0
+        sim = torch.matmul(anchors, anchors.T) / temperature
+        sim = sim - sim.max(dim=1, keepdim=True).values.detach()
+        eye = torch.eye(m, device=anchors.device, dtype=torch.bool)
+        pos_mask = labels.unsqueeze(1).eq(labels.unsqueeze(0)) & (~eye)
+        valid = pos_mask.any(dim=1)
+        if not valid.any():
+            return anchors.sum() * 0.0
+        log_denom = torch.logsumexp(sim.masked_fill(eye, -1e9), dim=1, keepdim=True)
+        log_prob = sim - log_denom
+        pos_cnt = pos_mask.float().sum(dim=1).clamp_min(1.0)
+        mean_log_prob_pos = (pos_mask.float() * log_prob).sum(dim=1) / pos_cnt
+        return -mean_log_prob_pos[valid].mean()
+
+    def _compute_modality_contrastive(
+        self,
+        mod_aux: dict,
+        target: torch.Tensor,
+        n_view_list: tuple[int, int, int] = (32, 16, 8),
+    ) -> torch.Tensor:
+        """I-MMSeg-inspired biology-aware multi-scale supervised contrastive alignment.
+
+        Canonical target labels: 0=bg, 1=normal_myocardium, 2=edema, 3=scar.
+          - CINE: contrasts bg (0) vs myocardial_ring ({1,2,3} -> 1).
+          - PSIR (LGE) & T2w: ignores bg (0), contrasts normal_myo (1) vs edema (2) vs scar (3).
+        """
+        protos = mod_aux["class_protos"].float()  # (3, 4, D)
+        device = target.device
+        modality_specs = (
+            ("emb_cine", "cine"),
+            ("emb_psir", "intra_ring"),
+            ("emb_t2w", "intra_ring"),
+        )
+        total_mod_loss = torch.tensor(0.0, device=device, dtype=torch.float32)
+        for key, mode in modality_specs:
+            embeds = mod_aux[key]
+            mod_loss = torch.tensor(0.0, device=device, dtype=torch.float32)
+            for s_idx, (feat, n_view) in enumerate(zip(embeds, n_view_list)):
+                b, d, h, w = feat.shape
+                t_ds = F.interpolate(target.unsqueeze(1).float(), size=(h, w), mode="nearest").squeeze(1).long()
+                if mode == "cine":
+                    t_mod = (t_ds > 0).long()
+                    allowed = (0, 1)
+                    proto_vecs = protos[s_idx, :2]
+                    proto_lbls = torch.tensor((0, 1), device=device, dtype=torch.long)
+                else:
+                    t_mod = t_ds
+                    allowed = (1, 2, 3)
+                    proto_vecs = protos[s_idx, 1:4]
+                    proto_lbls = torch.tensor((1, 2, 3), device=device, dtype=torch.long)
+
+                feat_flat = feat.float().permute(0, 2, 3, 1).reshape(b, h * w, d)
+                t_flat = t_mod.reshape(b, h * w)
+                anc_feats = []
+                anc_lbls = []
+                for bi in range(b):
+                    tb = t_flat[bi]
+                    fb = feat_flat[bi]
+                    for cls_id in allowed:
+                        idx = torch.nonzero(tb == cls_id, as_tuple=False).squeeze(1)
+                        cnt = idx.numel()
+                        if cnt == 0:
+                            continue
+                        if cnt > n_view:
+                            perm = torch.randperm(cnt, device=device)[:n_view]
+                            idx = idx[perm]
+                        anc_feats.append(fb[idx])
+                        anc_lbls.append(torch.full((idx.numel(),), cls_id, device=device, dtype=torch.long))
+                if not anc_feats:
+                    mod_loss = mod_loss + feat.float().sum() * 0.0 + proto_vecs.sum() * 0.0
+                    continue
+                all_feats = torch.cat(anc_feats + [proto_vecs], dim=0)
+                all_feats = F.normalize(all_feats, p=2, dim=1, eps=1e-6)
+                all_lbls = torch.cat(anc_lbls + [proto_lbls], dim=0)
+                mod_loss = mod_loss + self._supcon_loss(all_feats, all_lbls, temperature=0.07)
+            total_mod_loss = total_mod_loss + mod_loss / len(n_view_list)
+        return total_mod_loss / len(modality_specs)
+
+    def forward(self, output, target):
+        mod_aux = None
+        if isinstance(output, dict):
+            logits = output["logits"]
+            mod_aux = output.get("mod_aux")
+        else:
+            logits = output
         # 1. Cross-Entropy (with optional class weights)
         if self.ce_class_weights is not None:
             ce_w = torch.as_tensor(self.ce_class_weights, device=logits.device, dtype=torch.float32)
@@ -865,6 +978,24 @@ class SegmentationLoss(nn.Module):
         else:
             empty_slice_fp_loss = torch.tensor(0.0, device=logits.device, dtype=torch.float32)
 
+        if self.mod_aux_weight > 0.0 and mod_aux is not None:
+            t_ring = (target > 0).long()
+            # PSIR/LGE: 0=bg, 1=non-scar myo (1 or 2), 2=scar (3)
+            t_psir = torch.where(target == 3, 2, (target > 0).long())
+            # T2w: 0=bg, 1=normal_myo (1), 2=AAR/edema_inclusive (2 or 3)
+            t_t2w = torch.where((target == 2) | (target == 3), 2, (target == 1).long())
+            loss_aux_cine = self._aux_ce_dice(mod_aux["aux_cine"], t_ring, (0.5, 1.0))
+            loss_aux_psir = self._aux_ce_dice(mod_aux["aux_psir"], t_psir, (0.5, 1.0, 1.15))
+            loss_aux_t2w = self._aux_ce_dice(mod_aux["aux_t2w"], t_t2w, (0.5, 1.1, 1.1))
+            mod_aux_loss = (loss_aux_cine + loss_aux_psir + loss_aux_t2w) / 3.0
+        else:
+            mod_aux_loss = torch.tensor(0.0, device=logits.device, dtype=torch.float32)
+
+        if self.mod_contrast_weight > 0.0 and mod_aux is not None:
+            mod_contrast_loss = self._compute_modality_contrastive(mod_aux, target)
+        else:
+            mod_contrast_loss = torch.tensor(0.0, device=logits.device, dtype=torch.float32)
+
         total_loss = (
             self.ce_weight * ce
             + self.dice_weight * dice
@@ -877,6 +1008,8 @@ class SegmentationLoss(nn.Module):
             + self.norm_myo_dt_weight * norm_myo_dt_loss
             + self.intra_myo_far_fp_weight * intra_myo_far_fp_loss
             + self.empty_slice_fp_weight * empty_slice_fp_loss
+            + self.mod_aux_weight * mod_aux_loss
+            + self.mod_contrast_weight * mod_contrast_loss
         )
         result = {
             "loss": total_loss,
@@ -895,6 +1028,10 @@ class SegmentationLoss(nn.Module):
             result["intra_myo_far_fp_loss"] = intra_myo_far_fp_loss
         if self.empty_slice_fp_weight > 0.0:
             result["empty_slice_fp_loss"] = empty_slice_fp_loss
+        if self.mod_aux_weight > 0.0:
+            result["mod_aux_loss"] = mod_aux_loss
+        if self.mod_contrast_weight > 0.0:
+            result["mod_contrast_loss"] = mod_contrast_loss
         return result
 
 

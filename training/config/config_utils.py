@@ -59,6 +59,8 @@ YAML_KEY_TO_DEST: dict[str, str] = {
     "loss.norm_myo_dt_weight": "norm_myo_dt_weight",
     "loss.intra_myo_far_fp_weight": "intra_myo_far_fp_weight",
     "loss.empty_slice_fp_weight": "empty_slice_fp_weight",
+    "loss.mod_aux_weight": "mod_aux_weight",
+    "loss.mod_contrast_weight": "mod_contrast_weight",
     "loss.dice_class_weights": "dice_class_weights",
     "loss.dice_normalization": "dice_normalization",
     "loss.ce_class_weights": "ce_class_weights",
@@ -132,6 +134,7 @@ MODEL_KEYS = {
     "model.fusion_version", "model.use_pos_enc",
     "model.use_skip_gates", "model.use_film", "model.use_cross_attention",
     "model.bottleneck_fusion", "model.skip_fusion", "model.decoder_refinement",
+    "model.head_mode", "model.use_modality_aux",
 }
 
 

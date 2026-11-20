@@ -14,7 +14,12 @@ from training.models.modules.m2_plus import (
     BOTTLENECK_FUSION_MODES,
 )
 from training.models.modules.fusion import MEAN_SKIP_FUSION, SKIP_FUSION_MODES
-from training.models.modules.decoder import NO_DECODER_REFINEMENT, DECODER_REFINEMENT_MODES
+from training.models.modules.decoder import (
+    NO_DECODER_REFINEMENT,
+    DECODER_REFINEMENT_MODES,
+    STATIC_HEAD,
+    HEAD_MODES,
+)
 
 
 def model_architecture(config):
@@ -44,7 +49,7 @@ def validate_model_config(config):
     for key in ("latent_dim", "sspanet_reduction"):
         if key in config and (type(config[key]) is not int or config[key] < 1):
             raise ValueError(f"{key} must be a positive integer")
-    for key in ("use_pos_enc", "use_skip_gates", "use_film", "use_cross_attention"):
+    for key in ("use_pos_enc", "use_skip_gates", "use_film", "use_cross_attention", "use_modality_aux"):
         if key in config and not isinstance(config[key], bool):
             raise ValueError(f"{key} must be a boolean")
     if config.get("bottleneck_fusion", STANDARD_BOTTLENECK) not in BOTTLENECK_FUSION_MODES:
@@ -57,14 +62,19 @@ def validate_model_config(config):
         raise ValueError(
             f"Unknown decoder_refinement {config.get('decoder_refinement')!r}; expected {DECODER_REFINEMENT_MODES}"
         )
+    if config.get("head_mode", STATIC_HEAD) not in HEAD_MODES:
+        raise ValueError(f"Unknown head_mode {config.get('head_mode')!r}; expected {HEAD_MODES}")
     if model_architecture(config) != "lightweight_m2_plus":
         for key in ("use_skip_gates", "use_film", "use_cross_attention"):
             if config.get(key) is False:
                 raise ValueError(f"{key}=False is only supported for Lightweight M2-Plus")
+        if config.get("use_modality_aux", False) is True:
+            raise ValueError("use_modality_aux=True is only supported for Lightweight M2-Plus")
         for key, default in (
             ("bottleneck_fusion", STANDARD_BOTTLENECK),
             ("skip_fusion", MEAN_SKIP_FUSION),
             ("decoder_refinement", NO_DECODER_REFINEMENT),
+            ("head_mode", STATIC_HEAD),
         ):
             if config.get(key, default) != default:
                 raise ValueError(f"{key}={config.get(key)!r} is only supported for Lightweight M2-Plus")

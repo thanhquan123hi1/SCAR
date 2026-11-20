@@ -228,7 +228,8 @@ def _validate_resume_loss_config(saved_args: dict, args, saved_version: int | No
                 "boundary_dt_region_weights", "boundary_dt_max_steps",
                 "boundary_dt_empty_val", "boundary_dt_empty_vals", "boundary_dt_margin", "boundary_dt_max_norm",
                 "boundary_dt_myo_fp_alpha", "norm_myo_dt_weight", "intra_myo_far_fp_weight",
-                "empty_slice_fp_weight", "dice_class_weights", "ce_class_weights"):
+                "empty_slice_fp_weight", "mod_aux_weight", "mod_contrast_weight",
+                "dice_class_weights", "ce_class_weights"):
         defaults = {
             "dice_class_weights": None,
             "ce_class_weights": None,
@@ -300,6 +301,8 @@ def _resume_model_config(config):
         normalized.setdefault("bottleneck_fusion", STANDARD_BOTTLENECK)
         normalized.setdefault("skip_fusion", MEAN_SKIP_FUSION)
         normalized.setdefault("decoder_refinement", NO_DECODER_REFINEMENT)
+        normalized.setdefault("head_mode", "static")
+        normalized.setdefault("use_modality_aux", False)
     return normalized
 
 
@@ -599,6 +602,8 @@ def trainer_Myops(args, model, snapshot_path):
         norm_myo_dt_weight=getattr(args, "norm_myo_dt_weight", 0.0),
         intra_myo_far_fp_weight=getattr(args, "intra_myo_far_fp_weight", 0.0),
         empty_slice_fp_weight=getattr(args, "empty_slice_fp_weight", 0.0),
+        mod_aux_weight=getattr(args, "mod_aux_weight", 0.0),
+        mod_contrast_weight=getattr(args, "mod_contrast_weight", 0.0),
         dice_class_weights=getattr(args, "dice_class_weights", None),
         ce_class_weights=getattr(args, "ce_class_weights", None),
         pathology_reduction=getattr(args, "pathology_reduction", "positive"),

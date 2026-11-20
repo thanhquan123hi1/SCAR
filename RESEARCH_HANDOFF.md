@@ -1,14 +1,16 @@
 # Research Handoff — Lightweight M2-Plus Optimization on MyoPS++
 
 > Tài liệu bàn giao toàn bộ quá trình thực nghiệm, kết quả định lượng, chẩn đoán lỗi, mã nguồn đã chỉnh sửa, vị trí tài nguyên đã sao lưu và kế hoạch bước tiếp theo để phiên làm việc sau có thể tiếp tục ngay mà không cần train/test lại hay phân tích lại từ đầu.
-> **Mốc tốt nhất hiện tại (`seed=1234`, `test_vol` MyoPS++ — cập nhật đến hết Round 8, 26 trial):**
-> - **#1 Tổng thể theo tiêu chí Pass & HD95 (`6/8` pass — Round 4):** **`R4_L5_CalibTversky`** ([lightweight_e5_b1r_s3_l5_calib_tversky.yaml](training/config/models/lightweight_e5_b1r_s3_l5_calib_tversky.yaml), `15,726,455` params, `9.4695 G` FLOPs) — **`AvgPathIncl = 72.09% / 10.72 mm`** *(duy nhất vượt ngưỡng `≤ 10.93 mm`)*, **`Scar = 70.42% / 7.65 mm`** *(Best Scar HD95)*, `EdemaIncl = 73.76% / 13.79 mm`, `MyoRing = 88.37% / 2.74 mm`, `FP3003 = 22`.
-> - **#2 Tổng thể & #1 Scar Dice / MyoRing HD95 (`5/8` pass — Round 6):** **`R6_L8_MildScaleKarimi`** ([lightweight_e5_b1r_s3_l8_mild_scale_karimi.yaml](training/config/models/lightweight_e5_b1r_s3_l8_mild_scale_karimi.yaml), `15,726,455` params, `9.4695 G` FLOPs) — **`AvgPathIncl = 72.90% / 11.06 mm`**, **`Scar = 72.29% / 7.78 mm`**, **`MyoRing = 88.46% / 2.70 mm`** *(chỉ còn cách ngưỡng `2.67 mm` đúng `0.03 mm`)*, `FP3003 = 26`.
+> **Baseline chính thức hiện tại (chốt từ `2026-11-20` trên cả MyoPS++ & MyoPS380):**
+> - **Baseline mới (`6/8` pass trên MyoPS++, #1 toàn diện trên MyoPS380):** **`R4_L5_CalibTversky`** ([lightweight_e5_b1r_s3_l5_calib_tversky.yaml](training/config/models/lightweight_e5_b1r_s3_l5_calib_tversky.yaml), `15,726,455` params, `9.4695 G` FLOPs)
+>   - **MyoPS++ (`test_vol` 16 ca):** **`AvgPathIncl = 72.09% / 10.72 mm`** *(duy nhất vượt ngưỡng `≤ 10.93 mm`)*, **`Scar = 70.42% / 7.65 mm`** *(Best Scar HD95)*, `EdemaIncl = 73.76% / 13.79 mm`, `MyoRing = 88.37% / 2.74 mm`, `FP3003 = 22`.
+>   - **MyoPS380 (`test_vol` 76 ca, `myops380_no_val`):** **`AvgPathIncl = 74.17%`**, **`Scar = 73.30% / 3.84 vox`** (`P=75.04%, R=74.40%`), **`EdemaIncl = 75.04% / 4.27 vox`**, `MyoRing = 87.38% / 1.07 vox`, `AvgPathExcl = 56.49%`.
+> - **#2 Tổng thể & #1 Scar Dice trên MyoPS++ (`5/8` pass — Round 6):** **`R6_L8_MildScaleKarimi`** ([lightweight_e5_b1r_s3_l8_mild_scale_karimi.yaml](training/config/models/lightweight_e5_b1r_s3_l8_mild_scale_karimi.yaml), `15,726,455` params, `9.4695 G` FLOPs) — MyoPS++: `AvgPathIncl = 72.90% / 11.06 mm`, `Scar = 72.29% / 7.78 mm`, `MyoRing = 88.46% / 2.70 mm`, `FP3003 = 26`; MyoPS380: `AvgPathIncl = 72.69%`, `Scar = 71.58% / 4.24 vox`, `EdemaIncl = 73.80% / 4.70 vox`.
 > - **#3 Tổng thể & #1 Kiến trúc thuần (`5/8` pass — Round 4):** **`R4_A3_B2SA_S3AnatMean`** ([lightweight_e5_b2sa_s3_anat_mean.yaml](training/config/models/lightweight_e5_b2sa_s3_anat_mean.yaml), `17,292,842` params, `9.8039 G` FLOPs) — **`AvgPathIncl = 72.61% / 11.71 mm`**, **`EdemaIncl = 74.57%`** *(Best)*, `AvgPathExcl = 58.34%`, `Scar = 70.65% / 9.53 mm`.
 > - **#1 Combo (`5/8` pass — Round 8):** **`R8_C8_E5B1RS3_RingCtx_L10`** (`15.76M / 10.61G`, `AvgPathIncl = 72.23% / 11.68 mm`, `EdemaIncl = 74.22%`, `MyoRing = 88.40% / 2.74 mm`) & **`R8_C7_B2_S3AnatMean_L10`** (`5/8`, `AvgPathIncl = 72.07% / 11.58 mm`, `Scar HD95 = 8.99 mm`).
 > - **Kỷ lục Dice toàn chiến dịch (`4/8` pass — Round 7):** **`R7_C6_B2GSA_S3AnatMean_RingCtx_L9`** ([lightweight_e5_b2gsa_s3_anat_mean_ring_ctx_l9.yaml](training/config/models/lightweight_e5_b2gsa_s3_anat_mean_ring_ctx_l9.yaml), `17,329,643` params, `10.9474 G` FLOPs) — **`AvgPathIncl Dice = 72.97%`**, **`AvgPathExcl Dice = 59.25%`**, **`EdemaExcl Dice = 46.77%`**.
-> - **Mốc nền Wave 4–6 (Base Loss, tham chiếu trên MyoPS380):** **`E5-B1R-S3-NormSkip`** (`15.73M / 9.47G`, MyoPS380: `Scar = 72.05% / 4.30 vox`, `AvgPathIncl = 73.39%`) và **`E5-B1R-S3AnatMean`** (Wave 6B).
-> **Cập nhật lần cuối:** `2026-11-19 14:48 UTC` (Hoàn thành đủ Wave 7 + Rounds 1–8 Autoresearch `26` trial; đã đồng bộ log/metric + Top 3 checkpoints lên Drive và push GitHub)
+> - **Mốc nền cũ (Wave 4–6, Base Loss):** **`E5-B1R-S3-NormSkip`** (`15.73M / 9.47G`, MyoPS380: `Scar = 72.05% / 4.30 vox`, `AvgPathIncl = 73.39%`).
+> **Cập nhật lần cuối:** `2026-11-20 10:53 UTC` (Chốt **`R4_L5_CalibTversky`** làm **Baseline chính thức** sau khi hoàn tất đối chứng 300 epochs trên **MyoPS380** giữa `R4_L5_CalibTversky` và `R6_L8_MildScaleKarimi`)
 
 ---
 
@@ -467,3 +469,33 @@ Mục tiêu chiến dịch ngày `2026-11-19` là tối ưu có hệ thống c�
      1) **`MyoRing HD95 <= 2.67 mm`** *(rất gần: `R6_L8` đã đạt `2.70 mm` — chỉ lệch `0.03 mm`)* $\Rightarrow$ tinh chỉnh nhẹ `ring_beta` / `ring_hd_weight` quanh cấu hình `R4_L5` + `R6_L8`.
      2) **`EdemaIncl HD95 <= 12.21 mm`** *(hiện tốt nhất là `13.13 mm` ở `R5_C3`, còn cách `0.92 mm`)* $\Rightarrow$ phân tích per-case outlier Edema trên `R4_L5`, `R6_L8`, `R8_C8` để xử lý dứt điểm các ca gây kéo dài HD95.
    - Sau khi chốt model vượt `7/8–8/8` trên MyoPS++, chạy **kiểm chứng đa seed (`2026`, `1024`)** và chuyển sang **MyoPS380**.
+
+
+---
+
+## 10. Chốt Baseline Mới (`R4_L5_CalibTversky`) & Phân tích Trên MyoPS380 (`2026-11-20`)
+
+Sau khi đối chứng trực tiếp trên **MyoPS380** (`myops380_train304_test76_last_v1`, `304` train / `76` test, `300` epochs, `bf16`, `seed=1234`), **`R4_L5_CalibTversky`** vượt toàn diện cả mốc nền cũ (`E5-B1R-S3-NormSkip`) lẫn `R6_L8_MildScaleKarimi`, và được **chốt làm Baseline chính thức mới** cho các nghiên cứu tiếp theo.
+
+### 10.1 Bảng đối chiếu trên MyoPS380 (`test_vol`, 76 ca, đơn vị khoảng cách: voxel)
+
+| Model | Avg Path Incl Dice | Avg Path Excl Dice | Scar Dice / P / R / HD95 | Edema Incl Dice / P / R / HD95 | Edema Excl Dice / HD95 | NormMyo Dice / HD95 | MyoRing Dice / HD95 |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **`E5-B1R-S3-NormSkip`** *(Baseline cũ)* | `73.39%` | — | `72.05% / — / — / 4.30` | — | — | — | — |
+| **`R6_L8_MildScaleKarimi`** | `72.69%` | `54.65%` | `71.58% / 71.76% / 74.44% / 4.24` | `73.80% / 76.82% / 74.03% / 4.70` | `37.72% / 8.86` | `78.11% / 2.45` | `86.60% / 1.11` |
+| **`R4_L5_CalibTversky` *(Baseline mới)*** | **`74.17%`** | **`56.49%`** | **`73.30% / 75.04% / 74.40% / 3.84`** | **`75.04% / 78.67% / 74.39% / 4.27`** | **`39.68% / 8.24`** | **`79.10% / 2.22`** | **`87.38% / 1.07`** |
+
+### 10.2 Phân tích: Tại sao `R4_L5_CalibTversky` tốt & generalize vượt trội?
+
+1. **Khung kiến trúc Non-SA gọn nhẹ, không xung đột với Boundary Loss (`E5-B1R-S3-NormSkip`, `15.73M / 9.47G`):**
+   - Dùng `bottleneck_fusion: residual_contrast` (`B1R`) + `skip_fusion: norm_contrast` (`S3`), loại bỏ hoàn toàn 2D Self-Attention (`B2SA`).
+   - Thực nghiệm Round 5–8 chứng minh `B2SA` xung đột với `Karimi HD-DT` (làm `Scar HD95` tăng từ `7.65 mm` lên `>10.7 mm`), trong khi `E5-B1R-S3` giữ gradient biên sạch và ổn định.
+2. **Tỷ lệ `CE(0.40) + Dice(0.60)` và Class Weights hiệu chỉnh cân bằng:**
+   - Tăng `ce_weight` từ `0.20` lên `0.40` giúp siết ranh giới pixel-level giữa `Edema` và `Normal Myo`.
+   - `ce_class_weights: [0.85, 1.05, 0.85, 1.15]` & `dice_class_weights: [0.5, 1.1, 0.80, 1.1]` giảm nhẹ trọng số `Edema` (`0.85 / 0.80`) để chặn over-segmentation, đồng thời ưu tiên `Normal Myo` (`1.05 / 1.1`) và `Scar` (`1.15 / 1.1`).
+3. **Hiệu chỉnh Precision/Recall bất đối xứng qua Hierarchical Tversky (`hier_dice_weight: 0.25`):**
+   - **`ring_tversky_beta: 0.60`** (`> 0.5`): phạt False Negative mạnh hơn để bảo toàn tính liên tục của vòng cơ tim (`MyoRing = 87.38% / 1.07 vox` trên MyoPS380; `88.37% / 2.74 mm` trên MyoPS++).
+   - **`aar_tversky_beta: 0.42`** (`< 0.5`): phạt **False Positive mạnh hơn False Negative** trên vùng bệnh lý (`{2,3}`). Đây là yếu tố quyết định giúp triệt tiêu nhiễu dương tính giả (`FP3003` giảm từ `96` xuống `22` trên MyoPS++) và giữ **Precision vượt trội** trên MyoPS380 (`Scar P = 75.04%` vs `71.76%` của `R6_L8`, `EdemaIncl P = 78.67%` vs `76.82%`, trong khi Recall vẫn giữ nguyên ~`74.4%`).
+4. **Karimi HD-DT đồng nhất (`scale: 16.0`, `max_steps: 32`, `empty_val: 1.5`) không bị over-penalize khi đổi tập dữ liệu:**
+   - Khác với `R6_L8_MildScaleKarimi` (dùng multi-scale `[8.0, 13.0, 15.0]`, `empty_val: 1.75`, `ring_beta: 0.62`), `R4_L5` dùng một `scale: 16.0` đồng nhất và `empty_val: 1.5` vừa phải hơn.
+   - Khi chuyển sang tập đa dạng và nhiều lát cắt hơn như **MyoPS380** (`1,972` lát train), `R6_L8` bị tụt Precision mạnh (`-3.28%` ở Scar), còn `R4_L5` **generalize rất ổn định**: `AvgPathIncl` tăng lên **`74.17%`** (`+1.48%` so với `R6_L8`, `+0.78%` so với `E5-B1R-S3-NormSkip`), `Scar HD95` giảm xuống **`3.84 vox`** (`-0.40 vox` so với `R6_L8`, `-0.46 vox` so với `E5-B1R-S3-NormSkip`).
