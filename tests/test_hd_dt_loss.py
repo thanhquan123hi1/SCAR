@@ -331,5 +331,72 @@ def test_myo_fp_alpha_and_norm_myo_dt_loss():
         SegmentationLoss(norm_myo_dt_weight=-0.1)
 
 
+def test_karimi_qlog_empty_vals_and_intra_myo_far_fp():
+    torch.manual_seed(123)
+    target = torch.zeros(2, 64, 64, dtype=torch.long)
+    target[0, 8:56, 8:56] = 1
+    target[0, 12:20, 12:20] = 2  # GT Edema top-left
+
+    # High-confidence Far-FP in Normal Myocardium on opposite wall (44:52, 44:52), distance > 20 px
+    logits = torch.full((2, 4, 64, 64), -3.0)
+    logits[:, 0] = 4.0
+    logits[0, 1, 8:56, 8:56] = 4.0
+    logits[0, 2, 12:20, 12:20] = 4.0
+    logits[0, 2, 44:52, 44:52] = 6.5  # p_edema ~ 0.92 inside target == 1
+    logits.requires_grad_(True)
+
+    crit_mse = SegmentationLoss(
+        ce_weight=0.0, dice_weight=0.0, boundary_dt_weight=0.25, boundary_dt_mode="karimi_mse",
+        boundary_dt_scales=[9.0, 15.5, 16.0], boundary_dt_empty_vals=[1.5, 1.5, 2.5],
+        negative_slice_handling="batch", include_background=True, dice_normalization="classes",
+    )
+    out_mse = crit_mse(logits, target)
+    out_mse["loss"].backward()
+    grad_mse_far = logits.grad[0, 2, 44:52, 44:52].abs().mean().item()
+
+    logits.grad = None
+    crit_qlog = SegmentationLoss(
+        ce_weight=0.0, dice_weight=0.0, boundary_dt_weight=0.25, boundary_dt_mode="karimi_qlog",
+        boundary_dt_scales=[9.0, 15.5, 16.0], boundary_dt_empty_vals=[1.5, 1.5, 2.5],
+        negative_slice_handling="batch", include_background=True, dice_normalization="classes",
+    )
+    out_qlog = crit_qlog(logits, target)
+    out_qlog["loss"].backward()
+    grad_qlog_far = logits.grad[0, 2, 44:52, 44:52].abs().mean().item()
+    assert grad_qlog_far > 3.0 * grad_mse_far
+
+    # bf16 stability check
+    logits_bf = logits.detach().clone().requires_grad_(True)
+    out_bf = crit_qlog(logits_bf.to(torch.bfloat16), target)
+    assert torch.isfinite(out_bf["loss"])
+    out_bf["loss"].backward()
+    assert torch.isfinite(logits_bf.grad).all()
+
+    # intra_myo_far_fp_loss: background logit gradient must be 0.0 inside myocardium
+    logits_intra = logits.detach().clone().requires_grad_(True)
+    crit_intra = SegmentationLoss(
+        ce_weight=0.0, dice_weight=0.0, intra_myo_far_fp_weight=0.15,
+        negative_slice_handling="batch", include_background=True, dice_normalization="classes",
+    )
+    out_intra = crit_intra(logits_intra, target)
+    assert "intra_myo_far_fp_loss" in out_intra and out_intra["intra_myo_far_fp_loss"].item() > 0.0
+    out_intra["loss"].backward()
+    torch.testing.assert_close(
+        logits_intra.grad[:, 0], torch.zeros_like(logits_intra.grad[:, 0]), atol=1e-6, rtol=0
+    )
+    assert logits_intra.grad[0, 2, 44:52, 44:52].abs().mean().item() > 0.0
+    # Zero gradient on GT background (target == 0) and within 8 px of GT AAR
+    assert logits_intra.grad[0, 2, 0:6, 0:6].abs().max().item() == 0.0
+    assert logits_intra.grad[0, 2, 20:24, 20:24].abs().max().item() == 0.0
+
+    with pytest.raises(ValueError, match="accum_steps=1"):
+        SegmentationLoss(intra_myo_far_fp_weight=0.1).validate_accumulation(2)
+    with pytest.raises(ValueError, match="boundary_dt_empty_vals"):
+        SegmentationLoss(boundary_dt_empty_vals=[1.5, -0.1, 2.0])
+    with pytest.raises(ValueError, match="intra_myo_far_fp_weight"):
+        SegmentationLoss(intra_myo_far_fp_weight=-0.2)
+
+
+
 
 

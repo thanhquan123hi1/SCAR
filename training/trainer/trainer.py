@@ -226,8 +226,8 @@ def _validate_resume_loss_config(saved_args: dict, args, saved_version: int | No
                 "boundary_dt_weight", "boundary_dt_slice_weight", "boundary_dt_mode",
                 "boundary_dt_power", "boundary_dt_scale", "boundary_dt_scales",
                 "boundary_dt_region_weights", "boundary_dt_max_steps",
-                "boundary_dt_empty_val", "boundary_dt_margin", "boundary_dt_max_norm",
-                "boundary_dt_myo_fp_alpha", "norm_myo_dt_weight",
+                "boundary_dt_empty_val", "boundary_dt_empty_vals", "boundary_dt_margin", "boundary_dt_max_norm",
+                "boundary_dt_myo_fp_alpha", "norm_myo_dt_weight", "intra_myo_far_fp_weight",
                 "dice_class_weights", "ce_class_weights"):
         defaults = {
             "dice_class_weights": None,
@@ -242,6 +242,7 @@ def _validate_resume_loss_config(saved_args: dict, args, saved_version: int | No
             "boundary_dt_region_weights": None,
             "boundary_dt_max_steps": 32,
             "boundary_dt_empty_val": 1.0,
+            "boundary_dt_empty_vals": None,
             "boundary_dt_margin": 0.0,
             "boundary_dt_max_norm": None,
         }
@@ -591,10 +592,12 @@ def trainer_Myops(args, model, snapshot_path):
         boundary_dt_region_weights=getattr(args, "boundary_dt_region_weights", None),
         boundary_dt_max_steps=getattr(args, "boundary_dt_max_steps", 32),
         boundary_dt_empty_val=getattr(args, "boundary_dt_empty_val", 1.0),
+        boundary_dt_empty_vals=getattr(args, "boundary_dt_empty_vals", None),
         boundary_dt_margin=getattr(args, "boundary_dt_margin", 0.0),
         boundary_dt_max_norm=getattr(args, "boundary_dt_max_norm", None),
         boundary_dt_myo_fp_alpha=getattr(args, "boundary_dt_myo_fp_alpha", 0.0),
         norm_myo_dt_weight=getattr(args, "norm_myo_dt_weight", 0.0),
+        intra_myo_far_fp_weight=getattr(args, "intra_myo_far_fp_weight", 0.0),
         dice_class_weights=getattr(args, "dice_class_weights", None),
         ce_class_weights=getattr(args, "ce_class_weights", None),
         pathology_reduction=getattr(args, "pathology_reduction", "positive"),
