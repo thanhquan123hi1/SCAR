@@ -372,8 +372,9 @@ def test_karimi_qlog_empty_vals_and_intra_myo_far_fp():
     out_bf["loss"].backward()
     assert torch.isfinite(logits_bf.grad).all()
 
-    # intra_myo_far_fp_loss: zero gradient outside myocardium (target == 0), strong gradient
-    # at far intra-myo AAR FP (>14 px), and boundary stability (no 1/p_ring explosion)
+    # intra_myo_far_fp_loss: strictly Background-invariant (grad[:, 0] == 0 everywhere),
+    # strong gradient at far intra-myo AAR FP (>8 px), boundary stability via p_ring_det,
+    # and empty-Scar Scar-in-Edema suppression
     logits_intra = logits.detach().clone().requires_grad_(True)
     crit_intra = SegmentationLoss(
         ce_weight=0.0, dice_weight=0.0, intra_myo_far_fp_weight=0.15,
@@ -382,18 +383,23 @@ def test_karimi_qlog_empty_vals_and_intra_myo_far_fp():
     out_intra = crit_intra(logits_intra, target)
     assert "intra_myo_far_fp_loss" in out_intra and out_intra["intra_myo_far_fp_loss"].item() > 0.0
     out_intra["loss"].backward()
-    # Strictly zero gradient on GT background (target == 0)
+    # Strictly zero gradient on GT background (target == 0) and on class 0 everywhere inside myocardium
     torch.testing.assert_close(
         logits_intra.grad[:, :, 0:6, 0:6],
         torch.zeros_like(logits_intra.grad[:, :, 0:6, 0:6]),
         atol=1e-7,
         rtol=0,
     )
+    torch.testing.assert_close(
+        logits_intra.grad[:, 0],
+        torch.zeros_like(logits_intra.grad[:, 0]),
+        atol=1e-7,
+        rtol=0,
+    )
     assert logits_intra.grad[0, 2, 44:52, 44:52].abs().mean().item() > 0.0
-    # Nearby myocardium (within 14 px of GT AAR) gets zero AAR-far penalty on class 2
-    assert logits_intra.grad[0, 2, 20:24, 20:24].abs().max().item() < 1e-5
-    # Conditional ratio preservation inside target==1: p_0 and p_1 receive gradients strictly
-    # proportional to their softmax probabilities, preventing boundary spikes when p_ring is tiny
+    # Nearby myocardium (within 8 px of GT AAR) gets zero AAR-far penalty on class 2
+    assert logits_intra.grad[0, 2, 20:24, 20:24].abs().max().item() < 1e-6
+    # Boundary stability: tiny p_ring (p_0~0.98, p_1~0.001, p_2~0.018) is damped by p_ring_det
     logits_edge = torch.full((1, 4, 32, 32), -8.0)
     logits_edge[:, 0] = 4.0  # p_0 ~ 0.98
     t_edge = torch.zeros(1, 32, 32, dtype=torch.long)
@@ -403,7 +409,61 @@ def test_karimi_qlog_empty_vals_and_intra_myo_far_fp():
     logits_edge[0, 2, 20:22, 20:22] = 0.0   # p_2 ~ 0.018
     logits_edge.requires_grad_(True)
     crit_intra(logits_edge, t_edge)["loss"].backward()
-    assert logits_edge.grad[0, 2, 20:22, 20:22].abs().max().item() < 1e-4
+    assert logits_edge.grad[0, 2, 20:22, 20:22].abs().max().item() < 5e-4
+
+    # Scar-in-Edema suppression on empty-Scar slice (Case3003 z=2 pattern):
+    # pushes Scar (3) down and Edema (2) up while keeping class 0 and class 1 gradients ~0
+    t_s3003 = torch.zeros(2, 64, 64, dtype=torch.long)
+    t_s3003[0, 8:56, 8:56] = 1
+    t_s3003[0, 12:24, 12:24] = 2  # GT Edema, empty Scar
+    t_s3003[1, 8:56, 8:56] = 1
+    t_s3003[1, 12:24, 12:24] = 3  # Slice 1 has GT Scar
+    log_s3003 = torch.full((2, 4, 64, 64), -3.0)
+    log_s3003[:, 0] = 4.0
+    log_s3003[0, 1, 8:56, 8:56] = 4.0
+    log_s3003[0, 2, 12:24, 12:24] = 4.0
+    log_s3003[0, 3, 12:24, 12:24] = 6.0  # False Scar inside GT Edema
+    log_s3003.requires_grad_(True)
+    crit_intra(log_s3003, t_s3003)["loss"].backward()
+    assert log_s3003.grad[0, 3, 12:24, 12:24].mean().item() > 1e-5
+    assert log_s3003.grad[0, 2, 12:24, 12:24].mean().item() < -1e-5
+    torch.testing.assert_close(
+        log_s3003.grad[:, 0], torch.zeros_like(log_s3003.grad[:, 0]), atol=1e-7, rtol=0
+    )
+
+    # karimi_fp_qlog: asymmetric FP qlog + smooth quadratic FN, and empty_vals only inflates w_gt
+    log_fp = logits.detach().clone().requires_grad_(True)
+    crit_fp_qlog = SegmentationLoss(
+        ce_weight=0.0, dice_weight=0.0, boundary_dt_weight=0.25, boundary_dt_mode="karimi_fp_qlog",
+        boundary_dt_scales=[9.0, 15.5, 16.0], boundary_dt_empty_vals=[1.5, 1.5, 2.5],
+        negative_slice_handling="batch", include_background=True, dice_normalization="classes",
+    )
+    out_fp_qlog = crit_fp_qlog(log_fp, target)
+    out_fp_qlog["loss"].backward()
+    grad_fp_qlog_far = log_fp.grad[0, 2, 44:52, 44:52].abs().mean().item()
+    assert grad_fp_qlog_far > 3.0 * grad_mse_far
+    # Check w_pr on missing small Scar does NOT get inflated by empty_vals[2]=2.5
+    t_small_scar = torch.zeros(1, 64, 64, dtype=torch.long)
+    t_small_scar[0, 16:20, 16:20] = 3
+    log_miss = torch.full((1, 4, 64, 64), -3.0)
+    log_miss[:, 0] = 5.0  # empty predicted Scar -> w_pr active
+    log_miss.requires_grad_(True)
+    crit_b25 = SegmentationLoss(
+        ce_weight=0.0, dice_weight=0.0, boundary_dt_weight=0.25, boundary_dt_mode="karimi_fp_qlog",
+        boundary_dt_empty_val=1.5, boundary_dt_empty_vals=[1.5, 1.5, 2.5],
+        negative_slice_handling="batch", include_background=True, dice_normalization="classes",
+    )
+    crit_b15 = SegmentationLoss(
+        ce_weight=0.0, dice_weight=0.0, boundary_dt_weight=0.25, boundary_dt_mode="karimi_fp_qlog",
+        boundary_dt_empty_val=1.5, boundary_dt_empty_vals=[1.5, 1.5, 1.5],
+        negative_slice_handling="batch", include_background=True, dice_normalization="classes",
+    )
+    crit_b25(log_miss, t_small_scar)["loss"].backward()
+    g25 = log_miss.grad[0, 3, 16:20, 16:20].clone()
+    log_miss.grad = None
+    crit_b15(log_miss, t_small_scar)["loss"].backward()
+    g15 = log_miss.grad[0, 3, 16:20, 16:20].clone()
+    torch.testing.assert_close(g25, g15, rtol=1e-6, atol=1e-7)
 
     # empty_slice_fp_weight: penalizes Scar FP inside GT Edema on empty-Scar slice
     # while leaving positive-Scar slices untouched on empty_slice_fp_loss

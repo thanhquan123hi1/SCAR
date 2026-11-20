@@ -13,6 +13,7 @@ NORM_CONTRAST_ANAT_MEAN_SKIP_FUSION = "norm_contrast_anat_mean"
 NORM_CONTRAST_MS_SKIP_FUSION = "norm_contrast_ms"
 NORM_CONTRAST_ANAT_MEAN_MS_SKIP_FUSION = "norm_contrast_anat_mean_ms"
 NORM_CONTRAST_ANAT_COHERENT_SKIP_FUSION = "norm_contrast_anat_coherent"
+NORM_CONTRAST_PROTO_SKIP_FUSION = "norm_contrast_proto"
 SKIP_FUSION_MODES = (
     MEAN_SKIP_FUSION,
     MODALITY_WEIGHTED_SKIP_FUSION,
@@ -23,6 +24,7 @@ SKIP_FUSION_MODES = (
     NORM_CONTRAST_MS_SKIP_FUSION,
     NORM_CONTRAST_ANAT_MEAN_MS_SKIP_FUSION,
     NORM_CONTRAST_ANAT_COHERENT_SKIP_FUSION,
+    NORM_CONTRAST_PROTO_SKIP_FUSION,
 )
 
 
@@ -682,6 +684,66 @@ class CoherentAnatContrastSkipFusion(_BaseAnatMeanContrastSkipFusion):
         return base + self.gamma * self.contrast_fuse(feat)
 
 
+class ResidualProtoNormalizedContrastSkipFusion(NormalizedContrastSkipFusion):
+    """S3 skip fusion enhanced with CINE-guided myocardial prototype contrast calibration.
+
+    Preserves NormalizedContrastSkipFusion (S3)'s exact align_proj, contrast_fuse, and gamma
+    initialization while adding a zero-initialized CINE-wall-gated regional prototype
+    calibration branch across all skip resolutions (64x64, 32x32, 16x16).
+    """
+
+    def __init__(self, channels: int):
+        super().__init__(channels)
+        mid = max(channels // 2, 32)
+        gn_mid = _gn_groups(mid, 16)
+        gn_out = _gn_groups(channels, 16)
+        gate_mid = max(mid // 4, 16)
+        gn_gate = _gn_groups(gate_mid, 8)
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(202742 + channels)
+            self.myo_gate = nn.Sequential(
+                nn.Conv2d(mid, gate_mid, kernel_size=3, padding=1, bias=False),
+                nn.GroupNorm(num_groups=gn_gate, num_channels=gate_mid),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(gate_mid, 1, kernel_size=1, bias=True),
+                nn.Sigmoid(),
+            )
+            self.proto_scale = nn.Parameter(torch.full((1, mid * 4, 1, 1), 0.5))
+            self.proto_branch = nn.Sequential(
+                nn.Conv2d(mid * 4, mid, kernel_size=1, bias=False),
+                nn.GroupNorm(num_groups=gn_mid, num_channels=mid),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(mid, mid, kernel_size=3, padding=1, groups=mid, bias=False),
+                nn.GroupNorm(num_groups=gn_mid, num_channels=mid),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(mid, channels, kernel_size=1, bias=False),
+                nn.GroupNorm(num_groups=gn_out, num_channels=channels),
+            )
+            self.proto_gamma = nn.Parameter(torch.zeros(1, channels, 1, 1))
+
+    def forward(self, cine: torch.Tensor, psir: torch.Tensor, t2w: torch.Tensor) -> torch.Tensor:
+        base = (cine + psir + t2w) / 3.0
+        q_cine = self.align_proj(cine)
+        k_psir = self.align_proj(psir)
+        k_t2w = self.align_proj(t2w)
+
+        d_scar_cine = torch.relu(k_psir - q_cine)
+        d_scar_t2 = torch.relu(k_psir - k_t2w)
+        d_edema_pure = torch.relu(k_t2w - k_psir)
+        d_aar = torch.relu(k_t2w - q_cine)
+        diff_cat = torch.cat((d_scar_cine, d_scar_t2, d_edema_pure, d_aar), dim=1)
+        delta_s3 = self.contrast_fuse(diff_cat)
+
+        w_myo = self.myo_gate(q_cine)
+        w_sum = w_myo.sum(dim=(2, 3), keepdim=True).clamp_min(1e-4)
+        proto_myo = (diff_cat * w_myo).sum(dim=(2, 3), keepdim=True) / w_sum
+        scale = self.proto_scale.clamp(0.0, 1.5)
+        focal_diff = torch.relu(diff_cat - scale * proto_myo) * (0.5 + 0.5 * w_myo)
+        delta_proto = self.proto_branch(focal_diff)
+
+        return base + self.gamma * delta_s3 + self.proto_gamma * delta_proto
+
+
 __all__ = [
     "ConcatFusion",
     "Fusion_Embed",
@@ -694,6 +756,7 @@ __all__ = [
     "MultiScaleNormalizedContrastSkipFusion",
     "AnatMeanMSNormalizedContrastSkipFusion",
     "CoherentAnatContrastSkipFusion",
+    "ResidualProtoNormalizedContrastSkipFusion",
     "MEAN_SKIP_FUSION",
     "MODALITY_WEIGHTED_SKIP_FUSION",
     "SPATIAL_RESIDUAL_SKIP_FUSION",
@@ -703,5 +766,6 @@ __all__ = [
     "NORM_CONTRAST_MS_SKIP_FUSION",
     "NORM_CONTRAST_ANAT_MEAN_MS_SKIP_FUSION",
     "NORM_CONTRAST_ANAT_COHERENT_SKIP_FUSION",
+    "NORM_CONTRAST_PROTO_SKIP_FUSION",
     "SKIP_FUSION_MODES",
 ]
