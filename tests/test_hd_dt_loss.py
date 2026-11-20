@@ -372,7 +372,8 @@ def test_karimi_qlog_empty_vals_and_intra_myo_far_fp():
     out_bf["loss"].backward()
     assert torch.isfinite(logits_bf.grad).all()
 
-    # intra_myo_far_fp_loss: background logit gradient must be 0.0 inside myocardium
+    # intra_myo_far_fp_loss: zero gradient outside myocardium (target == 0), strong gradient
+    # at far intra-myo AAR FP (>14 px), and boundary stability (no 1/p_ring explosion)
     logits_intra = logits.detach().clone().requires_grad_(True)
     crit_intra = SegmentationLoss(
         ce_weight=0.0, dice_weight=0.0, intra_myo_far_fp_weight=0.15,
@@ -381,20 +382,68 @@ def test_karimi_qlog_empty_vals_and_intra_myo_far_fp():
     out_intra = crit_intra(logits_intra, target)
     assert "intra_myo_far_fp_loss" in out_intra and out_intra["intra_myo_far_fp_loss"].item() > 0.0
     out_intra["loss"].backward()
+    # Strictly zero gradient on GT background (target == 0)
     torch.testing.assert_close(
-        logits_intra.grad[:, 0], torch.zeros_like(logits_intra.grad[:, 0]), atol=1e-6, rtol=0
+        logits_intra.grad[:, :, 0:6, 0:6],
+        torch.zeros_like(logits_intra.grad[:, :, 0:6, 0:6]),
+        atol=1e-7,
+        rtol=0,
     )
     assert logits_intra.grad[0, 2, 44:52, 44:52].abs().mean().item() > 0.0
-    # Zero gradient on GT background (target == 0) and within 8 px of GT AAR
-    assert logits_intra.grad[0, 2, 0:6, 0:6].abs().max().item() == 0.0
-    assert logits_intra.grad[0, 2, 20:24, 20:24].abs().max().item() == 0.0
+    # Nearby myocardium (within 14 px of GT AAR) gets zero AAR-far penalty on class 2
+    assert logits_intra.grad[0, 2, 20:24, 20:24].abs().max().item() < 1e-5
+    # Conditional ratio preservation inside target==1: p_0 and p_1 receive gradients strictly
+    # proportional to their softmax probabilities, preventing boundary spikes when p_ring is tiny
+    logits_edge = torch.full((1, 4, 32, 32), -8.0)
+    logits_edge[:, 0] = 4.0  # p_0 ~ 0.98
+    t_edge = torch.zeros(1, 32, 32, dtype=torch.long)
+    t_edge[0, 8:24, 8:24] = 1
+    t_edge[0, 10:14, 10:14] = 2
+    logits_edge[0, 1, 20:22, 20:22] = -3.0  # tiny p_1 ~ 0.001
+    logits_edge[0, 2, 20:22, 20:22] = 0.0   # p_2 ~ 0.018
+    logits_edge.requires_grad_(True)
+    crit_intra(logits_edge, t_edge)["loss"].backward()
+    assert logits_edge.grad[0, 2, 20:22, 20:22].abs().max().item() < 1e-4
+
+    # empty_slice_fp_weight: penalizes Scar FP inside GT Edema on empty-Scar slice
+    # while leaving positive-Scar slices untouched on empty_slice_fp_loss
+    t_empty = torch.zeros(2, 64, 64, dtype=torch.long)
+    t_empty[0, 8:56, 8:56] = 1
+    t_empty[0, 12:24, 12:24] = 2  # Case3003 z=2 pattern: GT Edema present, GT Scar == 0
+    t_empty[1, 8:56, 8:56] = 1
+    t_empty[1, 12:24, 12:24] = 3  # Slice 1 HAS GT Scar (never penalized by empty_slice_fp_loss)
+    log_empty = torch.full((2, 4, 64, 64), -3.0)
+    log_empty[:, 0] = 4.0
+    log_empty[0, 3, 12:24, 12:24] = 6.0  # False Scar inside GT Edema on empty-Scar slice
+    log_empty[1, 3, 40:48, 40:48] = 6.0  # False Scar on positive-Scar slice
+    log_empty.requires_grad_(True)
+    crit_empty = SegmentationLoss(
+        ce_weight=0.0, dice_weight=0.0, empty_slice_fp_weight=0.12,
+        negative_slice_handling="batch", include_background=True, dice_normalization="classes",
+    )
+    out_empty = crit_empty(log_empty, t_empty)
+    assert "empty_slice_fp_loss" in out_empty and out_empty["empty_slice_fp_loss"].item() > 0.0
+    out_empty["loss"].backward()
+    # Slice 0 empty Scar inside GT Edema gets pushed down on class 3 (stronger inside ring than outside)
+    assert log_empty.grad[0, 3, 12:24, 12:24].mean().item() > 1e-5
+    # Slice 1 (has_scar=True AND has_aar=True) gets strictly zero gradient from empty_slice_fp_loss
+    torch.testing.assert_close(
+        log_empty.grad[1],
+        torch.zeros_like(log_empty.grad[1]),
+        atol=1e-7,
+        rtol=0,
+    )
 
     with pytest.raises(ValueError, match="accum_steps=1"):
         SegmentationLoss(intra_myo_far_fp_weight=0.1).validate_accumulation(2)
+    with pytest.raises(ValueError, match="accum_steps=1"):
+        SegmentationLoss(empty_slice_fp_weight=0.1).validate_accumulation(2)
     with pytest.raises(ValueError, match="boundary_dt_empty_vals"):
         SegmentationLoss(boundary_dt_empty_vals=[1.5, -0.1, 2.0])
     with pytest.raises(ValueError, match="intra_myo_far_fp_weight"):
         SegmentationLoss(intra_myo_far_fp_weight=-0.2)
+    with pytest.raises(ValueError, match="empty_slice_fp_weight"):
+        SegmentationLoss(empty_slice_fp_weight=-0.2)
 
 
 

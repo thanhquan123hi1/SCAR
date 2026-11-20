@@ -122,6 +122,7 @@ def build_parser():
     parser.add_argument("--boundary-dt-myo-fp-alpha", type=float, default=0.0)
     parser.add_argument("--norm-myo-dt-weight", type=float, default=0.0)
     parser.add_argument("--intra-myo-far-fp-weight", type=float, default=0.0)
+    parser.add_argument("--empty-slice-fp-weight", type=float, default=0.0)
     parser.add_argument(
         "--dice-class-weights",
         nargs="+",
@@ -252,10 +253,10 @@ def parse_args(argv=None):
         parser.error("img_size must be a multiple of 16 and >=32")
     if args.base_lr <= 0 or args.weight_decay < 0 or (not args.no_val and not 0 < args.val_fraction < 1):
         parser.error("Require lr>0, weight_decay>=0, 0<val_fraction<1")
-    for key in ("base_lr", "weight_decay", "val_fraction", "min_delta", "clip_grad", "ce_weight", "dice_weight", "aar_weight", "scar_weight", "anat_contrast_weight", "hier_dice_weight", "ring_tversky_beta", "aar_tversky_beta", "boundary_dt_weight", "boundary_dt_power", "boundary_dt_scale", "boundary_dt_empty_val", "boundary_dt_margin", "boundary_dt_myo_fp_alpha", "norm_myo_dt_weight", "intra_myo_far_fp_weight"):
+    for key in ("base_lr", "weight_decay", "val_fraction", "min_delta", "clip_grad", "ce_weight", "dice_weight", "aar_weight", "scar_weight", "anat_contrast_weight", "hier_dice_weight", "ring_tversky_beta", "aar_tversky_beta", "boundary_dt_weight", "boundary_dt_power", "boundary_dt_scale", "boundary_dt_empty_val", "boundary_dt_margin", "boundary_dt_myo_fp_alpha", "norm_myo_dt_weight", "intra_myo_far_fp_weight", "empty_slice_fp_weight"):
         if not math.isfinite(getattr(args, key)):
             parser.error(f"{key} must be finite")
-    for key in ("num_workers", "patience", "min_delta", "save_every", "epochs_per_run", "clip_grad", "ce_weight", "dice_weight", "aar_weight", "scar_weight", "anat_contrast_weight", "hier_dice_weight", "boundary_dt_weight", "boundary_dt_empty_val", "boundary_dt_margin", "boundary_dt_myo_fp_alpha", "norm_myo_dt_weight", "intra_myo_far_fp_weight"):
+    for key in ("num_workers", "patience", "min_delta", "save_every", "epochs_per_run", "clip_grad", "ce_weight", "dice_weight", "aar_weight", "scar_weight", "anat_contrast_weight", "hier_dice_weight", "boundary_dt_weight", "boundary_dt_empty_val", "boundary_dt_margin", "boundary_dt_myo_fp_alpha", "norm_myo_dt_weight", "intra_myo_far_fp_weight", "empty_slice_fp_weight"):
         if getattr(args, key) < 0:
             parser.error(f"{key} must be nonnegative")
     if args.boundary_dt_power <= 0 or args.boundary_dt_scale <= 0 or args.boundary_dt_max_steps < 1:
@@ -308,6 +309,7 @@ def parse_args(argv=None):
             boundary_dt_myo_fp_alpha=args.boundary_dt_myo_fp_alpha,
             norm_myo_dt_weight=args.norm_myo_dt_weight,
             intra_myo_far_fp_weight=args.intra_myo_far_fp_weight,
+            empty_slice_fp_weight=args.empty_slice_fp_weight,
             pathology_reduction=args.pathology_reduction,
             negative_slice_handling=args.negative_slice_handling,
             masked_negative_slices=args.masked_negative_slices,

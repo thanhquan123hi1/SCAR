@@ -313,6 +313,7 @@ class SegmentationLoss(nn.Module):
         boundary_dt_myo_fp_alpha=0.0,
         norm_myo_dt_weight=0.0,
         intra_myo_far_fp_weight=0.0,
+        empty_slice_fp_weight=0.0,
         dice_class_weights=None,
         ce_class_weights=None,
         pathology_reduction="positive",
@@ -345,7 +346,8 @@ class SegmentationLoss(nn.Module):
                             ("boundary_dt_margin", boundary_dt_margin),
                             ("boundary_dt_myo_fp_alpha", boundary_dt_myo_fp_alpha),
                             ("norm_myo_dt_weight", norm_myo_dt_weight),
-                            ("intra_myo_far_fp_weight", intra_myo_far_fp_weight)):
+                            ("intra_myo_far_fp_weight", intra_myo_far_fp_weight),
+                            ("empty_slice_fp_weight", empty_slice_fp_weight)):
             if not math.isfinite(value) or value < 0:
                 raise ValueError(f"{name} must be finite and nonnegative")
         if boundary_dt_slice_weight > 1.0:
@@ -407,6 +409,7 @@ class SegmentationLoss(nn.Module):
         self.boundary_dt_myo_fp_alpha = float(boundary_dt_myo_fp_alpha)
         self.norm_myo_dt_weight = float(norm_myo_dt_weight)
         self.intra_myo_far_fp_weight = float(intra_myo_far_fp_weight)
+        self.empty_slice_fp_weight = float(empty_slice_fp_weight)
         self.dice_class_weights = dice_class_weights
         self.ce_class_weights = ce_class_weights
         self.masked_negative_slices = masked_negative_slices
@@ -429,6 +432,7 @@ class SegmentationLoss(nn.Module):
             or self.boundary_dt_weight > 0
             or self.norm_myo_dt_weight > 0
             or self.intra_myo_far_fp_weight > 0
+            or self.empty_slice_fp_weight > 0
         ):
             raise ValueError("Batch-level hierarchical/distance losses require accum_steps=1")
         if (accum_steps > 1 and self.pathology_reduction == "positive"
@@ -528,6 +532,7 @@ class SegmentationLoss(nn.Module):
             or self.boundary_dt_weight > 0.0
             or self.norm_myo_dt_weight > 0.0
             or self.intra_myo_far_fp_weight > 0.0
+            or self.empty_slice_fp_weight > 0.0
         ):
             probs = logits.float().softmax(1)
             # Compute positive and complementary negative region probabilities directly
@@ -776,17 +781,20 @@ class SegmentationLoss(nn.Module):
         if self.intra_myo_far_fp_weight > 0.0:
             y_myo_m = (target == 1).float().unsqueeze(1)
             y_aar_m = ((target == 2) | (target == 3)).float().unsqueeze(1)
+            y_scar_m = (target == 3).float().unsqueeze(1)
             pred_cls_m = logits.detach().argmax(1)
             pred_myo_m = (pred_cls_m == 1).float().unsqueeze(1)
 
-            d_aar_64, has_aar_m = _octagonal_outside_dist(y_aar_m, max_steps=64)
+            d_64, has_64 = _octagonal_outside_dist(torch.cat((y_aar_m, y_scar_m), dim=1), max_steps=64)
+            d_aar_64, has_aar_m = d_64[:, 0:1], has_64[:, 0:1]
+            d_scar_64, has_scar_m = d_64[:, 1:2], has_64[:, 1:2]
             d_pr_myo, has_pr_myo = _octagonal_outside_dist(pred_myo_m, max_steps=32)
 
-            far_gate = torch.where(has_aar_m, (d_aar_64 > 8.0).float(), torch.ones_like(d_aar_64))
+            far_gate = torch.where(has_aar_m, (d_aar_64 > 14.0).float(), torch.ones_like(d_aar_64))
             w_far_aar = torch.where(
                 has_aar_m,
-                ((d_aar_64 - 8.0).clamp_min(0.0) / 20.0).square(),
-                torch.full_like(d_aar_64, 1.5),
+                ((d_aar_64 - 14.0).clamp_min(0.0) / 18.0).square(),
+                torch.full_like(d_aar_64, 2.0),
             )
             w_hole_myo = torch.where(
                 has_pr_myo,
@@ -794,17 +802,37 @@ class SegmentationLoss(nn.Module):
                 torch.ones_like(d_pr_myo),
             ) * far_gate
 
-            p_myo_m = probs[:, 1:2]
             p_aar_m = probs[:, 2:3] + probs[:, 3:4]
-            p_ring_m = (p_myo_m + p_aar_m).clamp_min(1e-4)
-            q_aar_in_ring = (p_aar_m / p_ring_m).clamp(0.0, 1.0 - 1e-4)
-            q_myo_in_ring = (p_myo_m / p_ring_m).clamp_min(1e-4)
-            qlog_intra = q_aar_in_ring * (-torch.log(q_myo_in_ring))
+            p_not_aar_m = (probs[:, 0:1] + probs[:, 1:2]).clamp_min(1e-4)
+            qlog_intra_aar = p_aar_m * (-torch.log(p_not_aar_m))
+            aar_far_loss = (y_myo_m * (w_far_aar + w_hole_myo) * qlog_intra_aar).sum() / (y_myo_m.sum() + 100.0)
 
-            myo_far_denom = y_myo_m.sum() + 100.0
-            intra_myo_far_fp_loss = (y_myo_m * (w_far_aar + w_hole_myo) * qlog_intra).sum() / myo_far_denom
+            y_non_scar_ring = ((target == 1) | (target == 2)).float().unsqueeze(1)
+            w_far_scar = torch.where(
+                has_scar_m,
+                ((d_scar_64 - 14.0).clamp_min(0.0) / 18.0).square(),
+                torch.full_like(d_scar_64, 2.5),
+            )
+            p_scar_m = probs[:, 3:4]
+            p_not_scar_m = (probs[:, 0:1] + probs[:, 1:2] + probs[:, 2:3]).clamp_min(1e-4)
+            qlog_intra_scar = p_scar_m * (-torch.log(p_not_scar_m))
+            scar_far_loss = (y_non_scar_ring * w_far_scar * qlog_intra_scar).sum() / (y_non_scar_ring.sum() + 100.0)
+
+            intra_myo_far_fp_loss = 0.65 * aar_far_loss + 0.35 * scar_far_loss
         else:
             intra_myo_far_fp_loss = torch.tensor(0.0, device=logits.device, dtype=torch.float32)
+
+        if self.empty_slice_fp_weight > 0.0:
+            has_fg_e = (y_pos.sum(dim=(2, 3)) > 0)
+            is_empty_e = (~has_fg_e[:, 1:]).float()
+            ring_boost_e = 1.0 + 2.0 * y_pos[:, 0:1]
+            fp_qlog_e = p_pos[:, 1:] * (-torch.log(p_neg[:, 1:].clamp(min=1e-4)))
+            slice_ring_denom = y_pos[:, 0:1].sum(dim=(2, 3)) + p_pos[:, 1:].detach().sum(dim=(2, 3)) + 200.0
+            slice_empty_err = (ring_boost_e * fp_qlog_e).sum(dim=(2, 3)) / slice_ring_denom
+            per_reg_empty = (slice_empty_err * is_empty_e).sum(dim=0) / (is_empty_e.sum(dim=0) + 1.0)
+            empty_slice_fp_loss = 0.35 * per_reg_empty[0] + 0.65 * per_reg_empty[1]
+        else:
+            empty_slice_fp_loss = torch.tensor(0.0, device=logits.device, dtype=torch.float32)
 
         total_loss = (
             self.ce_weight * ce
@@ -817,6 +845,7 @@ class SegmentationLoss(nn.Module):
             + self.boundary_dt_weight * boundary_dt_loss
             + self.norm_myo_dt_weight * norm_myo_dt_loss
             + self.intra_myo_far_fp_weight * intra_myo_far_fp_loss
+            + self.empty_slice_fp_weight * empty_slice_fp_loss
         )
         result = {
             "loss": total_loss,
@@ -833,6 +862,8 @@ class SegmentationLoss(nn.Module):
             result["norm_myo_dt_loss"] = norm_myo_dt_loss
         if self.intra_myo_far_fp_weight > 0.0:
             result["intra_myo_far_fp_loss"] = intra_myo_far_fp_loss
+        if self.empty_slice_fp_weight > 0.0:
+            result["empty_slice_fp_loss"] = empty_slice_fp_loss
         return result
 
 

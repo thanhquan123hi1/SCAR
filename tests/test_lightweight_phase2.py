@@ -253,6 +253,9 @@ def test_phase2_pretrained_loads_and_exact_param_prints():
         "lightweight_e5_b1r_s3_l14_qlog_karimi",
         "lightweight_e5_b1r_s3_l15_intraring_farmyo_karimi",
         "lightweight_e5_b1r_proto_s3_l15_qlog",
+        "lightweight_e5_b1r_proto_s3_l14_emptyslice_qlog",
+        "lightweight_e5_b1r_proto_s3_l16_clean_farmyo_qlog",
+        "lightweight_e5_b1r_s3_l16_clean_farmyo_qlog",
     ],
 )
 def test_wave6_configs_step0_equivalence_and_zero_input(cfg_name):
