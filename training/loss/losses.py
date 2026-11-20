@@ -225,7 +225,7 @@ class DiceLoss(nn.Module):
                             normalization=self.normalization)
 
 
-BOUNDARY_DT_MODES = ("sym_bce", "karimi_mse", "karimi_qlog", "fp_bce", "hybrid_karimi_farfp")
+BOUNDARY_DT_MODES = ("sym_bce", "karimi_mse", "karimi_qlog", "karimi_fp_qlog", "fp_bce", "hybrid_karimi_farfp")
 
 
 def _octagonal_outside_dist(
@@ -632,7 +632,8 @@ class SegmentationLoss(nn.Module):
                 scale_6 = self.boundary_dt_scale
             if self.boundary_dt_empty_vals is not None:
                 empty_3 = torch.tensor(self.boundary_dt_empty_vals, device=logits.device, dtype=torch.float32).view(1, 3, 1, 1)
-                empty_6 = torch.cat((empty_3, empty_3), dim=1)
+                empty_pr_3 = torch.full_like(empty_3, self.boundary_dt_empty_val)
+                empty_6 = torch.cat((empty_3, empty_pr_3), dim=1)
             else:
                 empty_3 = self.boundary_dt_empty_val
                 empty_6 = self.boundary_dt_empty_val
@@ -733,10 +734,13 @@ class SegmentationLoss(nn.Module):
                     fp_err = (-torch.log(p_neg.clamp(min=1e-6))).clamp(max=10.0)
                     fn_err = (-torch.log(p_pos.clamp(min=1e-6))).clamp(max=10.0)
                     per_reg = (w_gt * y_neg * fp_err + w_pr * y_pos * fn_err).sum(dim=(0, 2, 3)) / fg_denom
-                else:  # karimi_mse or karimi_qlog
+                else:  # karimi_mse, karimi_qlog, or karimi_fp_qlog
                     if self.boundary_dt_mode == "karimi_qlog":
                         fp_term = p_pos * (-torch.log(p_neg.clamp(min=1e-4)))
                         fn_term = p_neg * (-torch.log(p_pos.clamp(min=1e-4)))
+                    elif self.boundary_dt_mode == "karimi_fp_qlog":
+                        fp_term = p_pos * (-torch.log(p_neg.clamp(min=1e-4)))
+                        fn_term = p_neg.square()
                     else:
                         fp_term = p_pos.square()
                         fn_term = p_neg.square()
@@ -780,6 +784,7 @@ class SegmentationLoss(nn.Module):
 
         if self.intra_myo_far_fp_weight > 0.0:
             y_myo_m = (target == 1).float().unsqueeze(1)
+            y_edema_m = (target == 2).float().unsqueeze(1)
             y_aar_m = ((target == 2) | (target == 3)).float().unsqueeze(1)
             y_scar_m = (target == 3).float().unsqueeze(1)
             pred_cls_m = logits.detach().argmax(1)
@@ -790,11 +795,11 @@ class SegmentationLoss(nn.Module):
             d_scar_64, has_scar_m = d_64[:, 1:2], has_64[:, 1:2]
             d_pr_myo, has_pr_myo = _octagonal_outside_dist(pred_myo_m, max_steps=32)
 
-            far_gate = torch.where(has_aar_m, (d_aar_64 > 14.0).float(), torch.ones_like(d_aar_64))
+            far_gate = torch.where(has_aar_m, (d_aar_64 > 8.0).float(), torch.ones_like(d_aar_64))
             w_far_aar = torch.where(
                 has_aar_m,
-                ((d_aar_64 - 14.0).clamp_min(0.0) / 18.0).square(),
-                torch.full_like(d_aar_64, 2.0),
+                ((d_aar_64 - 8.0).clamp_min(0.0) / 20.0).square(),
+                torch.full_like(d_aar_64, 1.5),
             )
             w_hole_myo = torch.where(
                 has_pr_myo,
@@ -802,23 +807,49 @@ class SegmentationLoss(nn.Module):
                 torch.ones_like(d_pr_myo),
             ) * far_gate
 
-            p_aar_m = probs[:, 2:3] + probs[:, 3:4]
-            p_not_aar_m = (probs[:, 0:1] + probs[:, 1:2]).clamp_min(1e-4)
-            qlog_intra_aar = p_aar_m * (-torch.log(p_not_aar_m))
+            p_myo_m = probs[:, 1:2]
+            p_edema_m = probs[:, 2:3]
+            p_scar_m = probs[:, 3:4]
+            p_aar_m = p_edema_m + p_scar_m
+            p_ring_m = (p_myo_m + p_aar_m).clamp_min(1e-4)
+            p_ring_det = (p_myo_m + p_aar_m).detach()
+
+            q_aar_in_ring = (p_aar_m / p_ring_m).clamp(0.0, 1.0 - 1e-4)
+            q_myo_in_ring = (p_myo_m / p_ring_m).clamp_min(1e-4)
+            qlog_intra_aar = p_ring_det * q_aar_in_ring * (-torch.log(q_myo_in_ring))
             aar_far_loss = (y_myo_m * (w_far_aar + w_hole_myo) * qlog_intra_aar).sum() / (y_myo_m.sum() + 100.0)
 
-            y_non_scar_ring = ((target == 1) | (target == 2)).float().unsqueeze(1)
-            w_far_scar = torch.where(
+            p_aar_safe = p_aar_m.clamp_min(1e-4)
+            p_aar_det = p_aar_m.detach()
+            q_scar_in_aar = (p_scar_m / p_aar_safe).clamp(0.0, 1.0 - 1e-4)
+            q_edema_in_aar = (p_edema_m / p_aar_safe).clamp_min(1e-4)
+            qlog_scar_in_ede = p_aar_det * q_scar_in_aar * (-torch.log(q_edema_in_aar))
+
+            q_scar_in_ring = (p_scar_m / p_ring_m).clamp(0.0, 1.0 - 1e-4)
+            q_non_scar_in_ring = ((p_myo_m + p_edema_m) / p_ring_m).clamp_min(1e-4)
+            qlog_scar_in_myo = p_ring_det * q_scar_in_ring * (-torch.log(q_non_scar_in_ring))
+
+            w_far_scar_ede = torch.where(
                 has_scar_m,
-                ((d_scar_64 - 14.0).clamp_min(0.0) / 18.0).square(),
+                ((d_scar_64 - 4.0).clamp_min(0.0) / 14.0).square(),
                 torch.full_like(d_scar_64, 2.5),
             )
-            p_scar_m = probs[:, 3:4]
-            p_not_scar_m = (probs[:, 0:1] + probs[:, 1:2] + probs[:, 2:3]).clamp_min(1e-4)
-            qlog_intra_scar = p_scar_m * (-torch.log(p_not_scar_m))
-            scar_far_loss = (y_non_scar_ring * w_far_scar * qlog_intra_scar).sum() / (y_non_scar_ring.sum() + 100.0)
+            w_far_scar_myo = torch.where(
+                has_scar_m,
+                ((d_scar_64 - 8.0).clamp_min(0.0) / 16.0).square(),
+                torch.full_like(d_scar_64, 2.5),
+            )
+            scar_pixel_err = y_edema_m * w_far_scar_ede * qlog_scar_in_ede + y_myo_m * w_far_scar_myo * qlog_scar_in_myo
+            y_non_scar_ring = y_myo_m + y_edema_m
+            scar_far_batch = scar_pixel_err.sum() / (y_non_scar_ring.sum() + 100.0)
 
-            intra_myo_far_fp_loss = 0.65 * aar_far_loss + 0.35 * scar_far_loss
+            empty_scar_s = (~has_scar_m).float()
+            empty_scar_err = (
+                (y_edema_m * qlog_scar_in_ede + y_myo_m * qlog_scar_in_myo) * empty_scar_s
+            ).sum(dim=(1, 2, 3)) / (y_non_scar_ring.sum(dim=(1, 2, 3)) + 100.0)
+            empty_scar_slice_loss = empty_scar_err.sum() / (empty_scar_s.sum() + 1.0)
+
+            intra_myo_far_fp_loss = aar_far_loss + 0.35 * scar_far_batch + 0.50 * empty_scar_slice_loss
         else:
             intra_myo_far_fp_loss = torch.tensor(0.0, device=logits.device, dtype=torch.float32)
 

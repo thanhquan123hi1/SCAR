@@ -39,6 +39,7 @@ from training.models.modules.fusion import (
     MultiScaleNormalizedContrastSkipFusion,
     AnatMeanMSNormalizedContrastSkipFusion,
     CoherentAnatContrastSkipFusion,
+    ResidualProtoNormalizedContrastSkipFusion,
     MEAN_SKIP_FUSION,
     MODALITY_WEIGHTED_SKIP_FUSION,
     SPATIAL_RESIDUAL_SKIP_FUSION,
@@ -48,6 +49,7 @@ from training.models.modules.fusion import (
     NORM_CONTRAST_MS_SKIP_FUSION,
     NORM_CONTRAST_ANAT_MEAN_MS_SKIP_FUSION,
     NORM_CONTRAST_ANAT_COHERENT_SKIP_FUSION,
+    NORM_CONTRAST_PROTO_SKIP_FUSION,
     SKIP_FUSION_MODES,
 )
 from training.models.modules.m2_plus import (
@@ -631,6 +633,7 @@ class LightweightM2PlusNet(M2PlusNet):
             NORM_CONTRAST_MS_SKIP_FUSION: MultiScaleNormalizedContrastSkipFusion,
             NORM_CONTRAST_ANAT_MEAN_MS_SKIP_FUSION: AnatMeanMSNormalizedContrastSkipFusion,
             NORM_CONTRAST_ANAT_COHERENT_SKIP_FUSION: CoherentAnatContrastSkipFusion,
+            NORM_CONTRAST_PROTO_SKIP_FUSION: ResidualProtoNormalizedContrastSkipFusion,
         }
         if self.skip_fusion_mode == MODALITY_WEIGHTED_SKIP_FUSION:
             self.skip_fusions = nn.ModuleList(
